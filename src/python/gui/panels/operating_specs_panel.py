@@ -27,6 +27,10 @@ _FRACTION = _PURITY | {
     SpecKind.DF_RATIO, SpecKind.BF_RATIO,
 }
 
+# Duty specs are entered in kW and can be negative (a condenser removes heat).
+# Stored/emitted in kW; main_window converts to the solver's kJ/h basis.
+_DUTY = {SpecKind.CONDENSER_DUTY, SpecKind.REBOILER_DUTY}
+
 
 class OperatingSpecsPanel(QWidget):
     """Variable-length list of operating specs; DoF count enforced upstream."""
@@ -96,10 +100,16 @@ class OperatingSpecsPanel(QWidget):
         self._emit()
 
     def _apply_value_range(self, row):
-        """Fractions clamp to [0, 1]; ratios/rates are non-negative."""
+        """Fractions clamp to [0, 1]; duties are signed kW; the rest are
+        non-negative ratios/rates."""
         kind = self.table.cellWidget(row, 0).currentData()
         spin = self.table.cellWidget(row, 1)
-        spin.setRange(0.0, 1.0 if kind in _FRACTION else 1e9)
+        if kind in _FRACTION:
+            spin.setRange(0.0, 1.0); spin.setSuffix("")
+        elif kind in _DUTY:
+            spin.setRange(-1e9, 1e9); spin.setSuffix(" kW")
+        else:
+            spin.setRange(0.0, 1e9); spin.setSuffix("")
 
     def _sync_component_enabled(self, row):
         """A component choice only matters for the purity specs."""

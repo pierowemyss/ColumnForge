@@ -9,20 +9,36 @@ Author: Piero Wemyss
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QTableWidget, QTableWidgetItem, QPushButton, QGroupBox, QStackedWidget
+    QTableWidget, QTableWidgetItem, QPushButton, QGroupBox, QStackedWidget,
+    QCheckBox
 )
 from PySide6.QtCore import Signal
 
 from gui.panels.sub_tab_bar import SubTabBar
 from gui.panels.species_properties_panel import SpeciesPropertiesPanel
-from gui.state.window_state import Species
+from gui.state.window_state import Species, ThermodynamicsConfig
+
+IMPLEMENTED_VLE = ThermodynamicsConfig.IMPLEMENTED_VLE
+IMPLEMENTED_ACTIVITY = ThermodynamicsConfig.IMPLEMENTED_ACTIVITY
+IMPLEMENTED_EOS = ThermodynamicsConfig.IMPLEMENTED_EOS
+
+
+def _grey_unimplemented(combo, implemented):
+    """Disable (grey out) combo entries whose model isn't wired to a solver,
+    so entered parameters are never silently ignored."""
+    model = combo.model()
+    for i in range(combo.count()):
+        item = model.item(i)
+        ok = combo.itemText(i) in implemented
+        item.setEnabled(ok)
+        if not ok:
+            item.setToolTip("Not yet implemented")
 
 
 class InitializationTab(QWidget):
     """Initialization tab with Thermodynamics and Chemical Species sub-tabs."""
 
     speciesChanged = Signal()
-    thermodynamicsChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,13 +97,16 @@ class InitializationTab(QWidget):
 
         self.vle_combo = QComboBox(self)
         self.vle_combo.addItems(["Antoine", "Wagner", "PLXANT", "Ideal"])
+        _grey_unimplemented(self.vle_combo, IMPLEMENTED_VLE)
         self.vle_combo.currentTextChanged.connect(self._on_thermo_changed)
         model_layout.addWidget(QLabel("Vapor Pressure:"))
         model_layout.addWidget(self.vle_combo)
         model_layout.addSpacing(20)
 
         self.activity_combo = QComboBox(self)
-        self.activity_combo.addItems(["Ideal", "NRTL", "UNIQUAC", "Wilson", "Margules"])
+        self.activity_combo.addItems(["Ideal", "NRTL", "UNIQUAC", "Wilson",
+                                      "Margules", "UNIFAC"])
+        _grey_unimplemented(self.activity_combo, IMPLEMENTED_ACTIVITY)
         self.activity_combo.currentTextChanged.connect(self._on_thermo_changed)
         model_layout.addWidget(QLabel("Activity Coefficient:"))
         model_layout.addWidget(self.activity_combo)
@@ -95,11 +114,27 @@ class InitializationTab(QWidget):
 
         self.eos_combo = QComboBox(self)
         self.eos_combo.addItems(["Ideal Gas", "SRK", "PR", "BWRS"])
+        _grey_unimplemented(self.eos_combo, IMPLEMENTED_EOS)
         self.eos_combo.currentTextChanged.connect(self._on_thermo_changed)
         model_layout.addWidget(QLabel("Equation of State:"))
         model_layout.addWidget(self.eos_combo)
 
         layout.addWidget(model_group)
+
+        # Flow model: CMO vs a real stage energy balance (Inside-Out only).
+        flow_group = QGroupBox("Flow Model")
+        flow_layout = QHBoxLayout(flow_group)
+        self.energy_balance_check = QCheckBox(
+            "Rigorous energy balance (Inside-Out) — real duties, non-constant "
+            "molar overflow", self)
+        self.energy_balance_check.setToolTip(
+            "Off = constant molar overflow (CMO). On = per-stage enthalpy "
+            "balance; needs Cp, Tb, latent heat and Tc for every component "
+            "(the component DB supplies them). The Wang-Henke Bubble-Point "
+            "path always uses CMO.")
+        self.energy_balance_check.toggled.connect(self._on_thermo_changed)
+        flow_layout.addWidget(self.energy_balance_check)
+        layout.addWidget(flow_group)
 
         # 2. Parameter Entry Context Selection
         context_group = QGroupBox("Parameter Entry Context")
@@ -108,12 +143,21 @@ class InitializationTab(QWidget):
         context_layout.addWidget(QLabel("Type:"))
         self.param_type_combo = QComboBox(self)
         self.param_type_combo.addItems(["Vapor Pressure", "Activity", "EOS"])
+        # Honesty policy: if no EOS beyond Ideal Gas is implemented, Tc/Pc/ω
+        # would be entered and silently ignored — grey the context out.
+        # (SRK is implemented, so this gate is currently open.)
+        if len(IMPLEMENTED_EOS) <= 1:
+            eos_item = self.param_type_combo.model().item(2)
+            eos_item.setEnabled(False)
+            eos_item.setToolTip("No EOS implemented yet — Tc/Pc/ω would "
+                                "not be consumed.")
         self.param_type_combo.currentTextChanged.connect(self._update_param_models)
         context_layout.addWidget(self.param_type_combo)
 
         context_layout.addWidget(QLabel("Model:"))
         self.param_model_combo = QComboBox(self)
         self.param_model_combo.currentTextChanged.connect(self._update_parameter_visibility)
+        self.param_model_combo.currentTextChanged.connect(self._sync_active_model)
         context_layout.addWidget(self.param_model_combo)
 
         context_layout.addStretch()
@@ -149,6 +193,23 @@ class InitializationTab(QWidget):
         layout.addStretch()
         return page
 
+    def _sync_active_model(self, model: str):
+        """Picking a model in the Parameter-Entry context also activates it.
+
+        Without this the user edits (say) PLXANT coefficients while the active
+        vle_model is still the default Antoine, and every solver/auto-saturate
+        silently runs the wrong (often placeholder) Antoine params. The top
+        Simulation-Models combos stay the single source of truth; setting one
+        here persists via _on_thermo_changed.
+        """
+        if not model:
+            return
+        ptype = self.param_type_combo.currentText()
+        if ptype == "Vapor Pressure" and model in IMPLEMENTED_VLE:
+            self.vle_combo.setCurrentText(model)
+        elif ptype == "Activity" and model in IMPLEMENTED_ACTIVITY:
+            self.activity_combo.setCurrentText(model)
+
     def _update_param_models(self):
         """Update the Model dropdown based on the selected Type."""
         param_type = self.param_type_combo.currentText()
@@ -158,9 +219,11 @@ class InitializationTab(QWidget):
         if param_type == "Vapor Pressure":
             self.param_model_combo.setEnabled(True)
             self.param_model_combo.addItems(["Antoine", "Wagner", "PLXANT"])
+            _grey_unimplemented(self.param_model_combo, IMPLEMENTED_VLE)
         elif param_type == "Activity":
             self.param_model_combo.setEnabled(True)
             self.param_model_combo.addItems(["NRTL", "UNIQUAC", "Wilson", "Margules"])
+            _grey_unimplemented(self.param_model_combo, IMPLEMENTED_ACTIVITY)
         elif param_type == "EOS":
             self.param_model_combo.setEnabled(False)
             self.param_model_combo.addItem("(Uses Tc, Pc, ω)")
@@ -207,11 +270,14 @@ class InitializationTab(QWidget):
                 self.table_selection_combo.addItems(["aij", "bij", "cij"])
                 has_multiple_binary_tables = True
             elif param_model == "UNIQUAC":
+                self.table_selection_combo.addItems(["aij", "bij", "r/q"])
+                has_multiple_binary_tables = True
+            elif param_model == "Wilson":
                 self.table_selection_combo.addItems(["aij", "bij"])
                 has_multiple_binary_tables = True
-            elif param_model in ["Wilson", "Margules"]:
-                self.table_selection_combo.addItems(["aij", "bij"])
-                has_multiple_binary_tables = True
+            elif param_model == "Margules":
+                # two-suffix: one symmetric, T-independent A_ij table
+                self.table_selection_combo.addItems(["aij"])
             self._update_interaction_table_headers(is_binary, pure_params)
         elif is_eos:
             self._update_interaction_table_headers(False, ["Tc (K)", "Pc (bar)", "ω"])
@@ -224,7 +290,6 @@ class InitializationTab(QWidget):
             self._update_interaction_table_headers(is_binary, pure_params)
 
         self.load_interaction_parameters()   # repopulate cells from stored values
-        self.thermodynamicsChanged.emit()
 
     def _update_interaction_table_headers(self, is_binary=True, pure_params=None):
         """Update the table headers based on current species names and model type."""
@@ -259,8 +324,13 @@ class InitializationTab(QWidget):
         edits already persist via _on_table_cell_changed), so saving here would
         write them under the new table_type and clobber it.
         """
+        if self.param_type_combo.currentText() == "Activity":
+            # UNIQUAC's r/q is a pure-component table; everything else binary
+            if text == "r/q":
+                self._update_interaction_table_headers(False, ["r", "q"])
+            else:
+                self._update_interaction_table_headers(True, [])
         self.load_interaction_parameters()
-        self.thermodynamicsChanged.emit()
 
     def _on_table_cell_changed(self, row, col):
         """Handle change in table cell - save to window_state."""
@@ -287,11 +357,17 @@ class InitializationTab(QWidget):
         group_layout.addWidget(self.species_list)
 
         list_buttons = QHBoxLayout()
-        self.add_species_btn = QPushButton("Add")
-        self.add_species_btn.clicked.connect(self._add_species)
+        self.add_species_btn = QPushButton("Add…")
+        self.add_species_btn.setToolTip("Search the bundled component database")
+        self.add_species_btn.clicked.connect(self._add_species_from_db)
+        self.add_blank_species_btn = QPushButton("Add Blank")
+        self.add_blank_species_btn.setToolTip(
+            "Add an empty species and enter properties manually")
+        self.add_blank_species_btn.clicked.connect(self._add_species)
         self.remove_species_btn = QPushButton("Delete")
         self.remove_species_btn.clicked.connect(self._remove_species)
         list_buttons.addWidget(self.add_species_btn)
+        list_buttons.addWidget(self.add_blank_species_btn)
         list_buttons.addWidget(self.remove_species_btn)
         group_layout.addLayout(list_buttons)
         
@@ -333,8 +409,9 @@ class InitializationTab(QWidget):
             self.window_state.thermodynamics_config.vle_model = self.vle_combo.currentText()
             self.window_state.thermodynamics_config.activity_model = self.activity_combo.currentText()
             self.window_state.thermodynamics_config.eos_model = self.eos_combo.currentText()
+            self.window_state.thermodynamics_config.energy_balance = \
+                self.energy_balance_check.isChecked()
             self.window_state.is_modified = True
-        self.thermodynamicsChanged.emit()
 
     def _on_species_selected(self):
         """Handle species selection from list."""
@@ -399,6 +476,32 @@ class InitializationTab(QWidget):
             self.species_list.insertRow(row)
             self.species_list.setItem(row, 0, QTableWidgetItem(name))
         self.species_list.blockSignals(False)
+
+    def _add_species_from_db(self):
+        """Add a species from the bundled component database (search dialog)."""
+        if not self.window_state:
+            return
+        from ..panels.species_search_dialog import SpeciesSearchDialog
+        from core import component_db
+
+        dlg = SpeciesSearchDialog(self, existing_names=self.get_species_names())
+        if not dlg.exec() or not dlg.selected_name:
+            return
+        info = component_db.load_into(self.window_state, dlg.selected_name)
+        self._refresh_species_list()
+        self.species_props.set_species_list(self.get_species_names())
+        self.species_props.select_species(info["record"]["name"])
+        self._update_parameter_visibility()
+        self.load_interaction_parameters()   # show any auto-filled NRTL pairs
+        self.speciesChanged.emit()
+        if info["missing_pairs"]:
+            from PySide6.QtWidgets import QMessageBox
+            pairs = ", ".join(f"{i}/{j}" for i, j in info["missing_pairs"])
+            QMessageBox.information(
+                self, "NRTL parameters missing",
+                f"No curated NRTL binary parameters for: {pairs}.\n"
+                "These pairs will be treated as ideal unless you enter "
+                "parameters in Thermodynamics → Binary Interactions.")
 
     def _add_species(self):
         """Add a new species."""
@@ -510,7 +613,16 @@ class InitializationTab(QWidget):
                 return
             
             binary = self.window_state.thermodynamics_config.binary
-            
+
+            if param_model == "UNIQUAC" and table_type == "r/q":
+                for i, name in enumerate(species):
+                    if i < len(params):
+                        cp = self.window_state.thermodynamics_config.get_component_params(name)
+                        cp.uniquac_r = params[i][0] if len(params[i]) > 0 else None
+                        cp.uniquac_q = params[i][1] if len(params[i]) > 1 else None
+                self.window_state.is_modified = True
+                return
+
             if param_model == "NRTL":
                 param_dict = getattr(binary, f"nrtl_{table_type}", {})
                 for i, name_i in enumerate(species):
@@ -542,6 +654,8 @@ class InitializationTab(QWidget):
                         binary.wilson_aij = param_dict
                     elif table_type == "bij":
                         binary.wilson_bij = param_dict
+                elif param_model == "Margules":
+                    binary.margules_aij = param_dict
         
         self.window_state.is_modified = True
 
@@ -584,10 +698,16 @@ class InitializationTab(QWidget):
                         put(r, c, getattr(p, k, None) if p else None)
             elif ptype == "Activity":
                 ttype = self.table_selection_combo.currentText()
-                d = thermo.get_binary_param_dict(pmodel, ttype)
-                for i, ni in enumerate(species):
-                    for j, nj in enumerate(species):
-                        put(i, j, d.get((ni, nj)))
+                if pmodel == "UNIQUAC" and ttype == "r/q":
+                    for r, name in enumerate(species):
+                        p = thermo.component_params.get(name)
+                        put(r, 0, getattr(p, "uniquac_r", None) if p else None)
+                        put(r, 1, getattr(p, "uniquac_q", None) if p else None)
+                else:
+                    d = thermo.get_binary_param_dict(pmodel, ttype)
+                    for i, ni in enumerate(species):
+                        for j, nj in enumerate(species):
+                            put(i, j, d.get((ni, nj)))
         finally:
             tbl.blockSignals(False)
 
@@ -616,6 +736,7 @@ class InitializationTab(QWidget):
         self.vle_combo.setCurrentText(thermo.vle_model)
         self.activity_combo.setCurrentText(thermo.activity_model)
         self.eos_combo.setCurrentText(thermo.eos_model)
+        self.energy_balance_check.setChecked(bool(thermo.energy_balance))
 
         # Point the parameter inspector at the loaded vapour-pressure model so its
         # coefficients are visible on load instead of a blank Antoine grid.

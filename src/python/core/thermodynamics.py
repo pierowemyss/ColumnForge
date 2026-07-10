@@ -10,6 +10,9 @@ are mmHg with T in degrees C). Swap these for an activity/EOS model later withou
 touching callers — the signatures are model-agnostic.
 """
 
+import math
+from functools import lru_cache
+
 import numpy as np
 from scipy.optimize import brentq
 
@@ -44,33 +47,106 @@ def plxant_psat(T, c, t_to_K=lambda T: T + 273.15):
     return np.exp(lnP)
 
 
-def k_values(T, P, antoine, gamma_fn=None, x=None):
-    """K-values. Ideal (Raoult) K_i = Psat_i(T)/P unless an activity model is
-    supplied: given gamma_fn and the liquid composition x, K_i = gamma_i(x,T)
-    Psat_i(T)/P. gamma_fn(x, T) -> (n,) activity coefficients (see nrtl_gamma_fn).
+def antoine_Tsat(P, abc):
+    """Invert vapour pressure for one component's boiling point at P — initial-T
+    guess only. 3-term Antoine: closed form. 7-term PLXANT: bracketed solve.
+    """
+    abc = np.asarray(abc, float)
+    if abc.shape[-1] == 7:
+        row = abc.reshape(1, 7)
+        return _solve_T(lambda T: float(plxant_psat(T, row)[0]) - P, -100.0, 500.0)
+    A, B, C = abc
+    return B / (A - np.log10(P)) - C
+
+
+# Gas constant (J/mol/K) for Clausius-Clapeyron latent heats.
+R_GAS = 8.314462618
+
+# Duties come out of the solvers as flow (kmol/h) x molar enthalpy (J/mol),
+# which is numerically kJ/h. Multiply by this to display in kW.
+KJH_TO_KW = 1.0 / 3600.0
+
+
+def latent_heat(T, antoine, t_to_K=lambda T: T + 273.15):
+    """Molar heat of vaporisation (J/mol) per component at temperature T, from
+    the Clausius-Clapeyron slope of the vapour-pressure fit:
+
+        lambda_i = R * T_K^2 * d ln(Psat_i)/dT
+
+    T is in the fit's temperature unit (bundled fits: degC); t_to_K converts to
+    Kelvin for the R*T^2 factor. antoine: (N,3) Antoine or (N,7) PLXANT.
+    """
+    antoine = np.asarray(antoine, float)
+    Tk = t_to_K(T)
+    if antoine.shape[1] == 7:
+        c = antoine
+        dlnP = (-c[:, 1] / (c[:, 2] + Tk) ** 2 + c[:, 3] + c[:, 4] / Tk
+                + c[:, 5] * c[:, 6] * Tk ** (c[:, 6] - 1.0))
+    else:
+        # log10 form: ln Psat = ln10 * (A - B/(T+C)); dT in the fit unit == dT in K
+        B, C = antoine[:, 1], antoine[:, 2]
+        dlnP = np.log(10.0) * B / (T + C) ** 2
+    return R_GAS * Tk ** 2 * dlnP
+
+
+def k_values(T, P, antoine, gamma_fn=None, x=None, phi_fn=None):
+    """K-values. Ideal (Raoult) K_i = Psat_i(T)/P; with an activity model,
+    K_i = gamma_i(x,T) Psat_i/P; with a vapour-phase EOS on top (gamma-phi):
+
+        K_i = gamma_i * Psat_i * phi_i^sat / (phi_i^V * P)
+
+    phi_fn(y, T, P) -> (n,) vapour-mixture fugacity coefficients (see
+    srk_phi_fn). phi^sat_i is pure-i vapour at (T, Psat_i); phi^V is evaluated
+    at the vapour in equilibrium with x, estimated as y ~ K_raoult*x normalised
+    (ponytail: one-shot estimate, no inner y-iteration — the outer solver loop
+    refines x/T anyway; Poynting factor neglected, fine below ~10 bar).
     """
     psat = antoine_psat(T, antoine)
-    if gamma_fn is None or x is None:
-        return psat / P
-    return np.asarray(gamma_fn(x, T), float) * psat / P
+    K = psat / P
+    if gamma_fn is not None and x is not None:
+        K = np.asarray(gamma_fn(x, T), float) * K
+    if phi_fn is not None and x is not None:
+        y = K * np.asarray(x, float)
+        s = y.sum()
+        y = y / s if s > 0.0 else np.full_like(K, 1.0 / len(K))
+        n = len(K)
+        phi_sat = np.array([phi_fn(np.eye(n)[i], T, psat[i])[i]
+                            for i in range(n)])
+        K = K * phi_sat / phi_fn(y, T, P)
+    return K
 
 
-def bubble_T(x, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None):
+def _solve_T(f, lo, hi):
+    """brentq, but widen the upper bound until the bracket straddles a root.
+    High boilers (e.g. glycols/carbonates) saturate above the nominal 500 unit
+    range, which otherwise trips 'f(a) and f(b) must have different signs'.
+    ponytail: only hi widens; lo=-100 keeps T+273 > 0 so PLXANT stays finite."""
+    flo = f(lo)
+    for _ in range(10):
+        if flo * f(hi) <= 0.0:
+            return brentq(f, lo, hi)
+        hi += 200.0
+    raise ValueError(f"no saturation temperature found below {hi:.0f}; check "
+                     "vapour-pressure coefficients and that P is in the Psat unit")
+
+
+def bubble_T(x, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None, phi_fn=None):
     """Bubble-point temperature: T such that sum_i K_i(T) x_i = 1.
 
-    lo/hi bracket the root (in the Antoine fit's temperature unit). Raises if the
-    bracket doesn't straddle the root — widen it for very high/low boilers.
-    gamma_fn (optional) makes the K-values non-ideal (activity model).
+    lo/hi bracket the root (in the Antoine fit's temperature unit); hi auto-widens
+    via _solve_T for very high boilers. gamma_fn/phi_fn (optional) make the
+    K-values non-ideal (activity model / vapour-phase EOS, see k_values).
     """
     x = np.asarray(x, float)
 
     def f(T):
-        return float(np.sum(k_values(T, P, antoine, gamma_fn, x) * x) - 1.0)
+        return float(np.sum(k_values(T, P, antoine, gamma_fn, x, phi_fn) * x)
+                     - 1.0)
 
-    return brentq(f, lo, hi)
+    return _solve_T(f, lo, hi)
 
 
-def dew_T(y, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None):
+def dew_T(y, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None, phi_fn=None):
     """Dew-point temperature: T such that sum_i y_i / K_i(T) = 1.
 
     ponytail: with an activity model, gamma is evaluated at the vapour composition
@@ -80,9 +156,10 @@ def dew_T(y, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None):
     y = np.asarray(y, float)
 
     def f(T):
-        return float(np.sum(y / k_values(T, P, antoine, gamma_fn, y)) - 1.0)
+        return float(np.sum(y / k_values(T, P, antoine, gamma_fn, y, phi_fn))
+                     - 1.0)
 
-    return brentq(f, lo, hi)
+    return _solve_T(f, lo, hi)
 
 
 def nrtl_gamma(x, tau, alpha):
@@ -111,6 +188,11 @@ def nrtl_gamma_fn(tau_a, tau_b, alpha, t_to_K=lambda T: T + 273.15):
     """Build a gamma_fn(x, T) closure for k_values/bubble_T, with the common
     temperature-dependent form tau_ij = a_ij + b_ij / T_K.
 
+    This is the HYSYS-modified NRTL form, matching src/native/nifco.f90's NRTL
+    subroutine (tau = a + b/T with T in K, G = exp(-alpha*tau), alpha the
+    non-randomness). A future compiled nifco NRTL/fugacity model is a drop-in
+    replacement for this closure — same (x, T) -> gamma signature.
+
     tau_a, tau_b, alpha are (n,n). t_to_K converts the temperature that the
     solver passes (the Antoine fit's unit) to Kelvin for the tau correlation.
     ponytail: default assumes the bundled fits' degrees-C unit; pass
@@ -125,6 +207,243 @@ def nrtl_gamma_fn(tau_a, tau_b, alpha, t_to_K=lambda T: T + 273.15):
         return nrtl_gamma(x, tau, alpha)
 
     return gamma_fn
+
+
+def wilson_gamma(x, Lam):
+    """Wilson activity coefficients for a multicomponent liquid.
+
+    x    (n,) liquid mole fractions
+    Lam  (n,n) Wilson Lambda_ij (Lam_ii = 1)
+    ln gamma_i = 1 - ln(S_i) - sum_k x_k Lam_ki / S_k,  S_i = sum_j x_j Lam_ij.
+    """
+    x = np.asarray(x, float)
+    Lam = np.asarray(Lam, float)
+    S = Lam @ x
+    ln_gamma = 1.0 - np.log(S) - (x / S) @ Lam
+    return np.exp(ln_gamma)
+
+
+def wilson_gamma_fn(a, b, t_to_K=lambda T: T + 273.15):
+    """gamma_fn(x, T) closure for Wilson with ln Lambda_ij = a_ij + b_ij/T_K
+    (the Aspen WILSON form; a_ii = b_ii = 0 gives Lambda_ii = 1)."""
+    a = np.asarray(a, float)
+    b = np.asarray(b, float)
+
+    def gamma_fn(x, T):
+        return wilson_gamma(x, np.exp(a + b / t_to_K(T)))
+
+    return gamma_fn
+
+
+def uniquac_gamma(x, r, q, tau, z=10.0):
+    """UNIQUAC activity coefficients (combinatorial + residual).
+
+    x (n,) mole fractions; r, q (n,) structural volume/area parameters;
+    tau (n,n) interaction terms (tau_ii = 1); z the coordination number (10).
+    Ratio forms (Phi_i/x_i = r_i / sum x r) keep the pure/zero-x limits exact.
+    """
+    x = np.asarray(x, float)
+    r = np.asarray(r, float)
+    q = np.asarray(q, float)
+    tau = np.asarray(tau, float)
+    xr = x @ r
+    xq = x @ q
+    phi_x = r / xr                       # Phi_i / x_i
+    theta_phi = (q / xq) / phi_x         # theta_i / Phi_i
+    l = 0.5 * z * (r - q) - (r - 1.0)
+    ln_gC = np.log(phi_x) + 0.5 * z * q * np.log(theta_phi) + l - phi_x * (x @ l)
+    theta = q * x / xq
+    S = theta @ tau                      # S_i = sum_j theta_j tau_ji
+    ln_gR = q * (1.0 - np.log(S) - tau @ (theta / S))
+    return np.exp(ln_gC + ln_gR)
+
+
+def uniquac_gamma_fn(r, q, a, b, t_to_K=lambda T: T + 273.15):
+    """gamma_fn(x, T) closure for UNIQUAC with tau_ij = exp(a_ij + b_ij/T_K)
+    (the Aspen UNIQ form; a_ii = b_ii = 0 gives tau_ii = 1)."""
+    r = np.asarray(r, float)
+    q = np.asarray(q, float)
+    a = np.asarray(a, float)
+    b = np.asarray(b, float)
+
+    def gamma_fn(x, T):
+        return uniquac_gamma(x, r, q, np.exp(a + b / t_to_K(T)))
+
+    return gamma_fn
+
+
+def margules_gamma(x, A):
+    """Two-suffix (one-constant) Margules, multicomponent regular-solution form:
+    G^E/RT = 1/2 sum_ij A_ij x_i x_j (A symmetric, A_ii = 0), so
+    ln gamma_i = sum_j A_ij x_j - G^E/RT. Binary limit: ln gamma_1 = A x_2**2."""
+    x = np.asarray(x, float)
+    A = np.asarray(A, float)
+    Ax = A @ x
+    return np.exp(Ax - 0.5 * (x @ Ax))
+
+
+def margules_gamma_fn(A):
+    """gamma_fn(x, T) closure for two-suffix Margules (A dimensionless,
+    temperature-independent — the teaching model)."""
+    A = np.asarray(A, float)
+    return lambda x, T: margules_gamma(x, A)
+
+
+# --- UNIFAC (group-contribution activity coefficients) --------------------
+# Classic UNIFAC-VLE. Combinatorial term is identical to UNIQUAC (with r/q
+# built from group counts); residual term is the group-activity sum. See
+# core/data/unifac_groups.json for the curated parameter DB.
+
+def _unifac_group_ln_gamma(nu_vec, Q, Psi):
+    """ln Gamma_k for every subgroup, given a group-count/weight vector.
+    nu_vec: (m,) group weights (mixture: sum_i x_i nu_i^k; pure: nu_i^k).
+    Q: (m,) subgroup areas. Psi: (m,m) interaction matrix exp(-a_mn/T)."""
+    Xg = nu_vec / nu_vec.sum()
+    QX = Q * Xg
+    theta = QX / QX.sum()
+    S = theta @ Psi                       # S_k = sum_m theta_m Psi_mk (also denom_m)
+    term2 = Psi @ (theta / S)             # sum_m Psi_km theta_m / S_m
+    return Q * (1.0 - np.log(S) - term2)
+
+
+def unifac_gamma(x, nu, R, Q, main_idx, a_mn, T_K):
+    """UNIFAC activity coefficients.
+    x: (n,) liquid mole fractions. nu: (n,m) subgroup counts per species.
+    R,Q: (m,) subgroup volume/area. main_idx: (m,) main-group index per subgroup.
+    a_mn: (g,g) main-group interaction energies [K]. Returns (n,) gamma."""
+    x = np.asarray(x, float)
+    x = np.clip(x, 1e-12, None)
+    x = x / x.sum()
+    nu = np.asarray(nu, float)
+
+    # Combinatorial (Staverman-Guggenheim), z = 10.
+    r = nu @ R
+    q = nu @ Q
+    phi = r * x / (r @ x)
+    theta = q * x / (q @ x)
+    l = 5.0 * (r - q) - (r - 1.0)
+    ln_c = np.log(phi / x) + 5.0 * q * np.log(theta / phi) + l - (phi / x) * (x @ l)
+
+    # Residual. Psi over subgroups via their main groups.
+    Psi = np.exp(-a_mn[np.ix_(main_idx, main_idx)] / T_K)
+    lnG_mix = _unifac_group_ln_gamma(x @ nu, Q, Psi)
+    ln_r = np.empty(len(x))
+    for i in range(len(x)):
+        lnG_pure = _unifac_group_ln_gamma(nu[i], Q, Psi)
+        ln_r[i] = float(nu[i] @ (lnG_mix - lnG_pure))
+
+    return np.exp(ln_c + ln_r)
+
+
+@lru_cache(maxsize=1)
+def load_unifac_db():
+    """Parsed core/data/unifac_groups.json (cached)."""
+    import json, os
+    with open(os.path.join(os.path.dirname(__file__), "data",
+                           "unifac_groups.json")) as fh:
+        return json.load(fh)
+
+
+def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15):
+    """gamma_fn(x, T) closure for UNIFAC. `species_groups` is a list (one per
+    component, same order as x) of {subgroup_name: count}. `db` is the parsed
+    unifac_groups.json. Raises if a species has no groups or names an unknown
+    subgroup — nothing entered is silently treated as ideal."""
+    sub = db["subgroups"]
+    inter = db["interactions"]
+
+    # Union of subgroups actually used, in a stable order.
+    used = []
+    for g in species_groups:
+        if not g:
+            raise ValueError("UNIFAC needs at least one group per component "
+                             "(Initialization → Species → UNIFAC Groups).")
+        for name in g:
+            if name not in sub:
+                raise ValueError(f"Unknown UNIFAC subgroup '{name}' — not in the "
+                                 "group DB (core/data/unifac_groups.json).")
+            if name not in used:
+                used.append(name)
+
+    R = np.array([sub[s][2] for s in used], float)
+    Q = np.array([sub[s][3] for s in used], float)
+    mains = [sub[s][1] for s in used]
+    main_names = sorted(set(mains))
+    gidx = {m: i for i, m in enumerate(main_names)}
+    main_idx = np.array([gidx[m] for m in mains], int)
+
+    g = len(main_names)
+    a_mn = np.zeros((g, g))
+    for mi in main_names:
+        row = inter.get(mi, {})
+        for mj, val in row.items():
+            if mj in gidx:
+                a_mn[gidx[mi], gidx[mj]] = val
+
+    nu = np.array([[grp.get(s, 0) for s in used] for grp in species_groups], float)
+
+    def gamma_fn(x, T):
+        return unifac_gamma(x, nu, R, Q, main_idx, a_mn, t_to_K(T))
+
+    return gamma_fn
+
+
+def srk_phi(y, T_K, P_Pa, tc, pc, omega):
+    """Soave-Redlich-Kwong vapour-mixture fugacity coefficients.
+
+    y     (n,) vapour mole fractions
+    T_K   temperature [K];  P_Pa pressure [Pa]
+    tc    (n,) critical temperatures [K]; pc (n,) critical pressures [Pa]
+    omega (n,) acentric factors
+
+    kij = 0 mixing (a_mix = (sum y_i sqrt(a_i))^2, b_mix = sum y_i b_i);
+    Z is the largest real root of Z^3 - Z^2 + (A-B-B^2)Z - AB = 0 (vapour).
+    ponytail: kij=0 is fine for hydrocarbon/hydrocarbon; add a kij matrix
+    argument if polar/light-gas pairs ever need it.
+    """
+    y = np.asarray(y, float)
+    tc = np.asarray(tc, float)
+    pc = np.asarray(pc, float)
+    w = np.asarray(omega, float)
+    m = 0.480 + 1.574 * w - 0.176 * w * w
+    alpha = (1.0 + m * (1.0 - np.sqrt(T_K / tc))) ** 2
+    ai = 0.42748 * (R_GAS * tc) ** 2 / pc * alpha
+    bi = 0.08664 * R_GAS * tc / pc
+    sa = np.sqrt(ai)
+    ysa = float(y @ sa)
+    bmix = float(y @ bi)
+    A = ysa ** 2 * P_Pa / (R_GAS * T_K) ** 2
+    B = bmix * P_Pa / (R_GAS * T_K)
+    roots = np.roots([1.0, -1.0, A - B - B * B, -A * B])
+    real = roots[np.abs(roots.imag) < 1e-9].real
+    real = real[real > B]
+    # No vapour-like root means no vapour exists at (T, P) — e.g. a bubble-T
+    # root-search probing far below the true bubble point, where the lone real
+    # root is liquid-like (Z ~ B). Using it would return phi ~ 1e-3 and forge a
+    # spurious low-T bubble root, so fall back to ideal gas: the correction is
+    # meaningless where there is no vapour. ponytail: Z<0.5 vapour test is fine
+    # for the sub-10-bar gamma-phi scope; Mathias pseudo-root extrapolation is
+    # the upgrade if high-pressure columns ever land.
+    if len(real) == 0 or (len(real) == 1 and real[0] < 0.5):
+        return np.ones_like(y)
+    Z = float(real.max())
+    lnphi = ((bi / bmix) * (Z - 1.0) - math.log(Z - B)
+             - (A / B) * (2.0 * sa / ysa - bi / bmix) * math.log(1.0 + B / Z))
+    return np.exp(lnphi)
+
+
+def srk_phi_fn(tc, pc, omega, t_to_K=lambda T: T + 273.15, p_to_Pa=133.322):
+    """phi_fn(y, T, P) closure for SRK (see k_values). tc in K, pc in bar,
+    omega dimensionless; T/P arrive in the Antoine fit's units and are
+    converted via t_to_K / p_to_Pa (default: degC and mmHg)."""
+    tc = np.asarray(tc, float)
+    pc_Pa = np.asarray(pc, float) * 1.0e5
+    omega = np.asarray(omega, float)
+
+    def phi_fn(y, T, P):
+        return srk_phi(y, t_to_K(T), P * p_to_Pa, tc, pc_Pa, omega)
+
+    return phi_fn
 
 
 def _demo():
@@ -152,6 +471,20 @@ def _demo():
     Td = dew_T(x, P, abc)
     assert Td > T, f"dew T {Td:.1f} should exceed bubble T {T:.1f}"
 
+    # High boiler whose bubble T exceeds the nominal hi=500 -> _solve_T must widen
+    # the bracket instead of raising brentq's "different signs". Antoine (mmHg):
+    high = np.array([(7.0, 3000.0, 200.0)])
+    Thi = bubble_T(np.array([1.0]), 760.0, high)
+    assert Thi > 500.0, f"expected widening past 500, got {Thi:.0f}"
+
+    # antoine_Tsat inverts the fit: benzene boils at ~80.1 degC at 760 mmHg
+    assert abs(antoine_Tsat(760.0, abc[0]) - 80.1) < 0.5
+
+    # Clausius-Clapeyron latent heat: benzene ~30.8 kJ/mol at its boiling point
+    lam = latent_heat(80.1, abc)
+    assert 28e3 < lam[0] < 33e3, f"benzene latent heat {lam[0]:.0f} J/mol"
+    assert lam[2] > lam[0], "heavier aromatic should have larger latent heat"
+
     # --- NRTL activity model ---------------------------------------------
     tau = np.array([[0.0, 1.0], [1.2, 0.0]])
     alpha = np.array([[0.0, 0.3], [0.3, 0.0]])
@@ -167,8 +500,110 @@ def _demo():
     K_ni = k_values(Tb, P, ab2, gfn, x2)
     K_id = k_values(Tb, P, ab2)
     assert K_ni[0] > K_id[0], "gamma>1 must raise the dilute component's K"
+
+    # --- Wilson ------------------------------------------------------------
+    Lam = np.array([[1.0, 0.5], [0.3, 1.0]])
+    assert abs(wilson_gamma([1.0, 0.0], Lam)[0] - 1.0) < 1e-12, "Wilson pure"
+    # binary infinite dilution: ln gamma1_inf = 1 - ln(Lam12) - Lam21
+    g1inf = wilson_gamma([0.0, 1.0], Lam)[0]
+    assert abs(np.log(g1inf) - (1.0 - np.log(0.5) - 0.3)) < 1e-12
+
+    # SVA 7e Table 12.1 ethanol(1)/water(2): a12=382.30, a21=955.45 cal/mol,
+    # V1=58.68, V2=18.07 cm3/mol; Lam_ij = (Vj/Vi) exp(-a_ij/(R T_K)) maps to
+    # the a + b/T_K closure as a = ln(Vj/Vi), b = -a_ij/R (R in cal/mol-K).
+    Rcal = 1.98721
+    aW = np.array([[0.0, np.log(18.07 / 58.68)], [np.log(58.68 / 18.07), 0.0]])
+    bW = np.array([[0.0, -382.30 / Rcal], [-955.45 / Rcal, 0.0]])
+    gW = wilson_gamma_fn(aW, bW)
+    etoh_h2o = np.array([(8.20417, 1642.89, 230.300),   # ethanol, mmHg/degC
+                         (8.07131, 1730.63, 233.426)])  # water
+    xs = np.linspace(0.02, 0.998, 245)
+    Ts = np.array([bubble_T(np.array([x, 1 - x]), 760.0, etoh_h2o, gamma_fn=gW)
+                   for x in xs])
+    k = int(np.argmin(Ts))
+    assert 0 < k < len(xs) - 1, "azeotrope must be interior"
+    assert abs(xs[k] - 0.894) < 0.03 and abs(Ts[k] - 78.15) < 0.5, (xs[k], Ts[k])
+
+    # --- UNIQUAC -----------------------------------------------------------
+    r_u = np.array([2.1055, 0.9200])   # ethanol, water
+    q_u = np.array([1.9720, 1.4000])
+    tau = np.array([[1.0, 0.8], [0.6, 1.0]])
+    assert abs(uniquac_gamma([1.0, 0.0], r_u, q_u, tau)[0] - 1.0) < 1e-12
+    assert abs(uniquac_gamma([0.0, 1.0], r_u, q_u, tau)[1] - 1.0) < 1e-12
+    # with r = q = 1 the combinatorial part vanishes and the residual reduces
+    # to Wilson with Lam_ij = tau_ji — a hand-checkable algebraic identity
+    ones = np.ones(2)
+    xu = np.array([0.3, 0.7])
+    assert np.allclose(uniquac_gamma(xu, ones, ones, tau),
+                       wilson_gamma(xu, tau.T), atol=1e-12)
+
+    # --- two-suffix Margules -------------------------------------------------
+    A_m = np.array([[0.0, 1.5], [1.5, 0.0]])
+    xm = np.array([0.25, 0.75])
+    gm = margules_gamma(xm, A_m)
+    assert abs(np.log(gm[0]) - 1.5 * 0.75 ** 2) < 1e-12, "ln g1 = A x2^2"
+    assert abs(np.log(gm[1]) - 1.5 * 0.25 ** 2) < 1e-12
+    assert abs(margules_gamma([0.0, 1.0], A_m)[1] - 1.0) < 1e-12
+
+    # --- SRK vapour-phase phi ------------------------------------------------
+    # propane / n-butane: Tc [K], Pc [bar], omega; Antoine mmHg/degC
+    tc_s = np.array([369.83, 425.12])
+    pc_s = np.array([42.48, 37.96])
+    om_s = np.array([0.152, 0.200])
+    c3c4 = np.array([(6.80398, 803.810, 246.99),    # propane
+                     (6.80896, 935.860, 238.73)])   # n-butane
+    pfn = srk_phi_fn(tc_s, pc_s, om_s)
+    yv = np.array([0.5, 0.5])
+    # low-pressure limit: phi -> 1
+    assert np.allclose(pfn(yv, 20.0, 7.6), 1.0, atol=2e-3), pfn(yv, 20.0, 7.6)
+    # subcritical vapour at 4 atm is denser than ideal: phi < 1, Z < 1
+    phi4 = pfn(yv, 20.0, 4.0 * 760.0)
+    assert np.all(phi4 < 1.0) and np.all(phi4 > 0.7), phi4
+    # heavier component departs more from ideality
+    assert phi4[1] < phi4[0], phi4
+    # pure-component saturation: phi_sat and phi_V cancel exactly in k_values,
+    # so the pure bubble point is unchanged by the phi correction
+    Tp_id = bubble_T(np.array([1.0, 0.0]), 760.0, c3c4)
+    Tp_srk = bubble_T(np.array([1.0, 0.0]), 760.0, c3c4, phi_fn=pfn)
+    assert abs(Tp_id - Tp_srk) < 1e-6, (Tp_id, Tp_srk)
+    # gamma-phi at 4 atm: the vapour-phase correction compresses the C3/C4
+    # relative volatility vs Raoult (classic direction of EOS non-ideality)
+    P4 = 4.0 * 760.0
+    x4 = np.array([0.5, 0.5])
+    T4 = bubble_T(x4, P4, c3c4, phi_fn=pfn)
+    K_id4 = k_values(T4, P4, c3c4)
+    K_sr4 = k_values(T4, P4, c3c4, None, x4, pfn)
+    a_id = K_id4[0] / K_id4[1]
+    a_sr = K_sr4[0] / K_sr4[1]
+    assert 1.0 < a_sr < a_id, (a_sr, a_id)
+
+    # --- UNIFAC --------------------------------------------------------------
+    import json, os
+    with open(os.path.join(os.path.dirname(__file__), "data",
+                           "unifac_groups.json")) as fh:
+        udb = json.load(fh)
+    # n-hexane / n-heptane: same groups -> residual 0; only the small (real)
+    # combinatorial size term remains, so gamma sits just below 1
+    ufn_hh = unifac_gamma_fn([{"CH3": 2, "CH2": 4}, {"CH3": 2, "CH2": 5}], udb)
+    assert np.allclose(ufn_hh([0.4, 0.6], 60.0), 1.0, atol=1e-2), ufn_hh([0.4, 0.6], 60.0)
+    # pure species: gamma = 1 exactly
+    assert abs(ufn_hh([1.0, 0.0], 60.0)[0] - 1.0) < 1e-9
+    # ethanol / water: strong positive deviation; gamma_EtOH^inf in the 3-8 band
+    ufn_ew = unifac_gamma_fn([{"CH3": 1, "CH2": 1, "OH": 1}, {"H2O": 1}], udb)
+    g_inf = ufn_ew([1e-6, 1 - 1e-6], 70.0)[0]
+    assert 3.0 < g_inf < 8.0, g_inf
+    # UNIFAC predicts the EtOH/water azeotrope near x_EtOH ~ 0.9
+    xg = np.linspace(0.02, 0.998, 245)
+    Tg = np.array([bubble_T(np.array([x, 1 - x]), 760.0, etoh_h2o, gamma_fn=ufn_ew)
+                   for x in xg])
+    kg = int(np.argmin(Tg))
+    assert 0 < kg < len(xg) - 1 and abs(xg[kg] - 0.90) < 0.06, (xg[kg], Tg[kg])
+
     print(f"thermodynamics self-check OK (mix bubble T = {T:.1f} degC; "
-          f"NRTL gamma_inf = {g_dilute[0]:.2f})")
+          f"NRTL gamma_inf = {g_dilute[0]:.2f}; Wilson EtOH/H2O azeotrope "
+          f"x={xs[k]:.3f} @ {Ts[k]:.2f} degC; SRK C3/C4 alpha "
+          f"{a_id:.3f} -> {a_sr:.3f} @ 4 atm; UNIFAC EtOH/H2O gamma_inf "
+          f"{g_inf:.2f}, azeotrope x={xg[kg]:.3f})")
 
 
 if __name__ == "__main__":

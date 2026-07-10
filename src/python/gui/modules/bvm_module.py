@@ -13,14 +13,19 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFormLayout, QGroupBox, QLabel,
-    QComboBox, QDoubleSpinBox, QCheckBox, QPushButton,
+    QComboBox, QDoubleSpinBox, QCheckBox, QPushButton, QTableWidget,
+    QTableWidgetItem,
 )
-from PySide6.QtCore import Qt
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvas
 
 from ..state.window_state import StreamType
+from ..plotting import (
+    CompactNavigationToolbar, ternary_axes,
+    RECT_C as _RECT_C, STRIP_C as _STRIP_C, EXTRACT_C as _EXTRACT_C,
+    TEMP_C as _TEMP_C,
+)
 
 # ponytail: load the BVM solver by file path. It now lives under src/side_features/bvm
 # (alongside freeRCM), which isn't on sys.path by default, so a file-path load is the
@@ -35,10 +40,6 @@ _solver = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_solver)
 bound_val_method = _solver.bound_val_method
 build_column_profile = _solver.build_column_profile
-
-# Section curve colours (match the original .m: rectifying teal, stripping orange).
-_RECT_C = "#218fa7"
-_STRIP_C = "#fb8500"
 
 
 class BVMModuleWidget(QWidget):
@@ -142,10 +143,20 @@ class BVMModuleWidget(QWidget):
 
         layout.addWidget(left)
 
-        # --- right: plot ------------------------------------------------------
+        # --- right: plot + data table (same conventions as the Results tab) ---
+        right = QWidget()
+        right_col = QVBoxLayout(right)
         self.figure = Figure(figsize=(5, 4))
         self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas, stretch=1)
+        self.toolbar = CompactNavigationToolbar(self.canvas, self)
+        right_col.addWidget(self.toolbar)
+        right_col.addWidget(self.canvas, stretch=3)
+
+        self.data_table = QTableWidget(0, 2)
+        self.data_table.setHorizontalHeaderLabels(["Stage", "T (degC)"])
+        self.data_table.horizontalHeader().setStretchLastSection(True)
+        right_col.addWidget(self.data_table, stretch=1)
+        layout.addWidget(right, stretch=1)
 
         # Restore knobs from a loaded .colx, if any.
         if self.window_state and getattr(self.window_state, "bvm_params", None):
@@ -299,15 +310,21 @@ class BVMModuleWidget(QWidget):
 
         # Vapour-pressure coeffs per species, in species order: (N,3) Antoine or
         # (N,7) PLXANT depending on the selected vle_model.
-        # ponytail: pressure unit must match the fit's unit (no conversion here) —
-        # calibrate the coefficients to window_state.pressure's unit.
         antoine = self.window_state.thermodynamics_config.psat_params(order)
+        # window_state.pressure is bar; convert to the Psat model's unit so P and
+        # Psat are comparable (PLXANT -> Pa, Antoine -> mmHg).
+        P = self.window_state.thermodynamics_config.pressure_in_psat_unit(
+            self.window_state.pressure)
+
+        # Activity model from the shared registry (Ideal/NRTL) — the same closure
+        # the rigorous solvers get, so BVM and HYSIM run one thermo config.
+        gamma_fn = self.window_state.build_gamma_fn(order)
 
         kwargs = dict(
             zF=zF, F=float(feed.flow), r=self.r_spin.value(), q=self.q_spin.value(),
             antoine=antoine, comps=order, lk=lk, hk=hk,
-            P=float(self.window_state.pressure), efficiency=self.eff_spin.value(),
-            max_stages=int(self.max_stages_spin.value()),
+            P=P, efficiency=self.eff_spin.value(),
+            max_stages=int(self.max_stages_spin.value()), gamma_fn=gamma_fn,
         )
 
         if self.spec_combo.currentText() == "Direct":
@@ -385,48 +402,127 @@ class BVMModuleWidget(QWidget):
 
     # -------------------------------------------------------------- plotting
     def _section_axes(self, ax, result):
-        lk = result["lk"]
-        xr = result["xRect"][:, [lk, lk + 1]]
-        xs = result["xStrip"][:, [lk, lk + 1]]
-        ax.plot(xr[:, 0], xr[:, 1], "-o", color=_RECT_C, label="Rectifying")
-        ax.plot(xs[:, 0], xs[:, 1], "-o", color=_STRIP_C, label="Stripping")
-        ax.plot([0, 1], [1, 0], "k-", lw=1)            # composition simplex edge
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.set_xlabel("x  (light key)")
-        ax.set_ylabel("x  (heavy key)")
+        """Section curves in the [lk, hk] projection. For a ternary system the
+        axes are the true composition triangle (freeRCM conventions: all three
+        edges + vertex labels); otherwise Cartesian with the key names."""
+        lk, hk = result["lk"], result.get("hk", result["lk"] + 1)
+        comps = list(result["comps"])
+        xr = result["xRect"][:, [lk, hk]]
+        xs = result["xStrip"][:, [lk, hk]]
+        if len(comps) == 3:
+            other = [c for i, c in enumerate(comps) if i not in (lk, hk)][0]
+            ternary_axes(ax, [comps[lk], comps[hk], other])
+        else:
+            ax.plot([0, 1], [1, 0], "k-", lw=1)        # composition simplex edge
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_xlabel(f"x {comps[lk]}  (light key)")
+            ax.set_ylabel(f"x {comps[hk]}  (heavy key)")
+        ax.plot(xr[:, 0], xr[:, 1], "-o", color=_RECT_C, ms=3, label="Rectifying")
+        ax.plot(xs[:, 0], xs[:, 1], "-o", color=_STRIP_C, ms=3, label="Stripping")
+        if "xExtract" in result and len(result["xExtract"]):
+            xm = result["xExtract"][:, [lk, hk]]
+            ax.plot(xm[:, 0], xm[:, 1], "-o", color=_EXTRACT_C, ms=3,
+                    label="Extractive")
         ax.legend(loc="upper right", fontsize=8)
+
+    def _section_T_axes(self, ax, result):
+        """Temperature along each section march (march step, not column stage —
+        sections are untrimmed until the profile is built)."""
+        for key, color, label in (("Trect", _RECT_C, "Rectifying"),
+                                  ("Textract", _EXTRACT_C, "Extractive"),
+                                  ("Tstrip", _STRIP_C, "Stripping")):
+            T = result.get(key)
+            if T is not None and len(T):
+                ax.plot(np.arange(len(T)), T, "-o", ms=3, color=color, label=label)
+        ax.set_xlabel("March step (from section start)")
+        ax.set_ylabel("T (degC)")
+        ax.legend(fontsize=8)
+
+    def _fill_sections_table(self, result):
+        """One row per marched stage of every section: composition + T."""
+        comps = list(result["comps"])
+        headers = ["Section", "Step", "T (degC)"] + [f"x {c}" for c in comps]
+        rows = []
+        for name, xk, Tk in (("Rectifying", "xRect", "Trect"),
+                             ("Extractive", "xExtract", "Textract"),
+                             ("Stripping", "xStrip", "Tstrip")):
+            x, T = result.get(xk), result.get(Tk)
+            if x is None or not len(x):
+                continue
+            for i in range(min(len(x), len(T))):
+                rows.append([name, i, round(float(T[i]), 2)]
+                            + [round(float(v), 4) for v in x[i]])
+        self._set_table(headers, rows)
+
+    def _fill_profile_table(self, profile):
+        """Assembled column profile: stage 0 = distillate on the top row."""
+        comps = list(profile["comps"])
+        headers = ["Stage", "T (degC)"] + [f"x {c}" for c in comps]
+        x, T = profile["x"], profile["T"]
+        n = profile["n_stages"]
+        rows = []
+        for i in range(n):                             # distillate (0) on top row
+            rows.append([i, round(float(T[i]), 2)]
+                        + [round(float(v), 4) for v in x[i]])
+        self._set_table(headers, rows)
+
+    def _set_table(self, headers, rows):
+        self.data_table.setColumnCount(len(headers))
+        self.data_table.setHorizontalHeaderLabels(headers)
+        self.data_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, v in enumerate(row):
+                self.data_table.setItem(r, c, QTableWidgetItem(str(v)))
 
     def _plot_sections(self, result):
         self.figure.clear()
-        ax = self.figure.add_subplot(111)
+        ax = self.figure.add_subplot(121)
         self._section_axes(ax, result)
         ax.set_title("BVM section profiles")
+        axT = self.figure.add_subplot(122)
+        self._section_T_axes(axT, result)
+        axT.set_title("Section temperatures")
         self.figure.tight_layout()
         self.canvas.draw()
+        self._fill_sections_table(result)
 
     def _plot_profile(self, profile, result):
         self.figure.clear()
-        ax1 = self.figure.add_subplot(121)
+        ax1 = self.figure.add_subplot(131)
         self._section_axes(ax1, result)
-        pt = profile["intersection"]                   # [LK_rect, LK_strip, HK_rect, HK_strip]
+        pt = profile["intersection"]                   # [LK_a, LK_b, HK_a, HK_b]
         ax1.plot(pt[0], pt[2], "k*", markersize=14, label="Intersection")
         ax1.set_title("Sections + intersection")
 
-        ax2 = self.figure.add_subplot(122)
+        ax2 = self.figure.add_subplot(132)
         x = profile["x"]                               # (n_stages, n_comps)
-        N = np.arange(1, x.shape[0] + 1)
+        N = np.arange(x.shape[0])                      # 0-based, 0 = distillate
         for j, name in enumerate(result["comps"]):
-            ax2.plot(N, x[:, j], "-o", label=name)
+            ax2.plot(N, x[:, j], "-o", ms=3, label=name)
         ax2.axvline(profile["feed_stage"], color="grey", ls="--", lw=1)
-        ax2.set_xlabel("Stage N (bottom → top)")
+        if "entrainer_stage" in profile:
+            ax2.axvline(profile["entrainer_stage"], color=_EXTRACT_C,
+                        ls="--", lw=1)
+        ax2.set_xlabel("Stage (0 = distillate)")
         ax2.set_ylabel("Liquid mole fraction x")
         ax2.set_ylim(0, 1)
         ax2.set_title("Column profile")
         ax2.legend(fontsize=8)
 
+        ax3 = self.figure.add_subplot(133)
+        ax3.plot(N, profile["T"], "-o", ms=3, color=_TEMP_C)
+        ax3.axvline(profile["feed_stage"], color="grey", ls="--", lw=1)
+        if "entrainer_stage" in profile:
+            ax3.axvline(profile["entrainer_stage"], color=_EXTRACT_C,
+                        ls="--", lw=1)
+        ax3.set_xlabel("Stage (0 = distillate)")
+        ax3.set_ylabel("T (degC)")
+        ax3.set_title("Temperature profile")
+
         self.figure.tight_layout()
         self.canvas.draw()
+        self._fill_profile_table(profile)
 
 
 def _demo():
@@ -437,9 +533,9 @@ def _demo():
     from PySide6.QtWidgets import QApplication
     from gui.state.window_state import WindowState, Species, Stream, StreamType
 
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])  # Qt keeps the singleton alive
     ws = WindowState()
-    ws.pressure = 760.0
+    ws.pressure = 1.01325  # bar (= 760 mmHg, the bundled Antoine fits' unit)
     ws.light_key_index = 0
     abc = [(6.90565, 1211.033, 220.79), (6.95464, 1344.8, 219.48),
            (6.99052, 1453.43, 215.31)]
@@ -460,6 +556,29 @@ def _demo():
     prof = build_column_profile(res)
     assert prof["found"], "r=12 ternary should be feasible"
     assert prof["x"].shape[1] == 3
+
+    # plotting + table paths render offscreen without error
+    w._plot_sections(res)
+    assert w.data_table.rowCount() > 0, "sections table should fill"
+    w._plot_profile(prof, res)
+    assert w.data_table.rowCount() == prof["n_stages"]
+    assert w.data_table.item(0, 0).text() == "0", \
+        "distillate (stage 0) belongs on the top row"
+
+    # extractive run: middle section shows up in the plot data
+    w.extract_check.setChecked(True)
+    for n, v in zip(["benzene", "toluene", "xylene"], [0.0, 0.0, 1.0]):
+        w._xe_spins[n].setValue(v)
+    w.e2f_spin.setValue(0.3)
+    ek = w._gather_inputs()
+    eres = bound_val_method(**ek)
+    assert "xExtract" in eres and len(eres["xExtract"]) >= 1
+    w._plot_sections(eres)
+    eprof = build_column_profile(eres)
+    if eprof["found"]:
+        w._plot_profile(eprof, eres)
+        assert "entrainer_stage" in eprof
+    w.extract_check.setChecked(False)
 
     # headless solve() path used by the main Simulation Run
     prof2 = w.solve()

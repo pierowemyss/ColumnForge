@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
     QComboBox, QGroupBox, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 
 from .unit_combo_box import UnitComboBox
 
@@ -36,6 +36,13 @@ class CondenserConfigPanel(QWidget):
 
         # Subcooling (Total condenser) — opt-in via checkbox
         self.subcooling_group = QGroupBox("Subcooling")
+        # Consumed by the rigorous energy balance (Initialization → Flow Model);
+        # under constant molar overflow it has no enthalpy to act on and is
+        # ignored — the tooltip says so rather than silently dropping it.
+        self.subcooling_group.setToolTip(
+            "Subcooled reflux/distillate ΔT below the bubble point. Consumed by "
+            "the rigorous energy balance (Initialization → Flow Model); ignored "
+            "under constant molar overflow. ΔT is a delta — °C and K coincide.")
         subcooling_layout = QHBoxLayout(self.subcooling_group)
         self.subcooling_check = QCheckBox("Subcool below bubble point by")
         self.subcooling_input = UnitComboBox("temperature")

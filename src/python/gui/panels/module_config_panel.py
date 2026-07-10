@@ -33,11 +33,11 @@ class ModuleConfigPanel(QWidget):
         type_layout.addStretch()
         main_layout.addLayout(type_layout)
 
-        # Stage number
+        # Stage number (0-based from the top; 0 = distillate — matches feeds/draws)
         stage_layout = QHBoxLayout()
-        stage_layout.addWidget(QLabel("Stage Number:"))
+        stage_layout.addWidget(QLabel("Stage (0 = top):"))
         self.stage_spin = QSpinBox(self)
-        self.stage_spin.setRange(1, 200)
+        self.stage_spin.setRange(0, 199)
         stage_layout.addWidget(self.stage_spin)
         stage_layout.addStretch()
         main_layout.addLayout(stage_layout)
@@ -69,6 +69,17 @@ class ModuleConfigPanel(QWidget):
         reflux_layout.addWidget(self.reflux_spin)
         reflux_layout.addStretch()
         main_layout.addLayout(reflux_layout)
+
+        # Internal heat duty (kW): + adds heat (interreboiler), - removes it
+        # (intercooler). This is the knob the energy balance actually consumes.
+        duty_layout = QHBoxLayout()
+        duty_layout.addWidget(QLabel("Duty (kW, +heat/-cool):"))
+        self.duty_spin = QDoubleSpinBox(self)
+        self.duty_spin.setRange(-1e9, 1e9)
+        self.duty_spin.setDecimals(3)
+        duty_layout.addWidget(self.duty_spin)
+        duty_layout.addStretch()
+        main_layout.addLayout(duty_layout)
 
         # Associated Streams
         streams_group = QGroupBox("Associated Streams")
@@ -125,6 +136,7 @@ class ModuleConfigPanel(QWidget):
         self.num_stages_spin.valueChanged.connect(self._on_value_changed)
         self.boilup_spin.valueChanged.connect(self._on_value_changed)
         self.reflux_spin.valueChanged.connect(self._on_value_changed)
+        self.duty_spin.valueChanged.connect(self._on_value_changed)
         self.distillate_out_edit.currentTextChanged.connect(self._on_value_changed)
         self.distillate_tray_spin.valueChanged.connect(self._on_value_changed)
         self.bottoms_out_edit.currentTextChanged.connect(self._on_value_changed)
@@ -136,12 +148,15 @@ class ModuleConfigPanel(QWidget):
         if module_type == "Interreboiler":
             self.boilup_spin.setEnabled(True)
             self.reflux_spin.setEnabled(False)
+            self.duty_spin.setEnabled(True)          # heat-duty module → solved
         elif module_type in ["Side Stripper", "Side Rectifier"]:
             self.boilup_spin.setEnabled(False)
             self.reflux_spin.setEnabled(True)
+            self.duty_spin.setEnabled(False)         # not yet solved (Path B)
         else:
             self.boilup_spin.setEnabled(True)
             self.reflux_spin.setEnabled(True)
+            self.duty_spin.setEnabled(True)
 
         self._on_value_changed()
 
@@ -157,8 +172,9 @@ class ModuleConfigPanel(QWidget):
 
         self.stage_spin.setValue(config.get("stage", 1))
         self.num_stages_spin.setValue(config.get("num_stages", 1))
-        self.boilup_spin.setValue(config.get("boilup_ratio", 0))
-        self.reflux_spin.setValue(config.get("reflux_ratio", 0))
+        self.boilup_spin.setValue(config.get("boilup_ratio") or 0)
+        self.reflux_spin.setValue(config.get("reflux_ratio") or 0)
+        self.duty_spin.setValue(config.get("duty") or 0)
 
         # Associated streams
         streams = config.get("associated_streams", {})
@@ -181,6 +197,7 @@ class ModuleConfigPanel(QWidget):
             "num_stages": self.num_stages_spin.value(),
             "boilup_ratio": self.boilup_spin.value() if self.boilup_spin.isEnabled() else None,
             "reflux_ratio": self.reflux_spin.value() if self.reflux_spin.isEnabled() else None,
+            "duty": self.duty_spin.value() if self.duty_spin.isEnabled() and self.duty_spin.value() else None,
             "associated_streams": {
                 "distillate": (self.distillate_out_edit.currentText(), self.distillate_tray_spin.value()),
                 "bottoms": (self.bottoms_out_edit.currentText(), self.bottoms_tray_spin.value())
@@ -199,5 +216,7 @@ class ModuleConfigPanel(QWidget):
             specs.append(f"Boilup ratio: {self.boilup_spin.value():.4f}")
         if self.reflux_spin.isEnabled() and self.reflux_spin.value() > 0:
             specs.append(f"Reflux ratio: {self.reflux_spin.value():.4f}")
+        if self.duty_spin.isEnabled() and self.duty_spin.value():
+            specs.append(f"Duty: {self.duty_spin.value():.3f} kW")
 
         return specs

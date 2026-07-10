@@ -27,10 +27,10 @@ from .window_state import (
     ThermodynamicsConfig, ComponentThermoParams, BinaryInteractionParams,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # v2: stages are 0-based from the top (0 = distillate)
 
-_BINARY_DICTS = ("nrtl_aij", "nrtl_bij", "nrtl_cij",
-                 "uniquac_aij", "uniquac_bij", "wilson_aij", "wilson_bij")
+_BINARY_DICTS = ("nrtl_aij", "nrtl_bij", "nrtl_cij", "uniquac_aij",
+                 "uniquac_bij", "wilson_aij", "wilson_bij", "margules_aij")
 
 
 def _only(cls, d: dict) -> dict:
@@ -43,7 +43,8 @@ def _only(cls, d: dict) -> dict:
 
 def _enc_species(s: Species) -> dict:
     return {"name": s.name, "mw": s.mw, "liquid_density": s.liquid_density,
-            "cp": s.cp, "unifac_groups": dict(s.unifac_groups)}
+            "cp": s.cp, "tb": s.tb, "hvap_tb": s.hvap_tb,
+            "unifac_groups": dict(s.unifac_groups)}
 
 
 def _enc_thermo_params(p: ComponentThermoParams) -> dict:
@@ -57,7 +58,7 @@ def _enc_binary(b: BinaryInteractionParams) -> dict:
 
 def _enc_thermo(tc: ThermodynamicsConfig) -> dict:
     return {"vle_model": tc.vle_model, "activity_model": tc.activity_model,
-            "eos_model": tc.eos_model,
+            "eos_model": tc.eos_model, "energy_balance": tc.energy_balance,
             "component_params": {n: _enc_thermo_params(p)
                                  for n, p in tc.component_params.items()},
             "binary": _enc_binary(tc.binary)}
@@ -65,8 +66,10 @@ def _enc_thermo(tc: ThermodynamicsConfig) -> dict:
 
 def _enc_stream(s: Stream) -> dict:
     return {"id": s.id, "stream_type": s.stream_type.value, "stage": s.stage,
-            "temperature": s.temperature, "pressure": s.pressure, "flow": s.flow,
-            "composition": dict(s.composition)}
+            "temperature": s.temperature, "flow": s.flow,
+            "composition": dict(s.composition),
+            "user_specified": s.user_specified,
+            "phase": s.phase}
 
 
 def _enc_condenser(c: CondenserConfig) -> dict:
@@ -83,7 +86,7 @@ def _enc_reboiler(r: ReboilerConfig) -> dict:
 def _enc_module(m: ModuleConfig) -> dict:
     return {"module_type": m.module_type.value, "stage": m.stage,
             "num_stages": m.num_stages, "boilup_ratio": m.boilup_ratio,
-            "reflux_ratio": m.reflux_ratio,
+            "reflux_ratio": m.reflux_ratio, "duty": m.duty,
             "associated_streams": {k: list(v)
                                    for k, v in m.associated_streams.items()}}
 
@@ -104,6 +107,9 @@ def encode_state(state: dict) -> dict:
     e["thermodynamics_config"] = _enc_thermo(state["thermodynamics_config"])
     e["modules"] = {n: _enc_module(m) for n, m in state["modules"].items()}
     e["specs"] = [_enc_spec(sp) for sp in state["specs"]]
+    du = state.get("display_units")
+    if du is not None:
+        e["display_units"] = {f.name: getattr(du, f.name) for f in fields(du)}
     sm = state.get("solver_mode")
     e["solver_mode"] = getattr(sm, "value", sm)
     return e
@@ -130,7 +136,8 @@ def _dec_thermo(d: dict) -> ThermodynamicsConfig:
     tc = ThermodynamicsConfig(
         vle_model=d.get("vle_model", "Antoine"),
         activity_model=d.get("activity_model", "Ideal"),
-        eos_model=d.get("eos_model", "Ideal Gas"))
+        eos_model=d.get("eos_model", "Ideal Gas"),
+        energy_balance=bool(d.get("energy_balance", False)))
     tc.component_params = {n: _dec_thermo_params(p)
                            for n, p in d.get("component_params", {}).items()}
     tc.binary = _dec_binary(d.get("binary", {}))
@@ -140,8 +147,10 @@ def _dec_thermo(d: dict) -> ThermodynamicsConfig:
 def _dec_stream(d: dict) -> Stream:
     return Stream(id=d["id"], stream_type=StreamType(d["stream_type"]),
                   stage=d.get("stage"), temperature=d.get("temperature"),
-                  pressure=d.get("pressure"), flow=d.get("flow"),
-                  composition=dict(d.get("composition", {})))
+                  flow=d.get("flow"),
+                  composition=dict(d.get("composition", {})),
+                  user_specified=bool(d.get("user_specified", False)),
+                  phase=d.get("phase", "liquid"))
 
 
 def _dec_condenser(d: dict) -> CondenserConfig:
@@ -163,6 +172,7 @@ def _dec_module(d: dict) -> ModuleConfig:
         module_type=ModuleType(d["module_type"]),
         stage=d.get("stage", 1), num_stages=d.get("num_stages", 1),
         boilup_ratio=d.get("boilup_ratio"), reflux_ratio=d.get("reflux_ratio"),
+        duty=d.get("duty"),
         associated_streams={k: tuple(v)
                             for k, v in d.get("associated_streams", {}).items()})
 
@@ -183,6 +193,9 @@ def decode_state(e: dict) -> dict:
     s["thermodynamics_config"] = _dec_thermo(e.get("thermodynamics_config", {}))
     s["modules"] = {n: _dec_module(d) for n, d in e.get("modules", {}).items()}
     s["specs"] = [_dec_spec(d) for d in e.get("specs", [])]
+    if e.get("display_units") is not None:
+        from core.units import DisplayUnits
+        s["display_units"] = DisplayUnits(**_only(DisplayUnits, e["display_units"]))
     if e.get("solver_mode") is not None:
         s["solver_mode"] = SolverMode(e["solver_mode"])
     return s
@@ -211,7 +224,22 @@ def load_colx(path: str) -> dict:
     if not isinstance(doc, dict) or not doc.get("cases"):
         raise ValueError("Not a FreeColumn .colx file (no cases).")
     ver = doc.get("schema_version")
+    state = doc["cases"][0]["state"]
+    if ver == 1:
+        state = _migrate_v1_stages(state)   # v1 counted stages 0 = bottoms
+        ver = 2
     if ver != SCHEMA_VERSION:
         raise ValueError(f"Unsupported .colx schema_version {ver} "
                          f"(this build reads {SCHEMA_VERSION}).")
-    return decode_state(doc["cases"][0]["state"])
+    return decode_state(state)
+
+
+def _migrate_v1_stages(state: dict) -> dict:
+    """v1 -> v2: flip every stored stage from 0=bottoms to 0=distillate
+    (stage -> num_stages - 1 - stage)."""
+    N = int(state.get("num_stages", 1))
+    for coll in ("streams", "modules"):
+        for d in state.get(coll, {}).values():
+            if d.get("stage") is not None:
+                d["stage"] = max(0, N - 1 - int(d["stage"]))
+    return state

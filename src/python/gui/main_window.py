@@ -221,47 +221,9 @@ class MainWindow(QMainWindow):
         exit_act.triggered.connect(self.close)
         file_menu.addAction(exit_act)
 
-        edit_menu = menubar.addMenu("Edit")
-        undo_act = QAction("Undo", self)
-        undo_act.setShortcut("Ctrl+Z")
-        edit_menu.addAction(undo_act)
-
-        redo_act = QAction("Redo", self)
-        redo_act.setShortcut("Ctrl+Y")
-        edit_menu.addAction(redo_act)
-
-        edit_menu.addSeparator()
-
-        cut_act = QAction("Cut", self)
-        cut_act.setShortcut("Ctrl+X")
-        edit_menu.addAction(cut_act)
-
-        copy_act = QAction("Copy", self)
-        copy_act.setShortcut("Ctrl+C")
-        edit_menu.addAction(copy_act)
-
-        paste_act = QAction("Paste", self)
-        paste_act.setShortcut("Ctrl+V")
-        edit_menu.addAction(paste_act)
-
-        view_menu = menubar.addMenu("View")
-        zoom_in_act = QAction("Zoom In", self)
-        zoom_in_act.setShortcut("Ctrl++")
-        view_menu.addAction(zoom_in_act)
-
-        zoom_out_act = QAction("Zoom Out", self)
-        zoom_out_act.setShortcut("Ctrl+-")
-        view_menu.addAction(zoom_out_act)
-
-        reset_view_act = QAction("Reset View", self)
-        reset_view_act.setShortcut("Ctrl+0")
-        view_menu.addAction(reset_view_act)
-
+        # ponytail: no Edit/View menus — Undo/Redo lands with the Month-11 UX
+        # pass; text widgets already handle cut/copy/paste natively.
         help_menu = menubar.addMenu("Help")
-        docs_act = QAction("Documentation", self)
-        docs_act.setShortcut("F1")
-        help_menu.addAction(docs_act)
-
         about_act = QAction("About FreeColumn", self)
         about_act.triggered.connect(self.show_about)
         help_menu.addAction(about_act)
@@ -271,6 +233,8 @@ class MainWindow(QMainWindow):
         # In-tab Run/Abort buttons (were emitting into the void)
         self.sim_tab.runSimulation.connect(self.run_simulation)
         self.sim_tab.abortSimulation.connect(self.abort_simulation)
+        # Results-tab Export CSV = File -> Export Results
+        self.results_tab.export_btn.clicked.connect(self.export_results)
 
     def _on_tab_changed(self, index: int):
         if index == 2:
@@ -323,10 +287,7 @@ class MainWindow(QMainWindow):
                 self.modules_tab.set_window_state(self.window_state)
                 self.results_tab.clear_results()
 
-                QMessageBox.information(
-                    self, "Load Successful",
-                    f"Column configuration loaded from:\n{filename}"
-                )
+                self.statusBar().showMessage(f"Loaded {filename}")
             except Exception as e:
                 QMessageBox.critical(
                     self, "Load Error",
@@ -387,8 +348,12 @@ class MainWindow(QMainWindow):
             try:
                 import csv
                 from .tabs.results_tab import profile_to_csv_rows
+                ws = self.window_state
+                mws = [getattr(ws.species.get(c), "mw", None)
+                       for c in profile.get("comps", [])]
                 with open(filename, 'w', newline='') as f:
-                    csv.writer(f).writerows(profile_to_csv_rows(profile))
+                    csv.writer(f).writerows(profile_to_csv_rows(
+                        profile, units=getattr(ws, "display_units", None), mws=mws))
                 self.statusBar().showMessage(f"Results exported to {filename}")
             except Exception as e:
                 QMessageBox.critical(
@@ -398,6 +363,17 @@ class MainWindow(QMainWindow):
 
     def run_simulation(self):
         """Run the column simulation via the BVM solver."""
+        method = self.sim_tab.solver_combo.currentText()
+        # Shortcut (FUG) is a pre-design screening tool: closed-form, instant, no
+        # worker or stage profile, and it needs only the keys + feed (not a fully
+        # resolved DoF), so it runs ahead of the specification gate and opens its
+        # own report dialog.
+        if method.startswith("Shortcut"):
+            if getattr(self, "_solver_thread", None) and self._solver_thread.isRunning():
+                return
+            self._run_shortcut()
+            return
+
         can_run = self._check_specification()
 
         if not can_run:
@@ -408,43 +384,165 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # ponytail: solvers here run synchronously in well under a second, so there
-        # is no long task to interrupt — Abort stays cosmetic until a solver runs
-        # long enough to need real cancellation.
-        method = self.sim_tab.solver_combo.currentText()
-        self.statusBar().showMessage("Solving...")
+        if getattr(self, "_solver_thread", None) and self._solver_thread.isRunning():
+            return                                     # one solve at a time
+
+        # Widget reads (solver knobs, BVM spins) and operating-point resolution
+        # happen here on the GUI thread; only the final solve runs on the worker.
+        # ponytail: purity-spec resolution still blocks the UI for its secant
+        # solves — move gather into the worker if that ever runs long.
         try:
-            if method == "Bubble-Point":
-                profile = self._solve_bubble_point()
-            elif "Inside-Out" in method or method.startswith("HYSIM"):
-                profile = self._solve_inside_out()
-            elif method.startswith("BVM"):
-                profile = self.modules_tab.ensure_bvm().solve()
-            else:
-                raise ValueError(
-                    f"{method} is not implemented yet — choose Bubble-Point, "
-                    "HYSIM Inside-Out, or BVM (preliminary)."
-                )
+            job = self._make_solver_job(method)
         except ValueError as exc:
             self.sim_tab.set_running(False)
             self.statusBar().showMessage("Run failed")
             QMessageBox.warning(self, "Cannot Run Simulation", str(exc))
             return
+        except Exception:
+            import traceback
+            self._on_solver_failed("Configuration failed",
+                                   traceback.format_exc(), False)
+            return
+        self.statusBar().showMessage("Solving...")
+        self._start_solver(job)
 
+    def _make_solver_job(self, method):
+        """A thread-safe callable (report, cancel) -> profile for `method`.
+        All Qt widget access happens in here, on the GUI thread."""
+        if method == "Bubble-Point" or "Inside-Out" in method \
+                or method.startswith("HYSIM"):
+            from core.column_solvers import solve_bubble_point, solve_inside_out
+            solver = (solve_bubble_point if method == "Bubble-Point"
+                      else solve_inside_out)
+            si, knobs = self._gather_rigorous_inputs()
+            return lambda report, cancel: solver(si, report=report,
+                                                 cancel=cancel, **knobs)
+        if method.startswith("BVM"):
+            widget = self.modules_tab.ensure_bvm()     # widget built here
+            kwargs = widget._gather_inputs()           # spins read here
+            int_tol = widget.int_tol_spin.value()
+
+            def job(report, cancel):
+                from gui.modules.bvm_module import (bound_val_method,
+                                                    build_column_profile)
+                result = bound_val_method(**kwargs)    # direct march, no iters
+                profile = build_column_profile(result, int_tol=int_tol)
+                if not profile.get("found"):
+                    raise ValueError(profile.get(
+                        "message", "No feasible intersection at these specs."))
+                widget._result = result                # keep the plot path live
+                return profile
+            return job
+        raise ValueError(
+            f"{method} is not implemented yet — choose Bubble-Point, "
+            "HYSIM Inside-Out, or BVM (preliminary).")
+
+    def _start_solver(self, job):
+        import time
+        from PySide6.QtCore import QThread, QTimer
+        from .solver_worker import SolverWorker
+
+        self._solve_t0 = time.monotonic()
+        self._solver_iters = 0
+        self._max_iter_hint = max(1, self.sim_tab.max_iter_spin.value())
+        if not hasattr(self, "_elapsed_timer"):
+            self._elapsed_timer = QTimer(self)
+            self._elapsed_timer.setInterval(250)
+            self._elapsed_timer.timeout.connect(self._tick_elapsed)
+
+        self._solver_worker = SolverWorker(job)
+        self._solver_thread = QThread(self)
+        self._solver_worker.moveToThread(self._solver_thread)
+        self._solver_thread.started.connect(self._solver_worker.run)
+        self._solver_worker.progress.connect(self._on_solver_progress)
+        self._solver_worker.finished.connect(self._on_solver_finished)
+        self._solver_worker.failed.connect(self._on_solver_failed)
+        for sig in (self._solver_worker.finished, self._solver_worker.failed):
+            sig.connect(self._solver_thread.quit)
+        self._solver_thread.finished.connect(self._solver_worker.deleteLater)
+        self.sim_tab.set_running(True)
+        self._elapsed_timer.start()
+        self._solver_thread.start()
+
+    def _elapsed(self):
+        import time
+        return time.monotonic() - getattr(self, "_solve_t0", time.monotonic())
+
+    def _tick_elapsed(self):
+        self.sim_tab.set_progress(self.sim_tab.progress_bar.value(),
+                                  self._solver_iters, self._elapsed())
+
+    def _on_solver_progress(self, iteration, residual):
+        self._solver_iters = iteration
+        pct = min(99, int(100 * iteration / self._max_iter_hint))
+        self.sim_tab.set_progress(pct, iteration, self._elapsed())
+
+    def _on_solver_finished(self, profile):
+        self._elapsed_timer.stop()
         self.window_state.results = profile
         self.sim_tab.set_running(False)
-        self.results_tab.update_results(self._normalize_results(profile))
+        self.sim_tab.set_progress(100, profile.get("iterations",
+                                                   self._solver_iters),
+                                  self._elapsed())
+        self.sim_tab.set_status(profile.get("message", "Solved"))
+        warns = self._antoine_range_warnings(profile)
+        summary = self._normalize_results(profile)
+        if warns:
+            summary["status"] += "  |  WARNING: " + "; ".join(warns)
+        self.results_tab.update_results(summary)
         self.tab_widget.setCurrentIndex(3)
-        self.statusBar().showMessage(
-            f"Solved: {profile['n_stages']} stages, feed at stage {profile['feed_stage']}."
-        )
+        msg = (f"Solved: {profile['n_stages']} stages, "
+               f"feed at stage {profile['feed_stage']}.")
+        if warns:
+            msg += "  ⚠ Antoine fit used outside its range — see Results status."
+        self.statusBar().showMessage(msg)
+
+    def _on_solver_failed(self, message, tb, user_error):
+        if hasattr(self, "_elapsed_timer"):
+            self._elapsed_timer.stop()
+        self.sim_tab.set_running(False)
+        self.statusBar().showMessage("Run failed")
+        self.sim_tab.set_status("Run failed", is_error=True)
+        if user_error:
+            QMessageBox.warning(self, "Cannot Run Simulation", message)
+        else:
+            # Solver bugs (LinAlgError, KeyError, ...) must not crash the app.
+            import logging
+            logging.getLogger(__name__).error("Simulation run failed\n%s", tb)
+            box = QMessageBox(QMessageBox.Critical, "Run Failed",
+                              f"The solver raised an unexpected error:\n"
+                              f"{message}", parent=self)
+            box.setDetailedText(tb)
+            box.exec()
+
+    def _antoine_range_warnings(self, profile):
+        """Species whose Antoine fit was evaluated outside its validity range
+        by the solved temperature profile (degC). Empty when ranges are unknown
+        or the vle_model isn't Antoine."""
+        tc = self.window_state.thermodynamics_config
+        T = profile.get("T")
+        if tc.vle_model != "Antoine" or T is None or len(T) == 0:
+            return []
+        tlo, thi = float(min(T)), float(max(T))
+        warns = []
+        for name in self.window_state.species:
+            p = tc.component_params.get(name)
+            if p is None or p.antoine_tmin is None or p.antoine_tmax is None:
+                continue
+            if tlo < p.antoine_tmin - 0.5 or thi > p.antoine_tmax + 0.5:
+                warns.append(
+                    f"{name}: column T {tlo:.0f}–{thi:.0f} °C exceeds "
+                    f"Antoine fit range {p.antoine_tmin:.0f}–"
+                    f"{p.antoine_tmax:.0f} °C")
+        return warns
 
     @staticmethod
     def _normalize_results(profile: dict) -> dict:
-        """Map a BVM column profile to the ResultsTab.update_results schema."""
+        """Map a column profile to the ResultsTab.update_results summary schema.
+        Profiles are top -> bottom; stage numbers are 0-based from the top."""
         x, T = profile["x"], profile["T"]
         rows = [
-            [i + 1, round(float(T[i]), 2)] + [round(float(v), 4) for v in x[i]]
+            [i, round(float(T[i]), 2)] + [round(float(v), 4) for v in x[i]]
             for i in range(profile["n_stages"])
         ]
         return {
@@ -455,90 +553,265 @@ class MainWindow(QMainWindow):
             "data": rows,
         }
 
-    def _gather_rigorous_inputs(self) -> dict:
-        """Pull and validate the common inputs for the rigorous solvers
-        (bubble-point and Inside-Out) from window_state + the Simulation tab.
-        Raises ValueError (with a user-facing message) when setup is incomplete."""
+    def _gather_fug_inputs(self):
+        """Build FUG (shortcut) inputs from the current state: constant relative
+        volatilities at the feed bubble point, the mixed feed, the two keys and
+        their recoveries. Raises a user-facing ValueError when the setup can't
+        support a shortcut design."""
         import numpy as np
+        from core.thermodynamics import bubble_T, k_values
+        from core.dof import SpecKind
         from .state.window_state import StreamType
 
         ws = self.window_state
         order = ws.get_species_names()
         if len(order) < 2:
             raise ValueError("Need at least 2 species (Initialization tab).")
+        lk, hk = ws.light_key_index, ws.heavy_key_index
+        if lk == hk:
+            raise ValueError("Light and heavy keys must differ "
+                             "(Specifications tab).")
 
-        feed = next((s for s in ws.streams.values()
-                     if s.stream_type == StreamType.FEED), None)
-        if feed is None or not feed.flow or not feed.composition:
-            raise ValueError("Feed stream needs a flow rate and composition.")
-        zF = np.array([feed.composition.get(nm, 0.0) for nm in order], float)
-        if abs(zF.sum() - 1.0) > 1e-3:
-            raise ValueError(f"Feed composition sums to {zF.sum():.4f}, not 1.")
+        # Flow-weighted mixed feed and quality.
+        zsum = np.zeros(len(order)); Ftot = 0.0; qF = 0.0
+        for s in ws.streams.values():
+            if s.stream_type != StreamType.FEED or not s.flow or not s.composition:
+                continue
+            z = np.array([s.composition.get(nm, 0.0) for nm in order], float)
+            if z.sum() <= 0.0:
+                continue
+            z = z / z.sum()
+            zsum += float(s.flow) * z; Ftot += float(s.flow)
+            qF += ws.feed_quality(s, order) * float(s.flow)
+        if Ftot <= 0.0:
+            raise ValueError("At least one feed with a flow and composition is "
+                             "required.")
+        z_mixed = zsum / Ftot
+        q = qF / Ftot
 
-        antoine = ws.thermodynamics_config.psat_params(order)  # (N,3) Antoine or (N,7) PLXANT
+        antoine = ws.thermodynamics_config.psat_params(order)
+        P = ws.thermodynamics_config.pressure_in_psat_unit(ws.pressure)
+        gamma_fn = ws.build_gamma_fn(order)
+        phi_fn = ws.build_phi_fn(order)
+        Tb = bubble_T(z_mixed, P, antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
+        K = k_values(Tb, P, antoine, gamma_fn, z_mixed, phi_fn)
+        alpha = np.asarray(K, float) / float(K[hk])
+        if alpha[lk] <= alpha[hk]:
+            raise ValueError(
+                f"'{order[lk]}' is not more volatile than '{order[hk]}' at the "
+                "feed bubble point — pick keys so the light key boils lower.")
+
+        # Recoveries from spec kinds if present, else a sharp-ish default.
+        rec = {SpecKind.LK_RECOVERY: 0.98, SpecKind.HK_RECOVERY: 0.02}
+        for s in ws.collect_specs():
+            if s.kind in rec:
+                rec[s.kind] = float(s.value)
+        R_op = next((float(s.value) for s in ws.collect_specs()
+                     if s.kind == SpecKind.REFLUX_RATIO), None)
+        return dict(alpha=alpha, z=z_mixed, lk=lk, hk=hk,
+                    rec_lk=rec[SpecKind.LK_RECOVERY],
+                    rec_hk=rec[SpecKind.HK_RECOVERY], q=q, R_op=R_op), order
+
+    def _run_shortcut(self):
+        """Compute the FUG shortcut design and show its report dialog."""
+        from core.shortcut import fug_design
+        from .fug_report_dialog import FUGReportDialog
+        try:
+            kwargs, order = self._gather_fug_inputs()
+            report = fug_design(**kwargs)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot Run Shortcut", str(exc))
+            return
+        except Exception:
+            import traceback
+            self._on_solver_failed("Shortcut design failed",
+                                   traceback.format_exc(), False)
+            return
+        self.statusBar().showMessage(
+            f"Shortcut (FUG): Nmin={report['Nmin']:.1f}, "
+            f"Rmin={report['Rmin']:.2f}, N≈{report['N']:.1f}")
+        FUGReportDialog(report, order, self).exec()
+
+    def _gather_rigorous_inputs(self):
+        """Build the canonical SolverInput for the rigorous solvers from
+        window_state + the Simulation tab (Phase 0: one config path).
+
+        Every configurable value flows through here: all feed streams (stage,
+        flow, composition, thermal quality from the entered temperature), side
+        draws, the pressure profile from top pressure + per-stage drop, the
+        condenser type, and the activity model. Raises ValueError (with a
+        user-facing message) when the setup is incomplete.
+        Returns (solver_input, solver_knobs_dict).
+        """
+        import numpy as np
+        from .state.window_state import StreamType, CondenserType
+
+        ws = self.window_state
+        order = ws.get_species_names()
+        if len(order) < 2:
+            raise ValueError("Need at least 2 species (Initialization tab).")
 
         N = int(ws.num_stages)
-        feed_stage = min(max(1, int(ws.feed_stage)), N)
-        F = float(feed.flow)
-        P = float(ws.pressure)
+
+        def _stage_internal(gui_stage, what):
+            """GUI stages are 0-based from the top; solvers count 1=top."""
+            s = int(gui_stage)
+            if not (0 <= s <= N - 1):
+                raise ValueError(
+                    f"{what} stage {s} is outside the column (0..{N - 1}, "
+                    "0 = distillate).")
+            return s + 1
+
+        feeds = []
+        for s in ws.streams.values():
+            if s.stream_type != StreamType.FEED:
+                continue
+            if not s.flow or not s.composition:
+                raise ValueError(f"Feed '{s.id}' needs a flow rate and composition.")
+            z = np.array([s.composition.get(nm, 0.0) for nm in order], float)
+            if abs(z.sum() - 1.0) > 0.05 or z.sum() <= 0.0:
+                raise ValueError(
+                    f"Feed '{s.id}' composition sums to {z.sum():.4f}, not 1 — "
+                    "fix it on the Streams page.")
+            if abs(z.sum() - 1.0) > 1e-6:
+                # normalize-on-solve for near-1 sums, and say so
+                self.statusBar().showMessage(
+                    f"Feed '{s.id}' composition summed to {z.sum():.4f}; "
+                    "normalized to 1 for this run.")
+                z = z / z.sum()
+            q = ws.feed_quality(s, order)
+            feeds.append((_stage_internal(s.stage if s.stage is not None else 10,
+                                          f"Feed '{s.id}'"),
+                          float(s.flow), z, q))
+        if not feeds:
+            raise ValueError("At least one feed stream is required.")
+
+        draws = []
+        for s in ws.streams.values():
+            if s.stream_type == StreamType.SIDESTREAM and s.flow:
+                stage = _stage_internal(s.stage if s.stage is not None else 10,
+                                        f"Side draw '{s.id}'")
+                flow = float(s.flow)
+                if getattr(s, "phase", "liquid") == "vapor":
+                    draws.append((stage, 0.0, flow))
+                else:
+                    draws.append((stage, flow, 0.0))
+        W = sum(d[1] + d[2] for d in draws)
+
+        antoine = ws.thermodynamics_config.psat_params(order)
+        # window_state pressures are bar; the thermo layer works in the Psat
+        # fit's unit. pressure_drop is per stage, growing top -> bottom, and the
+        # returned profile is 1=top .. N=bottom (solver-internal ordering).
+        to_unit = ws.thermodynamics_config.pressure_in_psat_unit
+        P_top = to_unit(ws.pressure)
+        dP = to_unit(ws.pressure_drop) if ws.pressure_drop else 0.0
+        pressure = P_top + dP * np.arange(N)
+
         gamma_fn = ws.build_gamma_fn(order)
+        phi_fn = ws.build_phi_fn(order)
+        flows_hook = ws.build_energy_hook(order)   # None unless energy_balance on
+        condenser = ws.condenser_config.condenser_type.value.lower()
+        fixed_R = 0.0 if ws.condenser_config.condenser_type == CondenserType.NONE else None
 
-        # Resolve whatever 2 operating specs the user set (reflux, boilup, rates,
-        # a product purity, a key recovery, ...) down to (R, D) — Aspen-style.
+        # Resolve the operating specs the user set (reflux, boilup, rates, a
+        # product purity, a key recovery, ...) down to (R, D) — Aspen-style.
+        # Side-draw rates are their own answer and don't enter the root-find.
         from core.operating_specs import resolve_operating_point
-        from core.dof import OPERATING_KINDS
-        from core.column_solvers import solve_bubble_point
-        ops = [s for s in ws.collect_specs() if s.kind in OPERATING_KINDS]
-        if len(ops) != 2:
+        from core.dof import OPERATING_KINDS, SpecKind
+        from core.column_solvers import solve_bubble_point, solve_inside_out
+        from core.solver_input import build_solver_input
+        ops = [s for s in ws.collect_specs() if s.kind in OPERATING_KINDS
+               or s.kind == SpecKind.SIDEDRAW_RATE]
+        # Duty specs are entered in kW; the resolver compares them to the energy
+        # balance's kJ/h duties — convert (kJ/h = kW / KJH_TO_KW).
+        from dataclasses import replace as _replace
+        from core.thermodynamics import KJH_TO_KW
+        from core.dof import ENERGY_ONLY
+        ops = [_replace(s, value=s.value / KJH_TO_KW) if s.kind in ENERGY_ONLY else s
+               for s in ops]
+        n_free = 1 if fixed_R is not None else 2
+        n_ops = sum(1 for s in ops if s.kind != SpecKind.SIDEDRAW_RATE)
+        if n_ops != n_free:
             raise ValueError(
-                "A simple column needs exactly 2 operating specs (e.g. reflux "
-                "ratio + a distillate rate, purity, or recovery). "
-                f"You have {len(ops)} — see the Specifications DoF status.")
+                f"This column needs exactly {n_free} operating spec(s) besides "
+                "side-draw rates (e.g. reflux ratio + a distillate rate, purity, "
+                f"or recovery). You have {n_ops} — see the Specifications DoF "
+                "status.")
 
-        def _solve_fn(R, D):
-            return solve_bubble_point(zF, F, antoine, order, N=N,
-                                      feed_stage=feed_stage, R=R, D=D, P=P,
-                                      gamma_fn=gamma_fn)
+        # Subcooling ΔT (total condenser) — only the energy balance consumes it;
+        # a delta, so °C/K units coincide (see condenser panel note).
+        subcool = float(ws.condenser_config.subcooling_temp or 0.0)
 
-        R, D = resolve_operating_point(
-            ops, F, zF, solve_fn=_solve_fn,
-            lk=ws.light_key_index, hk=ws.heavy_key_index)
+        # Interheater/intercooler modules → per-stage duty (kW entered → kJ/h).
+        # These are known heat terms in the energy balance (si.duty[]); ignored
+        # under CMO, so require the energy balance rather than silently drop them.
+        duties = [(_stage_internal(gs, "Interheater"), q_kw / KJH_TO_KW)
+                  for gs, q_kw in ws.interheater_duties()]
+        if duties and flows_hook is None:
+            raise ValueError(
+                "Interheater/intercooler duties need the energy balance "
+                "(Initialization → Flow Model). Under constant molar overflow "
+                "they would be silently ignored.")
+
+        def _build_si(R, D):
+            return build_solver_input(
+                n_stages=N, comps=order, feeds=feeds, draws=draws, duties=duties,
+                R=R, D=D, pressure=pressure, antoine=antoine,
+                gamma_fn=gamma_fn, phi_fn=phi_fn, condenser=condenser,
+                subcooling=subcool)
+
+        F_total = sum(f[1] for f in feeds)
+        z_mixed = sum(f[1] * f[2] for f in feeds) / F_total
 
         cfg = self.sim_tab.get_solver_config()   # honor the Simulation tab knobs
-        return dict(zF=zF, F=F, antoine=antoine, order=order,
-                    N=N, feed_stage=feed_stage, R=float(R), D=float(D),
-                    P=P, max_iter=int(cfg["max_iterations"]),
-                    tol=float(cfg["tolerance"]), gamma_fn=gamma_fn)
+        knobs = dict(
+            max_iter=int(cfg["max_iterations"]), tol=float(cfg["tolerance"]),
+            efficiency=float(getattr(ws, "stage_efficiency", 1.0)))
+
+        # Resolve implicit specs with the SAME efficiency and solver as the
+        # final run — an operating point found for an E=1 column misses purity
+        # targets when the real column runs at E<1.
+        method = self.sim_tab.solver_combo.currentText()
+        is_inside_out = "Inside-Out" in method or method.startswith("HYSIM")
+        rigorous = solve_inside_out if is_inside_out else solve_bubble_point
+        # The energy balance is an Inside-Out feature (its flows_hook seam); the
+        # Wang-Henke bubble-point path stays CMO. Fold the hook into knobs only
+        # when it applies, so both operating-point resolution and the final run
+        # use it consistently.
+        if is_inside_out and flows_hook is not None:
+            knobs["flows_hook"] = flows_hook
+
+        R, D = resolve_operating_point(
+            ops, F_total, z_mixed,
+            solve_fn=lambda R, D: rigorous(_build_si(R, D), **knobs),
+            lk=ws.light_key_index, hk=ws.heavy_key_index,
+            side_draw_total=W, fixed_R=fixed_R)
+
+        return _build_si(float(R), float(D)), knobs
 
     def _solve_bubble_point(self) -> dict:
         """Run the rigorous bubble-point (Wang-Henke) solver."""
         from core.column_solvers import solve_bubble_point
-        g = self._gather_rigorous_inputs()
-        return solve_bubble_point(g["zF"], g["F"], g["antoine"], g["order"],
-                                  N=g["N"], feed_stage=g["feed_stage"], R=g["R"],
-                                  D=g["D"], P=g["P"], max_iter=g["max_iter"],
-                                  tol=g["tol"], gamma_fn=g["gamma_fn"])
+        si, knobs = self._gather_rigorous_inputs()
+        return solve_bubble_point(si, **knobs)
 
     def _solve_inside_out(self) -> dict:
         """Run the Inside-Out (HYSIM) solver, with the Abort flag as cancel hook."""
         from core.column_solvers import solve_inside_out
-        g = self._gather_rigorous_inputs()
+        si, knobs = self._gather_rigorous_inputs()
         self._abort_flag = False
-        return solve_inside_out(g["zF"], g["F"], g["antoine"], g["order"],
-                                N=g["N"], feed_stage=g["feed_stage"], R=g["R"],
-                                D=g["D"], P=g["P"], max_iter=g["max_iter"],
-                                tol=g["tol"], gamma_fn=g["gamma_fn"],
+        return solve_inside_out(si, **knobs,
                                 cancel=lambda: getattr(self, "_abort_flag", False))
 
     def abort_simulation(self):
-        """Abort a running simulation. Sets the cancel flag the Inside-Out solver
-        checks between outer iterations.
-        # ponytail: solves run synchronously sub-second, so the flag only bites
-        # once a solver runs in a QThread — wire threading when a run is slow
-        # enough to need mid-run cancellation."""
-        self._abort_flag = True
-        self.sim_tab.set_running(False)
-        self.statusBar().showMessage("Simulation aborted")
+        """Abort a running simulation: flips the worker's cancel flag, which the
+        solvers check every (outer) iteration. The run then finishes with an
+        'Aborted.' profile through the normal finished path."""
+        self._abort_flag = True                        # legacy direct-call path
+        worker = getattr(self, "_solver_worker", None)
+        if worker is not None:
+            worker.cancel()
+        self.statusBar().showMessage("Aborting…")
 
     def show_preferences(self):
         """Edit the default rigorous-solver iteration limit and tolerance, which
@@ -593,7 +866,27 @@ class MainWindow(QMainWindow):
             event.accept()
 
 
+def _setup_logging():
+    """Log to ~/.freecolumn/freecolumn.log (roadmap Month 3): solver failures
+    from the Run handler land here with tracebacks."""
+    import logging
+    import logging.handlers
+    import os
+    log_dir = os.path.join(os.path.expanduser("~"), ".freecolumn")
+    os.makedirs(log_dir, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, "freecolumn.log"),
+        maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    logging.getLogger(__name__).info("FreeColumn started")
+
+
 def main():
+    _setup_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 

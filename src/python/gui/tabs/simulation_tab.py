@@ -48,7 +48,7 @@ class SimulationTab(QWidget):
             "Bubble-Point",            # rigorous, CMO + ideal VLE (implemented)
             "BVM (preliminary)",       # feasibility / profile, via the BVM module
             "Inside-Out (HYSIM)",      # rigorous, inner/outer (implemented)
-            "Newton-Raphson",          # pending
+            "Shortcut (FUG)",          # Fenske-Underwood-Gilliland design report
         ])
         options_layout.addRow("Method:", self.solver_combo)
 
@@ -62,17 +62,6 @@ class SimulationTab(QWidget):
         self.tolerance_spin.setDecimals(8)
         self.tolerance_spin.setValue(1e-7)
         options_layout.addRow("Tolerance:", self.tolerance_spin)
-
-        self.relaxation_spin = QDoubleSpinBox(self)
-        self.relaxation_spin.setRange(0.01, 1.0)
-        self.relaxation_spin.setDecimals(2)
-        self.relaxation_spin.setValue(0.5)
-        options_layout.addRow("Relaxation Factor:", self.relaxation_spin)
-
-        self.damping_check = QPushButton("Enable Damping")
-        self.damping_check.setCheckable(True)
-        self.damping_check.setChecked(False)
-        options_layout.addRow("Damping:", self.damping_check)
 
         solver_layout.addWidget(options_group)
 
@@ -211,8 +200,6 @@ class SimulationTab(QWidget):
             "solver_method": self.solver_combo.currentText(),
             "max_iterations": self.max_iter_spin.value(),
             "tolerance": self.tolerance_spin.value(),
-            "relaxation_factor": self.relaxation_spin.value(),
-            "damping_enabled": self.damping_check.isChecked()
         }
 
     def clear(self):

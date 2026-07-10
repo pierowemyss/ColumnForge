@@ -15,6 +15,9 @@ class UnitComboBox(QWidget):
         super().__init__(parent)
 
         self.unit_type = unit_type
+        # kg/h needs a mixture MW; no provider (or no MW data) greys it out
+        # rather than converting with a made-up MW.
+        self._mw_provider = None
         self.layout = QHBoxLayout(self)
         self.layout.setSpacing(5)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -39,6 +42,37 @@ class UnitComboBox(QWidget):
             self.unit_combo.addItems(self.PRESSURE_UNITS)
         elif self.unit_type == "flow":
             self.unit_combo.addItems(self.FLOW_UNITS)
+            self.refresh_units()
+
+    def set_mw_provider(self, fn):
+        """fn() -> average molar mass of the stream (kg/kmol), or None when
+        unknown. Enables real kg/h <-> kmol/h conversion; without it kg/h
+        stays greyed out."""
+        self._mw_provider = fn
+        self.refresh_units()
+
+    def _mw(self):
+        """Average MW (kg/kmol) or None if unavailable/invalid."""
+        try:
+            mw = self._mw_provider() if self._mw_provider else None
+            return float(mw) if mw and mw > 0 else None
+        except Exception:
+            return None
+
+    def refresh_units(self):
+        """Grey the kg/h unit in or out depending on MW availability. Call
+        after anything that changes the stream's composition."""
+        if self.unit_type != "flow":
+            return
+        ok = self._mw() is not None
+        idx = self.unit_combo.findText("kg/h")
+        item = self.unit_combo.model().item(idx)
+        item.setEnabled(ok)
+        item.setToolTip("" if ok else
+                        "Needs molecular weights for every species in the "
+                        "composition (Initialization tab)")
+        if not ok and self.unit_combo.currentIndex() == idx:
+            self.unit_combo.setCurrentIndex(0)          # back to kmol/h
 
     def _setup_styles(self):
         self.setStyleSheet("""
@@ -104,7 +138,10 @@ class UnitComboBox(QWidget):
             if unit == "mol/h":
                 return value / 1000
             elif unit == "kg/h":
-                return value / 1000  # Approximate, assumes avg MW of 100
+                mw = self._mw()
+                if mw is None:          # unreachable while kg/h is greyed out
+                    raise ValueError("kg/h conversion needs species MW data")
+                return value / mw       # kg/h / (kg/kmol) = kmol/h
             return value  # kmol/h
         return value
 
@@ -128,7 +165,10 @@ class UnitComboBox(QWidget):
             if unit == "mol/h":
                 return si_value * 1000
             elif unit == "kg/h":
-                return si_value * 1000  # Approximate
+                mw = self._mw()
+                if mw is None:          # unreachable while kg/h is greyed out
+                    raise ValueError("kg/h conversion needs species MW data")
+                return si_value * mw    # kmol/h * (kg/kmol) = kg/h
             return si_value  # kmol/h
         return si_value
 

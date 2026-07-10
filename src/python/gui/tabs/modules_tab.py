@@ -4,13 +4,11 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QStackedLayout
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 
 
 class ModulesTab(QWidget):
     """Modules tab for side features and additional functionality."""
-
-    launchModule = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -18,6 +16,7 @@ class ModulesTab(QWidget):
         self.window_state = None
         self.rcm_window = None
         self.bvm_widget = None
+        self.matrix_bvm_widget = None
         self.modules_loaded = False
         
         self._setup_ui()
@@ -35,6 +34,7 @@ class ModulesTab(QWidget):
         self.module_combo.addItems([
             "RCM",
             "BVM",
+            "Matrix BVM",
             "Pure Components (#)",
             "Phase EQ (#)"
         ])
@@ -60,6 +60,11 @@ class ModulesTab(QWidget):
         bvm_layout.setContentsMargins(0, 0, 0, 0)
         self.content_stack.addWidget(self.bvm_container)
 
+        self.matrix_bvm_container = QWidget()
+        matrix_bvm_layout = QVBoxLayout(self.matrix_bvm_container)
+        matrix_bvm_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_stack.addWidget(self.matrix_bvm_container)
+
         main_layout.addStretch()
 
     def _setup_styles(self):
@@ -83,6 +88,8 @@ class ModulesTab(QWidget):
             self._launch_rcm()
         elif module_name == "BVM":
             self._launch_bvm()
+        elif module_name == "Matrix BVM":
+            self._launch_matrix_bvm()
         else:
             self.content_stack.setCurrentWidget(self.placeholder_widget)
 
@@ -110,6 +117,8 @@ class ModulesTab(QWidget):
             self._launch_rcm()
         elif current == "BVM":
             self._launch_bvm()
+        elif current == "Matrix BVM":
+            self._launch_matrix_bvm()
 
     def ensure_bvm(self):
         """Build the BVM widget once and return it, without switching tabs.
@@ -126,6 +135,16 @@ class ModulesTab(QWidget):
         """Launch the BVM module (built once, then reused)."""
         self.ensure_bvm()
         self.content_stack.setCurrentWidget(self.bvm_container)
+
+    def _launch_matrix_bvm(self):
+        """Launch the Matrix BVM module (built once, then reused)."""
+        from ..modules.matrix_bvm_module import MatrixBVMModuleWidget
+        if self.matrix_bvm_widget is None:
+            self.matrix_bvm_widget = MatrixBVMModuleWidget(window_state=self.window_state)
+            self.matrix_bvm_container.layout().addWidget(self.matrix_bvm_widget)
+        else:
+            self.matrix_bvm_widget.window_state = self.window_state
+        self.content_stack.setCurrentWidget(self.matrix_bvm_container)
 
     def _launch_rcm(self):
         """Launch the RCM interface."""

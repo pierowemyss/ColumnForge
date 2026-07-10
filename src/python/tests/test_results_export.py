@@ -23,9 +23,10 @@ def test_profile_to_csv_rows():
     assert prof["found"]
 
     rows = profile_to_csv_rows(prof)
-    assert rows[0] == ["Stage", "T", "benzene", "toluene", "xylene"]
+    assert rows[0][:5] == ["Stage", "T (degC)", "benzene", "toluene", "xylene"]
     assert len(rows) == prof["n_stages"] + 1            # header + one row per stage
-    assert len(rows[0]) == len(prof["comps"]) + 2       # Stage, T, + one per comp
+    assert rows[1][0] == 0, "stages are 0-based from the top"
+    assert rows[-1][0] == prof["n_stages"] - 1
     print(f"results-export self-check OK: {len(rows) - 1} rows, {len(rows[0])} cols")
 
 

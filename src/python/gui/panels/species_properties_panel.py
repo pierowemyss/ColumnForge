@@ -46,30 +46,42 @@ class SpeciesPropertiesPanel(QWidget):
         self.mw_spin.valueChanged.connect(self._on_property_changed)
         properties_layout.addWidget(self.mw_spin, 1, 1)
 
-        properties_layout.addWidget(QLabel("ρ (kg/m³):"), 2, 0)
+        # Honesty policy: density and Cp are stored but no solver consumes them
+        # yet (enthalpy layer + column sizing will) — greyed, not ignored.
+        _unused_tip = "Stored, but not consumed by any solver yet."
+        properties_layout.addWidget(QLabel("ρ (kg/m³) (not used yet):"), 2, 0)
         self.density_spin = QDoubleSpinBox(self)
         self.density_spin.setRange(0, 10000)
         self.density_spin.setDecimals(2)
         self.density_spin.setValue(0)
+        self.density_spin.setEnabled(False)
+        self.density_spin.setToolTip(_unused_tip)
         self.density_spin.valueChanged.connect(self._on_property_changed)
         properties_layout.addWidget(self.density_spin, 2, 1)
 
-        properties_layout.addWidget(QLabel("Cp (J/mol·K):"), 3, 0)
+        properties_layout.addWidget(QLabel("Cp (J/mol·K) (not used yet):"), 3, 0)
         self.cp_spin = QDoubleSpinBox(self)
         self.cp_spin.setRange(0, 10000)
         self.cp_spin.setDecimals(2)
         self.cp_spin.setValue(0)
+        self.cp_spin.setEnabled(False)
+        self.cp_spin.setToolTip(_unused_tip)
         self.cp_spin.valueChanged.connect(self._on_property_changed)
         properties_layout.addWidget(self.cp_spin, 3, 1)
 
         main_layout.addWidget(properties_group)
 
         unifac_group = QGroupBox("UNIFAC Groups")
+        unifac_group.setToolTip(
+            "Consumed by the UNIFAC activity model and by 'Estimate UNIQUAC "
+            "r/q'. Group names must match core/data/unifac_groups.json "
+            "(e.g. CH3, CH2, OH, H2O, ACH).")
         unifac_layout = QVBoxLayout(unifac_group)
 
         self.unifac_table = QTableWidget(0, 2)
         self.unifac_table.setHorizontalHeaderLabels(["Group", "Count"])
         self.unifac_table.horizontalHeader().setStretchLastSection(True)
+        self.unifac_table.cellChanged.connect(self._on_unifac_changed)
         unifac_layout.addWidget(self.unifac_table)
 
         unifac_buttons = QHBoxLayout()
@@ -83,8 +95,12 @@ class SpeciesPropertiesPanel(QWidget):
 
         main_layout.addWidget(unifac_group)
 
-        self.unifac_btn = QPushButton("Estimate with UNIFAC (#)")
+        self.unifac_btn = QPushButton("Estimate UNIQUAC r/q from groups")
+        self.unifac_btn.setToolTip(
+            "Fills this species' UNIQUAC structural r and q by summing group "
+            "R_k / Q_k (r = Σ ν·R, q = Σ ν·Q).")
         self.unifac_btn.setEnabled(False)
+        self.unifac_btn.clicked.connect(self._estimate_uniquac)
         main_layout.addWidget(self.unifac_btn)
 
         main_layout.addStretch()
@@ -152,7 +168,6 @@ class SpeciesPropertiesPanel(QWidget):
         self.unifac_table.insertRow(row)
         self.unifac_table.setItem(row, 0, QTableWidgetItem(""))
         self.unifac_table.setItem(row, 1, QTableWidgetItem("1"))
-        self.unifac_table.cellChanged.connect(self._on_unifac_changed)
 
     def _remove_unifac_group(self):
         row = self.unifac_table.currentRow()
@@ -163,7 +178,42 @@ class SpeciesPropertiesPanel(QWidget):
     def _on_unifac_changed(self, row, column):
         if self.current_species:
             self._update_species_from_ui()
+            self._refresh_estimate_btn()
             self.propertiesChanged.emit()
+
+    def _refresh_estimate_btn(self):
+        """Enable the r/q estimate only when at least one group is entered."""
+        has_groups = any(
+            self.unifac_table.item(r, 0) and self.unifac_table.item(r, 0).text().strip()
+            for r in range(self.unifac_table.rowCount()))
+        self.unifac_btn.setEnabled(bool(self.current_species) and has_groups)
+
+    def _estimate_uniquac(self):
+        """r = Σ ν·R_k, q = Σ ν·Q_k from the entered groups -> UNIQUAC r/q."""
+        from PySide6.QtWidgets import QMessageBox
+        if not self.window_state or not self.current_species:
+            return
+        self._update_species_from_ui()
+        groups = self.window_state.species[self.current_species].unifac_groups
+        from core.thermodynamics import load_unifac_db
+        sub = load_unifac_db()["subgroups"]
+        unknown = [g for g in groups if g not in sub]
+        if unknown:
+            QMessageBox.warning(self, "Unknown UNIFAC groups",
+                                "Not in the group DB: " + ", ".join(unknown))
+            return
+        r = sum(sub[g][2] * n for g, n in groups.items())
+        q = sum(sub[g][3] * n for g, n in groups.items())
+        p = self.window_state.thermodynamics_config.get_component_params(
+            self.current_species)
+        p.uniquac_r, p.uniquac_q = r, q
+        self.window_state.is_modified = True
+        self.propertiesChanged.emit()
+        QMessageBox.information(
+            self, "UNIQUAC r/q estimated",
+            f"{self.current_species}: r = {r:.4f}, q = {q:.4f}\n"
+            "Set as this species' UNIQUAC structural parameters "
+            "(Initialization → Thermodynamics).")
 
     def set_species_list(self, names: list):
         """Set the list of available species names."""
@@ -177,7 +227,6 @@ class SpeciesPropertiesPanel(QWidget):
             self.current_species = name
             self.name_edit.setText(name)
             self.header_label.setText(f"{name} Properties")
-            self.unifac_btn.setEnabled(True)
             self.blockSignals(True)
             self._load_species_from_state()
             self.blockSignals(False)
@@ -203,6 +252,7 @@ class SpeciesPropertiesPanel(QWidget):
                 self.unifac_table.setItem(row, 0, QTableWidgetItem(group))
                 self.unifac_table.setItem(row, 1, QTableWidgetItem(str(count)))
             self.unifac_table.blockSignals(False)
+            self._refresh_estimate_btn()
         else:
             self.clear()
 

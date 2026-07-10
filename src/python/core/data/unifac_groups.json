@@ -1,0 +1,39 @@
+{
+  "_note": "Classic UNIFAC-VLE (Hansen 1991) curated subset. subgroups: id -> [name, main_group, Rk, Qk]. interactions: a_mn[main_i][main_j] in K (asymmetric). Missing pairs default to a=0 (Psi=1, ideal residual for that pair) -- ponytail ceiling, extend the tables for more chemistries.",
+  "subgroups": {
+    "CH3":    ["CH3",    "CH2",   0.9011, 0.848],
+    "CH2":    ["CH2",    "CH2",   0.6744, 0.540],
+    "CH":     ["CH",     "CH2",   0.4469, 0.228],
+    "C":      ["C",      "CH2",   0.2195, 0.000],
+    "CH2=CH": ["CH2=CH", "C=C",   1.3454, 1.176],
+    "CH=CH":  ["CH=CH",  "C=C",   1.1167, 0.867],
+    "ACH":    ["ACH",    "ACH",   0.5313, 0.400],
+    "AC":     ["AC",     "ACH",   0.3652, 0.120],
+    "ACCH3":  ["ACCH3",  "ACCH2", 1.2663, 0.968],
+    "ACCH2":  ["ACCH2",  "ACCH2", 1.0396, 0.660],
+    "OH":     ["OH",     "OH",    1.0000, 1.200],
+    "CH3OH":  ["CH3OH",  "CH3OH", 1.4311, 1.432],
+    "H2O":    ["H2O",    "H2O",   0.9200, 1.400],
+    "CH3CO":  ["CH3CO",  "CH2CO", 1.6724, 1.488],
+    "CH2CO":  ["CH2CO",  "CH2CO", 1.4457, 1.180],
+    "CHO":    ["CHO",    "CHO",   0.9980, 0.948],
+    "CH3COO": ["CH3COO", "CCOO",  1.9031, 1.728],
+    "CH2COO": ["CH2COO", "CCOO",  1.6764, 1.420],
+    "COOH":   ["COOH",   "COOH",  1.3013, 1.224],
+    "CH2Cl":  ["CH2Cl",  "CCl",   1.4654, 1.264]
+  },
+  "interactions": {
+    "CH2":   {"C=C": 86.02, "ACH": 61.13, "ACCH2": 76.50, "OH": 986.5, "CH3OH": 697.2, "H2O": 1318.0, "CH2CO": 476.4, "CHO": 677.0, "CCOO": 232.1, "COOH": 663.5, "CCl": 35.93},
+    "C=C":   {"CH2": -35.36, "ACH": 38.81, "ACCH2": 74.15, "OH": 524.1, "H2O": 270.6},
+    "ACH":   {"CH2": -11.12, "C=C": 3.446, "ACCH2": 167.0, "OH": 636.1, "CH3OH": 637.3, "H2O": 903.8, "CH2CO": 25.77, "CCOO": 5.994, "COOH": 537.4, "CCl": -18.81},
+    "ACCH2": {"CH2": -69.70, "C=C": -113.6, "ACH": -146.8, "OH": 803.2, "CH3OH": 603.3, "H2O": 5695.0, "CH2CO": -52.10, "CCl": -114.1},
+    "OH":    {"CH2": 156.4, "C=C": 457.0, "ACH": 89.60, "ACCH2": 25.82, "CH3OH": -137.1, "H2O": 353.5, "CH2CO": 84.00, "CHO": -203.6, "CCOO": 101.1, "COOH": -289.5, "CCl": 75.62},
+    "CH3OH": {"CH2": 16.51, "ACH": -50.00, "ACCH2": -44.50, "OH": 249.1, "H2O": -181.0, "CH2CO": 23.39, "CCOO": -10.72, "COOH": -202.0},
+    "H2O":   {"CH2": 300.0, "C=C": 496.1, "ACH": 362.3, "ACCH2": 377.6, "OH": -229.1, "CH3OH": 289.6, "CH2CO": -195.4, "CHO": -116.0, "CCOO": 72.87, "COOH": -14.09, "CCl": 325.4},
+    "CH2CO": {"CH2": 26.76, "ACH": 140.1, "ACCH2": 365.8, "OH": 164.5, "CH3OH": 108.7, "H2O": 472.5, "CHO": -37.36, "CCOO": -213.7, "COOH": 669.4},
+    "CHO":   {"CH2": 505.7, "OH": 529.0, "H2O": 480.8, "CH2CO": 128.0},
+    "CCOO":  {"CH2": 114.8, "ACH": 85.84, "ACCH2": -170.0, "OH": 245.4, "CH3OH": 249.6, "H2O": 200.8, "CH2CO": 372.2, "COOH": 660.2},
+    "COOH":  {"CH2": 315.3, "ACH": 62.32, "OH": -151.0, "CH3OH": 339.8, "H2O": -66.17, "CH2CO": -297.8, "CCOO": -256.3},
+    "CCl":   {"CH2": 91.46, "ACH": -2.504, "ACCH2": -143.2, "OH": 562.2, "H2O": 370.4}
+  }
+}

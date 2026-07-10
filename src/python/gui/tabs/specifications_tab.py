@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QTableWidget,
     QTableWidgetItem, QPushButton, QGroupBox, QStackedWidget, QDoubleSpinBox
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 
 from gui.panels.sub_tab_bar import SubTabBar
 from gui.panels.stream_config_panel import StreamConfigPanel
@@ -109,6 +109,35 @@ class SpecificationsTab(QWidget):
         pd_layout.addWidget(self.pressure_drop_spin)
         operating_layout.addWidget(pressure_drop_group)
 
+        # Stage efficiency — Murphree vapour efficiency applied to every tray
+        # (condenser & reboiler stay equilibrium). Column-wide for now; the
+        # solvers already accept a per-stage vector, so a per-stage editor can
+        # bind here later without a backend change.
+        self.efficiency_spin = QDoubleSpinBox(self)
+        self.efficiency_spin.setRange(0.1, 1.0)
+        self.efficiency_spin.setDecimals(3)
+        self.efficiency_spin.setSingleStep(0.05)
+        self.efficiency_spin.setValue(1.0)
+        eff_group = QGroupBox("Stage Efficiency")
+        eff_layout = QHBoxLayout(eff_group)
+        eff_layout.addWidget(QLabel("Murphree (0.1–1.0):"))
+        eff_layout.addWidget(self.efficiency_spin)
+        operating_layout.addWidget(eff_group)
+
+        # Light/heavy key pickers — these drive recovery/purity spec
+        # resolution for the main Run; shared with the BVM module widget via
+        # window_state.light_key_index / heavy_key_index.
+        keys_group = QGroupBox("Key Components")
+        keys_layout = QHBoxLayout(keys_group)
+        keys_layout.addWidget(QLabel("Light key:"))
+        self.lk_combo = QComboBox(self)
+        keys_layout.addWidget(self.lk_combo)
+        keys_layout.addWidget(QLabel("Heavy key:"))
+        self.hk_combo = QComboBox(self)
+        keys_layout.addWidget(self.hk_combo)
+        keys_layout.addStretch()
+        operating_layout.addWidget(keys_group)
+
         # Operating specifications (Aspen-style: pick any N variables)
         op_specs_group = QGroupBox("Operating Specifications")
         op_specs_layout = QVBoxLayout(op_specs_group)
@@ -133,11 +162,6 @@ class SpecificationsTab(QWidget):
         self.config_stack.addWidget(self.reboiler_panel)
 
         layout.addWidget(self.config_stack)
-
-        # Column 3: Blank (for future use)
-        col3 = QWidget()
-        col3.setStyleSheet("background-color: #1a1a1a;")
-        layout.addWidget(col3)
 
         return page
 
@@ -167,6 +191,9 @@ class SpecificationsTab(QWidget):
         self.stream_list.setHorizontalHeaderLabels(["Stream"])
         self.stream_list.horizontalHeader().setStretchLastSection(True)
         self.stream_list.itemSelectionChanged.connect(self._on_stream_selected)
+        # double-click rename: commit to window_state (or revert) — without
+        # this the state keeps the old key and edits land on a ghost stream
+        self.stream_list.itemChanged.connect(self._on_stream_renamed)
         list_layout.addWidget(self.stream_list)
 
         stream_buttons = QHBoxLayout()
@@ -202,6 +229,7 @@ class SpecificationsTab(QWidget):
         # Left: column diagram + DoF status
         self.column_canvas = ColumnOverviewCanvas(self)
         self.column_canvas.elementClicked.connect(self._on_element_clicked)
+        self.column_canvas.streamClicked.connect(self._open_stream_by_id)
 
         overview_group = QGroupBox("Column Diagram")
         overview_layout = QVBoxLayout(overview_group)
@@ -220,8 +248,8 @@ class SpecificationsTab(QWidget):
 
         # Page 0: hint placeholder
         self.ov_placeholder = QLabel(
-            "Double-click an element in the diagram\n"
-            "(condenser, reboiler, distillate, bottoms)\n"
+            "Click an element in the diagram\n"
+            "(condenser, reboiler, or any stream label)\n"
             "to configure it here."
         )
         self.ov_placeholder.setStyleSheet("color: #666666; font-style: italic;")
@@ -245,8 +273,6 @@ class SpecificationsTab(QWidget):
         ov_config_layout.addWidget(self.ov_editor_stack)
         layout.addWidget(self.ov_config_group, 1)
 
-        self._ov_current_stream_id = None
-
         return page
 
     def _create_modules_page(self):
@@ -259,6 +285,17 @@ class SpecificationsTab(QWidget):
         list_group = QGroupBox("Module List")
         list_layout = QVBoxLayout(list_group)
 
+        # Honest UI (same policy as the greyed-out thermo models): a module
+        # raises the DoF spec count but no solver consumes it and the run
+        # path requires exactly 2 operating specs — a column with a module can
+        # never run. Block adding instead of leaving that dead end open.
+        note = QLabel("Modules are not yet solvable — adding is disabled "
+                      "until complex-column support lands. Modules in a "
+                      "loaded file can still be deleted.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #999999; font-style: italic;")
+        list_layout.addWidget(note)
+
         self.module_list = QTableWidget(0, 1)
         self.module_list.setHorizontalHeaderLabels(["Module"])
         self.module_list.horizontalHeader().setStretchLastSection(True)
@@ -269,9 +306,14 @@ class SpecificationsTab(QWidget):
 
         self.add_module_btn = QPushButton("Add")
         self.add_module_btn.clicked.connect(self._add_module)
+        self.add_module_btn.setEnabled(False)
+        self.add_module_btn.setToolTip(
+            "Modules are not yet solvable — coming with complex-column "
+            "support.")
 
         self.module_type_combo = QComboBox(self)
         self.module_type_combo.addItems(["Interreboiler", "Side Stripper", "Side Rectifier"])
+        self.module_type_combo.setEnabled(False)
 
         self.remove_module_btn = QPushButton("Delete")
         self.remove_module_btn.clicked.connect(self._remove_module)
@@ -310,7 +352,38 @@ class SpecificationsTab(QWidget):
     def _connect_signals(self):
         self.pressure_input.valueChanged.connect(self._on_config_changed)
         self.pressure_drop_spin.valueChanged.connect(self._on_config_changed)
+        self.efficiency_spin.valueChanged.connect(self._on_config_changed)
+        self.lk_combo.currentIndexChanged.connect(self._on_keys_changed)
+        self.hk_combo.currentIndexChanged.connect(self._on_keys_changed)
         self.column_canvas.specsChanged.connect(self._on_config_changed)
+
+    def _on_keys_changed(self, *_):
+        """Persist LK/HK selections to the shared window_state."""
+        if not self.window_state:
+            return
+        lk, hk = self.lk_combo.currentIndex(), self.hk_combo.currentIndex()
+        if lk >= 0:
+            self.window_state.light_key_index = lk
+        if hk >= 0:
+            self.window_state.heavy_key_index = hk
+        self.window_state.mark_modified()
+
+    def _rebuild_key_combos(self):
+        """Populate LK/HK dropdowns from species, preserving stored indices
+        (same defaulting as the BVM module: hk falls back to lk+1)."""
+        ws = self.window_state
+        order = ws.get_species_names() if ws else []
+        lk = getattr(ws, "light_key_index", 0) or 0
+        hk = getattr(ws, "heavy_key_index", None)
+        if hk is None:
+            hk = min(lk + 1, len(order) - 1)
+        for combo, idx in ((self.lk_combo, lk), (self.hk_combo, hk)):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(order)
+            if 0 <= idx < len(order):
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
 
     def _on_sub_tab_changed(self, index: int):
         """Handle main sub-tab change."""
@@ -327,26 +400,18 @@ class SpecificationsTab(QWidget):
             self._load_reboiler_into(self.ov_reboiler_panel)
             self.ov_editor_stack.setCurrentWidget(self.ov_reboiler_panel)
             self.ov_config_group.setTitle("Reboiler Configuration")
-        elif element_type in ("distillate", "bottoms"):
-            self._open_stream_in_overview(element_type)
         else:
             # column body / trays / modules: no dedicated editor yet
             self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
             self.ov_config_group.setTitle("Element Configuration")
 
-    def _open_stream_in_overview(self, element_type: str):
-        """Load the distillate/bottoms stream into the overview stream panel."""
-        if not self.window_state:
-            self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
-            return
-        want = StreamType.DISTILLATE if element_type == "distillate" else StreamType.BOTTOMS
-        sid = next((s_id for s_id, s in self.window_state.streams.items()
-                    if s.stream_type == want), None)
-        if sid is None:
+    def _open_stream_by_id(self, sid: str):
+        """Load any clicked stream (feed/product/side draw) into the overview
+        stream panel — the canvas emits the stream id directly."""
+        if not (self.window_state and sid in self.window_state.streams):
             self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
             self.ov_config_group.setTitle("Element Configuration")
             return
-        self._ov_current_stream_id = sid
         self.ov_stream_panel.set_window_state(self.window_state)
         s = self.window_state.streams[sid]
         self.ov_stream_panel.select_stream(sid, {
@@ -355,9 +420,41 @@ class SpecificationsTab(QWidget):
             "temperature": s.temperature,
             "flow": s.flow,
             "composition": s.composition,
+            "phase": s.phase,
         })
         self.ov_editor_stack.setCurrentWidget(self.ov_stream_panel)
         self.ov_config_group.setTitle(f"{sid} Configuration")
+
+    def _stream_item(self, stream_id):
+        """List item carrying the canonical stream id in UserRole, so a rename
+        edit still knows which stream it was."""
+        item = QTableWidgetItem(stream_id)
+        item.setData(Qt.UserRole, stream_id)
+        return item
+
+    def _on_stream_renamed(self, item):
+        """Commit an in-place rename to window_state, or revert the cell."""
+        old_id = item.data(Qt.UserRole)
+        new_id = item.text().strip()
+        if old_id is None or new_id == old_id:
+            return
+        if not (self.window_state and self.window_state.rename_stream(old_id, new_id)):
+            self.stream_list.blockSignals(True)
+            item.setText(old_id)                  # empty/duplicate/unknown -> revert
+            self.stream_list.blockSignals(False)
+            return
+        self.stream_list.blockSignals(True)
+        item.setData(Qt.UserRole, new_id)
+        item.setText(new_id)                      # normalised (stripped) form
+        self.stream_list.blockSignals(False)
+        if self.current_stream_id == old_id:
+            self.current_stream_id = new_id
+        for panel in (self.stream_config, self.ov_stream_panel):
+            if panel.current_stream_id == old_id:
+                panel.current_stream_id = new_id
+        self._update_column_canvas()
+        self._update_dof_status()
+        self.specsChanged.emit()
 
     def _on_stream_selected(self):
         """Handle stream selection."""
@@ -374,7 +471,8 @@ class SpecificationsTab(QWidget):
                         "stage": stream.stage,
                         "temperature": stream.temperature,
                         "flow": stream.flow,
-                        "composition": stream.composition
+                        "composition": stream.composition,
+                        "phase": stream.phase,
                     }
                 self.stream_config.select_stream(self.current_stream_id, stream_data)
 
@@ -385,13 +483,27 @@ class SpecificationsTab(QWidget):
             item = self.module_list.item(row, 0)
             if item:
                 self.current_module_id = item.text()
-                self.module_config.set_config({"type": self.current_module_id.split(" - ")[0] if " - " in self.current_module_id else "Interreboiler"})
+                m = (self.window_state.modules.get(self.current_module_id)
+                     if self.window_state else None)
+                if m is not None:
+                    # restore the stored config (previously reset to defaults,
+                    # losing stage/duty/num_stages on every reselect)
+                    self.module_config.set_config({
+                        "type": m.module_type.value, "stage": m.stage,
+                        "num_stages": m.num_stages, "boilup_ratio": m.boilup_ratio,
+                        "reflux_ratio": m.reflux_ratio, "duty": m.duty,
+                        "associated_streams": m.associated_streams})
+                else:
+                    self.module_config.set_config({
+                        "type": self.current_module_id.split(" - ")[0]
+                        if " - " in self.current_module_id else "Interreboiler"})
 
     def _on_config_changed(self):
         """Operating params (pressure / pressure drop) changed."""
         if self.window_state:
             self.window_state.pressure = self.pressure_input.valueInSI()
             self.window_state.pressure_drop = self.pressure_drop_spin.value()
+            self.window_state.stage_efficiency = self.efficiency_spin.value()
             self.window_state.mark_modified()
         self._update_column_canvas()
         self._update_dof_status()
@@ -495,16 +607,20 @@ class SpecificationsTab(QWidget):
         panel.blockSignals(False)
 
     # --- Streams: shared persist for both the Streams tab and overview editor ---
+    # The PANEL's current_stream_id is the single source of truth for which
+    # stream a save targets — the tab keeps no separate copy that can diverge
+    # (it only mirrors the list-row selection).
 
     def _on_stream_changed(self):
         """Stream edited from the Streams sub-tab."""
-        self._save_stream_from(self.stream_config, self.current_stream_id)
+        self._save_stream_from(self.stream_config)
 
     def _on_ov_stream_changed(self):
         """Stream edited from the overview inline editor."""
-        self._save_stream_from(self.ov_stream_panel, self._ov_current_stream_id)
+        self._save_stream_from(self.ov_stream_panel)
 
-    def _save_stream_from(self, panel, stream_id):
+    def _save_stream_from(self, panel):
+        stream_id = panel.current_stream_id
         if self.window_state and stream_id and stream_id in self.window_state.streams:
             data = panel.get_stream_data()
             stream = self.window_state.streams[stream_id]
@@ -513,6 +629,10 @@ class SpecificationsTab(QWidget):
             stream.temperature = data["temperature"]
             stream.flow = data["flow"]
             stream.composition = data["composition"]
+            stream.phase = data.get("phase", "liquid")
+            # Products the user edits by hand stop being auto_balance targets.
+            if stream.stream_type in (StreamType.DISTILLATE, StreamType.BOTTOMS):
+                stream.user_specified = True
             self.window_state.mark_modified()
 
         self._update_column_canvas()
@@ -542,6 +662,7 @@ class SpecificationsTab(QWidget):
             num_stages=int(cfg.get("num_stages", 1)),
             boilup_ratio=cfg.get("boilup_ratio"),
             reflux_ratio=cfg.get("reflux_ratio"),
+            duty=cfg.get("duty"),
             associated_streams=cfg.get("associated_streams", {}),
         )
 
@@ -551,16 +672,24 @@ class SpecificationsTab(QWidget):
         stream_id = f"Stream {row + 1}"
         
         # Add to state first
+        new_stream = Stream(id=stream_id, stream_type=StreamType.FEED, stage=10)
         if self.window_state:
-            new_stream = Stream(id=stream_id, stream_type=StreamType.FEED, stage=10)
             self.window_state.add_stream(new_stream)
-            
+
         self.stream_list.insertRow(row)
-        self.stream_list.setItem(row, 0, QTableWidgetItem(stream_id))
+        self.stream_list.setItem(row, 0, self._stream_item(stream_id))
         self.stream_config.set_window_state(self.window_state)
         self.current_stream_id = stream_id
         self.stream_list.setCurrentCell(row, 0)
-        self.stream_config.select_stream(stream_id)
+        # Pass the new stream's data so the panel doesn't keep showing the
+        # previously selected stream's numbers.
+        self.stream_config.select_stream(stream_id, {
+            "type": new_stream.stream_type.value,
+            "stage": new_stream.stage,
+            "temperature": new_stream.temperature,
+            "flow": new_stream.flow,
+            "composition": new_stream.composition,
+        })
         self._update_column_canvas()
         self.specsChanged.emit()
 
@@ -615,21 +744,29 @@ class SpecificationsTab(QWidget):
         products = []
         modules = []
 
+        # Stages are 0-based from the top (0 = distillate/condenser, N-1 = reboiler).
+        def _stage(s, default):
+            st = s.stage if s.stage is not None else default
+            return max(0, min(num_stages - 1, st))
+
         for stream_id, stream in self.window_state.streams.items():
             if stream.stream_type == StreamType.FEED:
-                feeds.append((stream.stage if stream.stage else 10, stream_id))
+                feeds.append((_stage(stream, 10), stream_id))
             elif stream.stream_type == StreamType.DISTILLATE:
-                products.append((stream.stage if stream.stage else 1, stream_id, "distillate"))
+                products.append((_stage(stream, 0), stream_id, "distillate"))
             elif stream.stream_type == StreamType.BOTTOMS:
-                products.append((stream.stage if stream.stage else num_stages, stream_id, "bottoms"))
+                products.append((_stage(stream, num_stages - 1), stream_id, "bottoms"))
             elif stream.stream_type == StreamType.SIDESTREAM:
-                products.append((stream.stage if stream.stage else 10, stream_id, "sidestream"))
+                products.append((_stage(stream, 10), stream_id, "sidestream"))
 
         for module_id, module in self.window_state.modules.items():
             modules.append((module.stage, module_id, module.module_type.value.lower()))
 
+        # Feed stage on the canvas comes from the actual feed streams, not a
+        # hardcoded default (plan Phase 2).
+        feed_stage = feeds[0][0] if feeds else num_stages // 2
         self.column_canvas.set_column_config(
-            num_stages, 10, # default feed stage 10 for canvas
+            num_stages, feed_stage,
             self.window_state.condenser_config.condenser_type.value,
             self.window_state.reboiler_config.reboiler_type.value
         )
@@ -662,6 +799,7 @@ class SpecificationsTab(QWidget):
         # Load Operating Parameters
         self.pressure_input.setValue(self.window_state.pressure)
         self.pressure_drop_spin.setValue(self.window_state.pressure_drop)
+        self.efficiency_spin.setValue(getattr(self.window_state, "stage_efficiency", 1.0))
         
         # Update stream config panels with window_state (to get species list)
         self.stream_config.set_window_state(self.window_state)
@@ -674,14 +812,22 @@ class SpecificationsTab(QWidget):
         # Operating-spec slots
         self.operating_specs_panel.set_species(self.window_state.get_species_names())
         self.operating_specs_panel.set_specs(self.window_state.specs)
+        self._rebuild_key_combos()
 
         # Load Streams
         self.stream_list.setRowCount(0)
         for stream_id, stream in self.window_state.streams.items():
             row = self.stream_list.rowCount()
             self.stream_list.insertRow(row)
-            self.stream_list.setItem(row, 0, QTableWidgetItem(stream_id))
-            
+            self.stream_list.setItem(row, 0, self._stream_item(stream_id))
+
+        # Always keep a stream selected (prefer the current one, else row 0) so
+        # edits target a real stream instead of being silently dropped.
+        if self.stream_list.rowCount():
+            target = next((r for r in range(self.stream_list.rowCount())
+                           if self.stream_list.item(r, 0).text() == self.current_stream_id), 0)
+            self.stream_list.setCurrentCell(target, 0)
+
         # Update Canvas
         self._update_column_canvas()
         self._update_dof_status()

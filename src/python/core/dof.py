@@ -51,6 +51,7 @@ OPERATING_KINDS = frozenset({
     SpecKind.DF_RATIO, SpecKind.BF_RATIO,
     SpecKind.LK_RECOVERY, SpecKind.HK_RECOVERY,
     SpecKind.DIST_PURITY, SpecKind.BOTTOMS_PURITY,
+    SpecKind.CONDENSER_DUTY, SpecKind.REBOILER_DUTY,   # energy-balance only
 })
 
 

@@ -73,7 +73,6 @@ def matbal_recovery(zF, F, lk, FR_LK, NK_spec=None, extract=False, E2F=0.0,
     Returns (xD, D, xB, B).
     """
     zF = np.asarray(zF, float)
-    N = len(zF)
 
     if alpha is not None:
         if hk is None:
@@ -168,17 +167,29 @@ def mix_feeds(feeds):
 
 def overall_balance(feeds, *, lk, spec_mode="recovery", FR_LK=None,
                     NK_spec=None, xD=None, xB=None, extract=False,
-                    E2F=0.0, xE=None, hk=None, FR_HK=None, alpha=None):
+                    E2F=0.0, xE=None, hk=None, FR_HK=None, alpha=None,
+                    side_draws=()):
     """General overall balance entry point.
 
-    Combines arbitrary feeds, then dispatches to the spec-mode balance. The
-    current concrete solve handles a single split (distillate + bottoms); the
-    feed-mixing + component-balance structure is the hook for multi-product
-    (side-draw) extensions.
+    Combines arbitrary feeds, removes any side draws from the pool, then
+    dispatches to the spec-mode balance for the remaining D + B split.
+
+    side_draws: iterable of (flow, composition-or-None). A None composition
+    draws at the mixed-feed composition — the shortcut assumption when the
+    stage composition isn't known yet (a rigorous solve refines it).
+    # ponytail: draw-at-feed-composition is the shortcut ceiling; the rigorous
+    # solvers close the true multi-product balance from stage compositions.
 
     Returns (xD, D, xB, B).
     """
     F, z = mix_feeds(feeds)
+    for wflow, wcomp in side_draws:
+        w = np.asarray(wcomp, float) if wcomp is not None else z
+        Fz = F * z - float(wflow) * w
+        F = F - float(wflow)
+        if F <= 0 or np.any(Fz < -1e-9):
+            raise ValueError("side draws exceed the feed pool (overall balance)")
+        z = np.clip(Fz, 0.0, None) / F
     if spec_mode == "recovery":
         if FR_LK is None or (NK_spec is None and alpha is None):
             raise ValueError("recovery balance needs FR_LK and either alpha "
@@ -223,6 +234,13 @@ def _demo():
     Fm, zm = mix_feeds([(60.0, [0.5, 0.3, 0.2]), (40.0, [0.25, 0.4, 0.35])])
     assert abs(Fm - 100.0) < 1e-9
     assert abs(zm.sum() - 1) < 1e-9 and abs(zm[0] - 0.4) < 1e-9
+
+    # Multi-product: a side draw at feed composition closes the full balance.
+    xDs, Ds, xBs, Bs = overall_balance([(F, zF)], lk=0, spec_mode="recovery",
+                                       FR_LK=0.98, NK_spec=1e-3,
+                                       side_draws=[(20.0, None)])
+    assert balance_closes([(F, zF)], [(Ds, xDs), (Bs, xBs), (20.0, zF)], tol=1e-6)
+    assert abs(Ds + Bs + 20.0 - F) < 1e-9
 
     # Geddes distribution: balance closes, keys hit their specified recoveries,
     # and a distributing middle component (non-adjacent keys) appears in BOTH

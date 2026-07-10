@@ -12,9 +12,9 @@ with a model id + params so the whole input crosses the boundary.
 Stages are numbered 1..N top->bottom (1 = condenser stage, N = reboiler stage);
 arrays are 0-based, so stage s lives at index s-1.
 
-This module defines the *shape* and the projection only. The rigorous solvers
-still take their legacy scalar args until they are migrated to consume SolverInput
-(build order step 4); nothing here changes solver behaviour yet.
+This module defines the *shape* and the projection. The rigorous solvers in
+core.column_solvers consume a SolverInput directly (their legacy scalar
+signature survives as a thin shim that builds one).
 """
 
 from __future__ import annotations
@@ -40,8 +40,25 @@ class SolverInput:
     R: float                    # reflux ratio  (resolved operating point)
     D: float                    # distillate molar rate
     gamma_fn: Optional[Callable] = None   # (x, T) -> activity coeffs; None => ideal
+    phi_fn: Optional[Callable] = None     # (y, T, P) -> vapour fugacity coeffs;
+                                          # None => ideal gas (see srk_phi_fn)
+    q: Optional[np.ndarray] = None        # (N,) feed thermal quality per stage;
+                                          # 1 = sat. liquid (default), 0 = sat. vapour
+    condenser: str = "total"    # "total" | "partial" | "none" — top boundary:
+                                # total => liquid distillate at y[top]; partial =>
+                                # top stage is the equilibrium drum, vapour
+                                # distillate; none => no reflux (R must be 0)
+    subcooling: float = 0.0     # reflux/distillate ΔT below the bubble point at
+                                # the condenser (total condenser only); 0 = sat.
+                                # liquid. Consumed by the energy-balance hook.
     # ponytail: gamma_fn is a closure now; stage 2 swaps it for (model_id, params)
     # so the entire input marshals to C/FORTRAN. The arrays above already do.
+
+    def __post_init__(self):
+        if self.q is None:
+            self.q = np.ones(self.n_stages)
+        if self.condenser == "none" and abs(self.R) > 1e-12:
+            raise ValueError("a column without a condenser has no reflux; R must be 0")
 
     @property
     def n_comps(self) -> int:
@@ -74,16 +91,22 @@ def build_solver_input(
     draws: Sequence[Tuple[int, float, float]] = (),
     duties: Sequence[Tuple[int, float]] = (),
     gamma_fn: Optional[Callable] = None,
+    phi_fn: Optional[Callable] = None,
+    condenser: str = "total",
+    subcooling: float = 0.0,
 ) -> SolverInput:
     """Scatter feeds / draws / duties onto the per-stage arrays.
 
-    feeds:    (stage, total_flow, composition[C])  -- composition sums to ~1
+    feeds:    (stage, total_flow, composition[C]) or (stage, flow, comp, q)
+              -- composition sums to ~1; q is the feed thermal quality
+              (1 = saturated liquid, the default; 0 = saturated vapour)
     draws:    (stage, liquid_rate, vapor_rate)
     duties:   (stage, heat)
     pressure: scalar (uniform) or length-N sequence.
 
     A single-element `feeds` reproduces the legacy single-feed column; more than
-    one element is multi-feed, with no other change.
+    one element is multi-feed, with no other change. Two feeds on one stage get
+    a flow-weighted q.
     """
     N = int(n_stages)
     C = len(comps)
@@ -91,8 +114,11 @@ def build_solver_input(
     liquid_draw = np.zeros(N)
     vapor_draw = np.zeros(N)
     duty = np.zeros(N)
+    qF = np.zeros(N)               # flow-weighted q accumulator per stage
 
-    for stage, flow, comp in feeds:
+    for f in feeds:
+        stage, flow, comp = f[0], f[1], f[2]
+        fq = float(f[3]) if len(f) > 3 else 1.0
         _check_stage(stage, N)
         z = np.asarray(comp, float)
         if z.shape != (C,):
@@ -102,6 +128,7 @@ def build_solver_input(
             raise ValueError(
                 f"feed at stage {stage}: composition sums to {z.sum():.4f}, not 1")
         feed[stage - 1] += float(flow) * z
+        qF[stage - 1] += fq * float(flow)
 
     for stage, liq, vap in draws:
         _check_stage(stage, N)
@@ -118,11 +145,15 @@ def build_solver_input(
     elif P.shape != (N,):
         raise ValueError(f"pressure must be scalar or length {N}, got {P.shape}")
 
+    Ftot = feed.sum(axis=1)
+    q = np.where(Ftot > 0.0, np.divide(qF, Ftot, out=np.ones(N), where=Ftot > 0.0), 1.0)
+
     return SolverInput(
         n_stages=N, comps=list(comps), feed=feed,
         liquid_draw=liquid_draw, vapor_draw=vapor_draw, duty=duty,
         pressure=P, antoine=np.asarray(antoine, float),
-        R=float(R), D=float(D), gamma_fn=gamma_fn,
+        R=float(R), D=float(D), gamma_fn=gamma_fn, phi_fn=phi_fn, q=q,
+        condenser=str(condenser).lower(), subcooling=float(subcooling),
     )
 
 
@@ -160,6 +191,26 @@ def _demo() -> None:
         R=3.0, D=40.0, pressure=760.0, antoine=antoine)
     assert si3.liquid_draw[4] == 7.0 and si3.liquid_draw.sum() == 7.0
     assert si3.duty[14] == -1.0e5 and np.count_nonzero(si3.duty) == 1
+
+    # --- feed quality: default 1, 4-tuple feeds set it, co-fed stages blend ---
+    assert np.all(si2.q == 1.0)
+    si_q = build_solver_input(
+        n_stages=20, comps=comps,
+        feeds=[(10, 60.0, z, 1.0), (10, 40.0, z, 0.5)],
+        R=3.0, D=40.0, pressure=760.0, antoine=antoine)
+    assert abs(si_q.q[9] - 0.8) < 1e-12, si_q.q[9]     # flow-weighted
+    assert si_q.q[0] == 1.0                             # feedless stages default
+
+    # --- condenser type is carried; "none" demands R = 0 ---
+    assert si.condenser == "total"
+    try:
+        build_solver_input(n_stages=20, comps=comps, feeds=[(10, 100.0, z)],
+                           R=3.0, D=40.0, pressure=760.0, antoine=antoine,
+                           condenser="none")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("condenser='none' with R>0 should raise")
 
     # --- per-stage pressure profile passes; wrong length is rejected ---
     prof = np.linspace(760.0, 780.0, 20)

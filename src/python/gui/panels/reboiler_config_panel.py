@@ -29,6 +29,11 @@ class ReboilerConfigPanel(QWidget):
         type_layout = QHBoxLayout(type_group)
         self.type_combo = QComboBox(self)
         self.type_combo.addItems(["Kettle", "Thermosiphon", "None"])
+        # "None" removes the reboiler from the DoF ledger; Kettle vs
+        # Thermosiphon is not consumed by any solver yet — say so.
+        self.type_combo.setToolTip(
+            "Kettle and Thermosiphon solve identically for now (the "
+            "distinction is not consumed yet); None removes the reboiler.")
         type_layout.addWidget(self.type_combo)
         type_layout.addStretch()
         main_layout.addWidget(type_group)

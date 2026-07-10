@@ -32,10 +32,22 @@ class DraggableItem:
 
 
 class ColumnOverviewCanvas(QWidget):
-    """Interactive canvas showing an Aspen-style clickable column diagram."""
+    """Interactive canvas showing an Aspen-style clickable column diagram.
 
-    elementClicked = Signal(str)  # Emits element_type when double-clicked
+    Every stream (feed, distillate, bottoms, side draw) is a clickable label
+    chip: single-click selects it and emits streamClicked with the stream id;
+    the condenser/reboiler emit elementClicked the same way. Equipment drags;
+    a press that moves is a drag, a press that doesn't is a click.
+    """
+
+    elementClicked = Signal(str)  # "condenser" | "reboiler" on click
+    streamClicked = Signal(str)   # stream id on click
     specsChanged = Signal()
+
+    # material streams (feeds in, products out) vs internal recycle lines
+    FEED_COLOR = "#1971c2"
+    PRODUCT_COLOR = "#e03131"
+    INTERNAL_COLOR = "#2f9e44"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -45,18 +57,24 @@ class ColumnOverviewCanvas(QWidget):
         self.condenser_type = "Total"
         self.reboiler_type = "Kettle"
         self.window_state = None
-        
+
         self.items = {} # element_type -> DraggableItem
         self.feed_data = []
         self.product_data = []
         self.module_data = []
-        
+
+        self.stream_hits = {}        # stream id -> chip QRectF (rebuilt per paint)
+        self.selected_stream = None
+        self.hover_stream = None
+
         self.dragging_item = None
         self.last_mouse_pos = QPointF()
-        
+        self._press_pos = QPointF()
+        self._press_moved = False
+
         self._init_items()
         self._init_stage_input()
-        
+
         self.setMinimumSize(400, 600)
         self.setStyleSheet("background-color: #f8f9fa;")
         self.setMouseTracking(True)
@@ -83,7 +101,7 @@ class ColumnOverviewCanvas(QWidget):
     def set_column_config(self, num_stages: int, feed_stage: int,
                           condenser_type: str, reboiler_type: str):
         self.num_stages = max(2, num_stages)
-        self.feed_stage = max(1, min(feed_stage, self.num_stages))
+        self.feed_stage = max(0, min(feed_stage, self.num_stages - 1))
         self.condenser_type = condenser_type
         self.reboiler_type = reboiler_type
         self.stage_input.setText(str(self.num_stages))
@@ -106,14 +124,13 @@ class ColumnOverviewCanvas(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        
+
         w, h = self.width(), self.height()
-        
+        self.stream_hits = {}
+
         for item in self.items.values():
-            if item.element_type in ["distillate", "bottoms"]:
-                continue
             item.update_rect(w, h)
-            
+
         col = self.items["column"]
         self._draw_column_shell(painter, col)
         
@@ -188,19 +205,22 @@ class ColumnOverviewCanvas(QWidget):
         painter.setFont(QFont("Arial", 8))
         painter.drawText(rect, Qt.AlignCenter, item.display_name)
 
+    def _stage_to_y(self, col_rect, stage):
+        # Stages are 0-based from the top: 0 = distillate, num_stages-1 = bottoms.
+        frac = (stage + 0.5) / self.num_stages
+        return col_rect.top() + col_rect.height() * frac
+
     def _draw_all_streams(self, painter):
         col_rect = self.items["column"].rect
         cond_rect = self.items["condenser"].rect
         rebo_rect = self.items["reboiler"].rect
-        dist_item = self.items["distillate"]
-        bott_item = self.items["bottoms"]
-        
-        green = "#2f9e44"
-        
+
+        green = self.INTERNAL_COLOR
+
         # 1. Column to Condenser (Vapor Line)
         col_top_center = QPointF(col_rect.center().x(), col_rect.top())
         cond_center = cond_rect.center()
-        
+
         vapor_path = [
             col_top_center,
             QPointF(col_top_center.x(), cond_center.y()),
@@ -212,39 +232,37 @@ class ColumnOverviewCanvas(QWidget):
         cond_bottom = QPointF(cond_center.x(), cond_rect.bottom())
         t_split_y = cond_bottom.y() + 20
         t_split_point = QPointF(cond_bottom.x(), t_split_y)
-        
+
         painter.setPen(QPen(QColor(green), 2))
         painter.drawLine(cond_bottom, t_split_point)
-        
-        # Reflux branch: back to Stage 1 from the RIGHT
-        stage1_y = col_rect.top() + (col_rect.height() * (1 / self.num_stages))
+
+        # Reflux branch: back to the top tray (stage num_stages - 1) from the RIGHT
+        top_y = self._stage_to_y(col_rect, self.num_stages - 1)
         reflux_path = [
             t_split_point,
             QPointF(col_rect.right() + 20, t_split_y),
-            QPointF(col_rect.right() + 20, stage1_y),
-            QPointF(col_rect.right(), stage1_y)
+            QPointF(col_rect.right() + 20, top_y),
+            QPointF(col_rect.right(), top_y)
         ]
         self._draw_orthogonal_path(painter, reflux_path, "Reflux", green, arrow_at_end=True)
-        
+
         # Distillate branch: outbound to the RIGHT (opposite to reflux direction)
         dist_target_x = t_split_point.x() + 60
-        dist_item.rect = QRectF(dist_target_x, t_split_y - 15, dist_item.width, dist_item.height)
-        
         distillate_path = [
             t_split_point,
             QPointF(dist_target_x, t_split_y)
         ]
-        dist_name = "Distillate"
-        for _, name, ptype in self.product_data:
-            if ptype == "distillate":
-                dist_name = name
-                break
-        self._draw_orthogonal_path(painter, distillate_path, dist_name, green, arrow_at_end=True)
+        dist_name = next((name for _, name, ptype in self.product_data
+                          if ptype == "distillate"), "Distillate")
+        self._draw_orthogonal_path(painter, distillate_path, "",
+                                   self.PRODUCT_COLOR, arrow_at_end=True)
+        self._draw_stream_chip(painter, QPointF(dist_target_x + 4, t_split_y),
+                               dist_name, self.PRODUCT_COLOR)
 
         # 3. Column to Reboiler (Liquid Line)
         col_bottom_center = QPointF(col_rect.center().x(), col_rect.bottom())
         rebo_center = rebo_rect.center()
-        
+
         liquid_path = [
             col_bottom_center,
             QPointF(col_bottom_center.x(), rebo_center.y()),
@@ -255,7 +273,7 @@ class ColumnOverviewCanvas(QWidget):
         # 4. Reboiler to Column (Boilup Line)
         rebo_top = QPointF(rebo_center.x(), rebo_rect.top())
         boilup_entry_y = col_rect.bottom() - 5
-        
+
         # Boilup enters from RIGHT (to keep Reflux/Boilup on same side)
         boilup_path = [
             rebo_top,
@@ -264,49 +282,84 @@ class ColumnOverviewCanvas(QWidget):
             QPointF(col_rect.right(), boilup_entry_y)
         ]
         self._draw_orthogonal_path(painter, boilup_path, "Boilup", green, arrow_at_end=True)
-        
-        # 5. Bottoms stream: exits side of reboiler to the LEFT (opposite to Distillate? no, user said point opposite direction)
-        # Wait, user said "make the bottoms and distillate streams point the opposite direction" earlier.
-        # Currently Distillate points LEFT. So Bottoms should point RIGHT.
+
+        # 5. Bottoms stream: exits the reboiler to the RIGHT
         rebo_side_right = QPointF(rebo_rect.right(), rebo_center.y())
         bott_target_x = rebo_side_right.x() + 50
-        bott_item.rect = QRectF(bott_target_x, rebo_side_right.y() - 15, bott_item.width, bott_item.height)
-        
-        bottoms_name = "Bottoms"
-        for _, name, ptype in self.product_data:
-            if ptype == "bottoms":
-                bottoms_name = name
-                break
+        bottoms_name = next((name for _, name, ptype in self.product_data
+                             if ptype == "bottoms"), "Bottoms")
         bottoms_path = [
             rebo_side_right,
             QPointF(bott_target_x, rebo_side_right.y())
         ]
-        self._draw_orthogonal_path(painter, bottoms_path, bottoms_name, green, arrow_at_end=True)
+        self._draw_orthogonal_path(painter, bottoms_path, "",
+                                   self.PRODUCT_COLOR, arrow_at_end=True)
+        self._draw_stream_chip(painter,
+                               QPointF(bott_target_x + 4, rebo_side_right.y()),
+                               bottoms_name, self.PRODUCT_COLOR)
 
-        # 6. Draw Feeds
+        # 6. Draw Feeds (chip sits left of the arrow, pointing into the column)
         for stage, name in self.feed_data:
-            stage_y = col_rect.top() + (col_rect.height() * (stage / self.num_stages))
+            stage_y = self._stage_to_y(col_rect, stage)
             feed_path = [
                 QPointF(col_rect.left() - 50, stage_y),
                 QPointF(col_rect.left(), stage_y)
             ]
-            self._draw_orthogonal_path(painter, feed_path, name, green, arrow_at_end=True)
+            self._draw_orthogonal_path(painter, feed_path, "", self.FEED_COLOR,
+                                       arrow_at_end=True)
+            self._draw_stream_chip(painter,
+                                   QPointF(col_rect.left() - 54, stage_y),
+                                   name, self.FEED_COLOR, align_right=True)
 
         # 7. Draw other products (Sidestreams)
         for stage, name, ptype in self.product_data:
             if ptype not in ["distillate", "bottoms"]:
-                stage_y = col_rect.top() + (col_rect.height() * (stage / self.num_stages))
+                stage_y = self._stage_to_y(col_rect, stage)
                 side_path = [
                     QPointF(col_rect.right(), stage_y),
                     QPointF(col_rect.right() + 50, stage_y)
                 ]
-                self._draw_orthogonal_path(painter, side_path, name, green, arrow_at_end=True)
+                self._draw_orthogonal_path(painter, side_path, "",
+                                           self.PRODUCT_COLOR, arrow_at_end=True)
+                self._draw_stream_chip(painter,
+                                       QPointF(col_rect.right() + 54, stage_y),
+                                       name, self.PRODUCT_COLOR)
+
+    def _draw_stream_chip(self, painter, anchor, label, color_hex,
+                          align_right=False):
+        """Clickable stream label: a rounded chip anchored at the arrow end.
+        Hover tints it, selection fills it; its rect is the click hit-zone."""
+        painter.setFont(QFont("Arial", 8, QFont.Bold))
+        fm = painter.fontMetrics()
+        w = fm.horizontalAdvance(label) + 14
+        h = fm.height() + 6
+        x = anchor.x() - w if align_right else anchor.x()
+        rect = QRectF(x, anchor.y() - h / 2, w, h)
+
+        selected = label == self.selected_stream
+        hover = label == self.hover_stream
+        color = QColor(color_hex)
+        if selected:
+            bg = QColor(color)
+        elif hover:
+            bg = QColor(color)
+            bg.setAlpha(50)
+        else:
+            bg = QColor("#ffffff")
+        painter.setPen(QPen(color, 2 if (selected or hover) else 1))
+        painter.setBrush(QBrush(bg))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(QPen(QColor("#ffffff" if selected else "#212529")))
+        painter.drawText(rect, Qt.AlignCenter, label)
+        # ponytail: chips are keyed by stream id == displayed label; give chips
+        # their own id->label map if display names ever diverge from ids
+        self.stream_hits[label] = rect
 
     def _draw_orthogonal_path(self, painter, points, label, color_hex, arrow_at_end=False):
         painter.setPen(QPen(QColor(color_hex), 2))
         for i in range(len(points) - 1):
             painter.drawLine(points[i], points[i+1])
-        
+
         if arrow_at_end and len(points) >= 2:
             start, end = points[-2], points[-1]
             angle = math.atan2(end.y() - start.y(), end.x() - start.x())
@@ -315,7 +368,7 @@ class ColumnOverviewCanvas(QWidget):
             p2 = end - QPointF(arrow_size * math.cos(angle + math.pi/6), arrow_size * math.sin(angle + math.pi/6))
             painter.setBrush(QBrush(QColor(color_hex)))
             painter.drawPolygon([end, p1, p2])
-            
+
         if label:
             painter.setFont(QFont("Arial", 8))
             painter.setPen(QPen(QColor("#495057")))
@@ -324,8 +377,10 @@ class ColumnOverviewCanvas(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.position()
+        self._press_pos = pos
+        self._press_moved = False
         self.dragging_item = None
-        
+
         for item in reversed(list(self.items.values())):
             if item.contains(pos):
                 self.dragging_item = item
@@ -336,33 +391,49 @@ class ColumnOverviewCanvas(QWidget):
     def mouseMoveEvent(self, event):
         pos = event.position()
         if self.dragging_item:
-            if self.dragging_item.element_type in ["distillate", "bottoms"]:
-                return
-                
+            if (pos - self._press_pos).manhattanLength() > 3:
+                self._press_moved = True
             delta = pos - self.last_mouse_pos
             new_center = self.dragging_item.get_center(self.width(), self.height()) + delta
-            
+
             if 0 < new_center.x() < self.width() and 0 < new_center.y() < self.height():
                 self.dragging_item.offset += delta
                 self.last_mouse_pos = pos
                 self.update()
+            return
 
-    def mouseReleaseEvent(self, event):
-        if self.dragging_item:
-            self.dragging_item = None
+        # hover feedback: pointing hand + tinted chip over anything clickable
+        hover = next((sid for sid, r in self.stream_hits.items()
+                      if r.contains(pos)), None)
+        over_equip = any(it.contains(pos) for it in self.items.values())
+        self.setCursor(Qt.PointingHandCursor if (hover or over_equip)
+                       else Qt.ArrowCursor)
+        if hover != self.hover_stream:
+            self.hover_stream = hover
             self.update()
 
+    def mouseReleaseEvent(self, event):
+        was_drag = self.dragging_item is not None and self._press_moved
+        self.dragging_item = None
+        if not was_drag:
+            self._handle_click(event.position())
+        self.update()
+
     def mouseDoubleClickEvent(self, event):
-        pos = event.position()
+        # a double-click is two clicks; the first already opened the editor
+        self._handle_click(event.position())
+
+    def _handle_click(self, pos):
+        """Single-click: streams first (chips sit on top), then equipment."""
+        for sid, rect in self.stream_hits.items():
+            if rect.contains(pos):
+                self.selected_stream = sid
+                self.streamClicked.emit(sid)
+                return
         for item in reversed(list(self.items.values())):
             if item.contains(pos):
-                if item.element_type.startswith("module_"):
-                    self.elementClicked.emit("tray_10")
-                elif item.element_type == "distillate":
-                    self.elementClicked.emit("distillate")
-                elif item.element_type == "bottoms":
-                    self.elementClicked.emit("bottoms")
-                else:
+                if item.element_type in ("condenser", "reboiler"):
+                    self.selected_stream = None
                     self.elementClicked.emit(item.element_type)
                 return
 
@@ -372,7 +443,7 @@ class ColumnOverviewCanvas(QWidget):
         self.update()
 
     def set_feed_stage(self, feed_stage: int):
-        self.feed_stage = max(1, min(feed_stage, self.num_stages))
+        self.feed_stage = max(0, min(feed_stage, self.num_stages - 1))
         self.update()
 
     def _init_items(self):
@@ -388,15 +459,8 @@ class ColumnOverviewCanvas(QWidget):
         self.items["reboiler"] = DraggableItem("reboiler", "Reboiler", 0.5, 0.9)
         self.items["reboiler"].width = 70
         self.items["reboiler"].height = 50
-
-        # Special items for Distillate and Bottoms labels/interaction
-        self.items["distillate"] = DraggableItem("distillate", "Distillate", 0.7, 0.1)
-        self.items["distillate"].width = 80
-        self.items["distillate"].height = 30
-        
-        self.items["bottoms"] = DraggableItem("bottoms", "Bottoms", 0.7, 0.9)
-        self.items["bottoms"].width = 80
-        self.items["bottoms"].height = 30
+        # Distillate/Bottoms are stream chips drawn (and hit-tested) in
+        # _draw_all_streams, not equipment items.
 
     def _init_stage_input(self):
         self.stage_input = QLineEdit(str(self.num_stages), self)
