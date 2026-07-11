@@ -115,6 +115,21 @@ def test_extractive_stage_count_with_efficiency():
     assert ent_stage < d["N_total"] // 2 < feed_stage, d["feed_stages"]
 
 
+def test_multicomp_feasible_at_file_efficiency():
+    """The file carries stage_efficiency=0.5; the column must size FEASIBLY at its
+    historical operating point (R=1, eff=0.5) -- the primary contract. The stage
+    count is a documented ceiling, not pinned: for this sloppy difference-point
+    split the ideal march already yields ~47 stages (~MESH-real 45), so Murphree
+    eff=0.5 double-counts to ~2x. Match the reference count at eff=1 (tested above);
+    here we only guard that eff<1 no longer wrongly reports infeasible."""
+    ws = _load("multicomp_col.colx")
+    prob, tp = _build(ws, "DMC", "EG")
+    prob.efficiency = float(ws.stage_efficiency)      # 0.5 in the file
+    d = size_column(prob, tp, R=1.0)
+    assert d["feasible"], [f.cls for f in d["findings"]]
+    assert d["N_total"] > 0 and d["feed_stages"]
+
+
 def test_srk_keeps_rectifying_march_in_simplex():
     """E7/S3.2 guard: multicomp_col sets eos_model=SRK. With phi_fn threaded the
     real-efficiency rectifying march tracks the physical (light) branch and pinches

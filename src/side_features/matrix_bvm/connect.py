@@ -83,7 +83,11 @@ def connect(profA, profB, eps_stage=1e-2, efficiency=1.0):
     pB = XB[bj] + t * (XB[bj + 1] - XB[bj])
     locA = float(np.linalg.norm(XA[bi + 1] - XA[bi]))   # local step at the junction
     locB = float(np.linalg.norm(XB[bj + 1] - XB[bj]))
-    tol = max(eps_stage, 0.5 * (locA + locB) / E)
+    # one full marching step is the feed-stage bridge scale. Use the larger side,
+    # not the half-sum: at the junction one profile is often pinched (its local
+    # step collapses to ~0), and halving + averaging with that dead side would
+    # understate the bridge a live feed step actually spans.
+    tol = max(eps_stage, max(locA, locB) / E)
     in_simplex = bool(mid.min() > -1e-6 and mid.max() < 1.0 + 1e-6)
     return {"connected": bool(dmin <= tol and in_simplex), "dmin": float(dmin),
             "nA": float(nA), "nB": float(nB), "point": mid,

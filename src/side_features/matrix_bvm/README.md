@@ -149,8 +149,10 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
   Upgrade path: branch-continuation dew seeded from the previous stage's liquid.
 - **Murphree efficiency** (`Problem.efficiency`, GUI spin) inflates the ideal-stage
   march per direction. For sloppy difference-point splits whose rectifying section
-  already pinches deep (e.g. the multicomp reference, ~45 *ideal* stages), stacking
-  `E<1` on top over-counts; the reference stage count there is matched by the
-  ideal march. Efficiency is validated on cleaner columns (extractive, BTX).
+  already pinches deep (the multicomp reference: ~47 *ideal* stages ≈ the 45-stage
+  eff-0.5 MESH column), the ideal march already lands the real-column count, so
+  stacking `E<1` on top roughly *doubles* it (~93). Such columns size feasibly at
+  any efficiency, but match the MESH stage count at `E=1`; use `E<1` for cleanly
+  pinched columns (extractive → 37 at eff 0.5, ≈ MESH 48; BTX). Both are validated.
 - **Columns with more than three sections** (multiple interior sections) size the
   enclosing two-section problem; full N-section assembly is not wired yet.
