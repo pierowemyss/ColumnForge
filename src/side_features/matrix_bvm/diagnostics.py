@@ -57,8 +57,17 @@ def classify(profiles, conn, *, both_pinched=None, extractive=False,
             findings.append(Finding(cls, "connection",
                                     f"pinched apart, gap {conn['dmin']:.3g} > tol {conn['tol']:.3g}"))
         else:
-            findings.append(Finding("no_connection", "connection",
-                                    f"closest approach {conn['dmin']:.3g} > tol {conn['tol']:.3g}"))
+            # a section truncated at the cap (not pinched) explains the miss better
+            # than a bare "closest approach" -- suggest a higher cap (E9).
+            capped = next((n for n, p in profiles.items()
+                           if p.get("status") == "max" and not p.get("pinched")), None)
+            if capped is not None:
+                findings.append(Finding("max_stages_hit", capped,
+                                        f"reached max stages ({profiles[capped].get('n', '?')}) "
+                                        "without pinching; raise the cap"))
+            else:
+                findings.append(Finding("no_connection", "connection",
+                                        f"closest approach {conn['dmin']:.3g} > tol {conn['tol']:.3g}"))
 
     feasible = len(findings) == 0 and (conn is None or conn["connected"])
     return feasible, findings
@@ -92,6 +101,12 @@ def _demo():
     feas, f = classify({"rectifying": good_prof}, conn_ok,
                        side_draw={"capped": True, "achieved": 0.7})
     assert not feas and f[0].cls == "unreachable_side_purity", f
+
+    # cap-hit (not pinched) that fails to connect -> max_stages_hit, not no_connection
+    capped_prof = {"X": np.array([[0.9, 0.1], [0.6, 0.4]]), "status": "max",
+                   "pinched": False, "n": 200}
+    feas, f = classify({"rectifying": capped_prof}, conn_bad, both_pinched=False)
+    assert not feas and f[0].cls == "max_stages_hit", f
     print("diagnostics self-check OK")
 
 

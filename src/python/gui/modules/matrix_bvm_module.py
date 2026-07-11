@@ -54,6 +54,7 @@ class MatrixBVMModuleWidget(QWidget):
         self._map = None
         self._order_warning = ""
         self._entrainer_prefilled = False
+        self._restored = False
         self._setup_ui()
 
     # ------------------------------------------------------------------ UI
@@ -109,11 +110,19 @@ class MatrixBVMModuleWidget(QWidget):
         left_col.addWidget(adv)
 
         self.size_btn = QPushButton("Size Column"); self.size_btn.clicked.connect(self._on_size)
+        self.limits_btn = QPushButton("Compute R_min / min E/F")
+        self.limits_btn.setToolTip("Runs the reflux (and E/F) minimum bisection "
+                                   "(~dozens of sizings); left off the Size button "
+                                   "so sizing stays snappy.")
+        self.limits_btn.clicked.connect(self._on_limits)
         self.map_btn = QPushButton("Design Map"); self.map_btn.clicked.connect(self._on_map)
         self.send_btn = QPushButton("Send to Rigorous Solver")
         self.send_btn.clicked.connect(self._on_send)
-        for b in (self.size_btn, self.map_btn, self.send_btn):
+        for b in (self.size_btn, self.limits_btn, self.map_btn, self.send_btn):
             left_col.addWidget(b)
+
+        self.extractive.toggled.connect(self._sync_extractive_enabled)
+        self._sync_extractive_enabled(self.extractive.isChecked())
 
         self.status = QLabel("Feed, pressure and thermo come from the shared "
                              "column setup. Stage count is computed, not entered.")
@@ -166,6 +175,10 @@ class MatrixBVMModuleWidget(QWidget):
     def showEvent(self, event):
         # species may have changed on the Initialization tab since last shown
         self._refresh_species()
+        if not self._restored and self.window_state and \
+                getattr(self.window_state, "matrix_bvm_params", None):
+            self.set_params(self.window_state.matrix_bvm_params)
+            self._restored = self._entrainer_prefilled = True   # don't clobber saved
         self._prefill_entrainer()
         super().showEvent(event)
 
@@ -283,6 +296,7 @@ class MatrixBVMModuleWidget(QWidget):
             x_E=x_E, extractive=extractive,
             max_stages=int(self.max_stages.value()),
             efficiency=float(self.eff_spin.value()))
+        self.window_state.matrix_bvm_params = self.get_params()   # mirror for save
         return prob, provider
 
     @staticmethod
@@ -303,26 +317,54 @@ class MatrixBVMModuleWidget(QWidget):
         return ""
 
     # ------------------------------------------------------------- actions
-    def _on_size(self):
+    def _sync_extractive_enabled(self, on):
+        """G7: entrainer combo + E/F spin are only consumed in extractive mode, so
+        grey them out otherwise (the 'consumed or visibly disabled' honesty rule)."""
+        for w in (self.entrainer_combo, self.ef_spin):
+            w.setEnabled(bool(on))
+
+    # ------------------------------------------------------- .colx persistence
+    _PARAM_SPINS = ("rec_lk", "rec_hk", "r_spin", "q_spin", "eff_spin",
+                    "rmax_spin", "map_pts", "ef_spin", "max_stages", "eps_stage")
+
+    def get_params(self) -> dict:
+        """G8: flat snapshot of the Matrix BVM knobs for .colx persistence (mirrored
+        into window_state.matrix_bvm_params, same mechanism as the BVM module)."""
+        d = {k: getattr(self, k).value() for k in self._PARAM_SPINS}
+        d["lk"] = self.lk_combo.currentText()
+        d["hk"] = self.hk_combo.currentText()
+        d["extractive"] = self.extractive.isChecked()
+        d["entrainer"] = self.entrainer_combo.currentText()
+        return d
+
+    def set_params(self, params: dict):
+        """Apply a get_params() snapshot; ignores missing/unknown keys."""
+        if not params:
+            return
+        for k in self._PARAM_SPINS:
+            if k in params:
+                getattr(self, k).setValue(type(getattr(self, k).value())(params[k]))
+        for combo, key in ((self.lk_combo, "lk"), (self.hk_combo, "hk"),
+                           (self.entrainer_combo, "entrainer")):
+            if params.get(key):
+                i = combo.findText(params[key])
+                if i >= 0:
+                    combo.setCurrentIndex(i)
+        if "extractive" in params:
+            self.extractive.setChecked(bool(params["extractive"]))
+
+    def _on_size(self, with_limits=False):
         try:
             prob, provider = self._gather()
             EF = self.ef_spin.value() if self.extractive.isChecked() else None
-            design = _mbvm_api.size_column(prob, provider, R=self.r_spin.value(), EF=EF)
+            design = _mbvm_api.size_column(prob, provider, R=self.r_spin.value(),
+                                           EF=EF, with_limits=with_limits)
         except Exception as exc:
             self.status.setText(f"Sizing failed: {exc}")
             return
         self._design = design
         if design["feasible"]:
-            rmin = design.get("R_min")
-            efmin = design.get("EF_min")
-            msg = (f"Feasible: {design['N_total']} stages, "
-                   f"feed@{design['feed_stages']}. "
-                   f"R_min={rmin:.2f}" if rmin else "Feasible")
-            if efmin is not None:
-                msg += f", min E/F={efmin:.2f}"
-            if self._order_warning:
-                msg += f"  [warning: {self._order_warning}]"
-            self.status.setText(msg)
+            self.status.setText(self._feasible_status(design))
             self._fill_table(design["column"])
         else:
             reasons = "; ".join(f"{f.cls}"
@@ -335,6 +377,29 @@ class MatrixBVMModuleWidget(QWidget):
                 f"Infeasible at R={self.r_spin.value():g}: {reasons}{gap}")
             self.data_table.setRowCount(0)
         self._plot_current()
+
+    def _feasible_status(self, design):
+        """G6: always report the stage count / feed stage; append R_min & min-E/F
+        only when they were computed (the old one-line conditional swallowed the
+        stage count whenever R_min was absent)."""
+        msg = f"Feasible: {design['N_total']} stages, feed@{design['feed_stages']}"
+        rmin, efmin = design.get("R_min"), design.get("EF_min")
+        if rmin is not None:
+            msg += f". R_min={rmin:.2f}"
+        if efmin is not None:
+            msg += f", min E/F={efmin:.2f}"
+        if self._order_warning:
+            msg += f"  [warning: {self._order_warning}]"
+        return msg
+
+    def _on_limits(self):
+        """G11: run the R_min / min-E/F bisection on demand, not on every size."""
+        self.status.setText("Computing R_min / min E/F ...")
+        self.limits_btn.setEnabled(False)
+        try:
+            self._on_size(with_limits=True)
+        finally:
+            self.limits_btn.setEnabled(True)
 
     def _on_view_changed(self, *_):
         if self._design is not None:
@@ -376,9 +441,26 @@ class MatrixBVMModuleWidget(QWidget):
             self.status.setText(f"Handoff failed: {exc}")
             return
         ok = sol.get("found")
+        self._push_results(sol)              # G5: feed the Results tab, not just a label
         self.status.setText(
             f"Warm start -> rigorous solver: {'converged' if ok else 'did not converge'} "
-            f"in {sol['iterations']} iterations ({sol['message']}).")
+            f"in {sol['iterations']} iterations ({sol['message']}). "
+            "Profile sent to the Results tab.")
+
+    def _push_results(self, profile):
+        """G5: store the rigorous-solver profile in WindowState.results and render it
+        in the Results tab (same handoff as the Simulation tab), so the sized column's
+        profiles/duties are inspectable -- not stranded behind a status label."""
+        if not self.window_state:
+            return
+        self.window_state.results = profile
+        mw = self.window()
+        try:
+            summary = mw._normalize_results(profile)
+            mw.results_tab.update_results(summary)
+            mw.tab_widget.setCurrentIndex(3)
+        except AttributeError:
+            pass                              # headless / standalone: state is enough
 
     # -------------------------------------------------------------- plotting
     _SECTION_LS = {"rectifying": "-", "stripping": "--", "intermediate": ":",
@@ -412,12 +494,21 @@ class MatrixBVMModuleWidget(QWidget):
 
         for name, prof in design.get("profiles", {}).items():
             X = np.asarray(prof["X"])
+            # per-stage markers (G9): a one/two-point section is invisible as a
+            # bare line, so draw the stages as dots on the section linestyle.
             ax.plot(X[:, lk], X[:, hk], self._SECTION_LS.get(name, "-"),
-                    lw=1.5, label=name)
+                    marker="o", ms=3, lw=1.5, label=name)
         for pt, mark, lbl in ((design["xD"], "^", "x_D"),
                               (design["xB"], "v", "x_B"),
                               (design["feed_z"], "s", "feed")):
             ax.plot(pt[lk], pt[hk], mark, ms=8, mfc="none", mec="0.2", label=lbl)
+        # entrainer stage marker (G9): the extractive column's upper feed stage
+        col = design.get("column")
+        fs = design.get("feed_stages", [])
+        if col is not None and len(fs) > 1:
+            xe = np.asarray(col["x"])[fs[0]]
+            ax.plot(xe[lk], xe[hk], "*", ms=13, mfc="gold", mec="0.2",
+                    label="entrainer stage")
         conn = design.get("connection")
         if conn is not None:
             pA, pB = conn.get("pointA"), conn.get("pointB")
@@ -429,10 +520,12 @@ class MatrixBVMModuleWidget(QWidget):
         ax.set_xlabel(f"{comps[lk]} mole fraction (LK)")
         ax.set_ylabel(f"{comps[hk]} mole fraction (HK)")
         ok = design["feasible"]
-        title = (f"Ternary projection -- {design['N_total']} stages"
+        # for C>3 the crossing lives in R^(C-1); this is only its LK/HK shadow (Sec 7)
+        proj = "LK/HK projection" if len(comps) > 3 else "Ternary"
+        title = (f"{proj} -- {design['N_total']} stages"
                  if ok else
-                 f"Ternary projection -- gap {conn['dmin']:.3f} "
-                 f"(need <= {conn['tol']:.3f})" if conn else "Ternary projection")
+                 f"{proj} -- gap {conn['dmin']:.3f} "
+                 f"(need <= {conn['tol']:.3f})" if conn else proj)
         ax.set_title(title)
         ax.set_xlim(0, 1.0); ax.set_ylim(0, 1.0)
         ax.legend(fontsize=8, loc="upper right")
@@ -503,14 +596,31 @@ class MatrixBVMModuleWidget(QWidget):
         self._on_size()
 
     def _fill_table(self, col):
+        """Per-stage table: T, liquid x and vapour y for every species, plus the
+        section liquid/vapour molar flows L, V (G10)."""
         comps = self._species_order()
+        x, T = np.asarray(col["x"]), np.asarray(col["T"])
+        y = np.asarray(col.get("y")) if col.get("y") is not None else None
+        L = np.asarray(col.get("liquid_flow")) if col.get("liquid_flow") is not None else None
+        V = np.asarray(col.get("vapor_flow")) if col.get("vapor_flow") is not None else None
         headers = ["Stage", "T (degC)"] + [f"x {c}" for c in comps]
-        x, T = col["x"], col["T"]
+        if y is not None:
+            headers += [f"y {c}" for c in comps]
+        if L is not None:
+            headers.append("L (kmol/h)")
+        if V is not None:
+            headers.append("V (kmol/h)")
         self.data_table.setColumnCount(len(headers))
         self.data_table.setHorizontalHeaderLabels(headers)
         self.data_table.setRowCount(x.shape[0])
         for r in range(x.shape[0]):
             row = [r, round(float(T[r]), 2)] + [round(float(v), 4) for v in x[r]]
+            if y is not None:
+                row += [round(float(v), 4) for v in y[r]]
+            if L is not None:
+                row.append(round(float(L[r]), 2))
+            if V is not None:
+                row.append(round(float(V[r]), 2))
             for c, v in enumerate(row):
                 self.data_table.setItem(r, c, QTableWidgetItem(str(v)))
 
@@ -546,10 +656,19 @@ def _demo():
 
     w._on_size()
     assert w._design is not None and w._design["feasible"], w.status.text()
+    assert "Feasible:" in w.status.text() and "stages" in w.status.text(), w.status.text()
     assert w.data_table.rowCount() == w._design["N_total"]
     assert w.data_table.item(0, 0).text() == "0", "distillate on the top row"
+    # G10: table carries x, y and L/V columns (2 + 3 x-cols + 3 y-cols + L + V)
+    hdrs = [w.data_table.horizontalHeaderItem(c).text()
+            for c in range(w.data_table.columnCount())]
+    assert any(h.startswith("y ") for h in hdrs) and "L (kmol/h)" in hdrs, hdrs
     xD, xB = w._design["xD"], w._design["xB"]
     assert xD[0] > 0.4 > xB[0], (xD, xB)
+    # G7: entrainer widgets are greyed while extractive is off, live while on
+    assert not w.ef_spin.isEnabled(), "E/F greyed when not extractive"
+    w.extractive.setChecked(True); assert w.ef_spin.isEnabled()
+    w.extractive.setChecked(False)
     # default view is ternary; both views render without error
     assert w.view_combo.currentIndex() == 0, "ternary is the default view"
     w.view_combo.setCurrentIndex(1); w.view_combo.setCurrentIndex(0)
@@ -575,6 +694,14 @@ def _demo():
                                                  "xylene": 1.0}))
     main, ent = w._feed_streams()
     assert main.id == "Feed" and ent.id == "Entrainer", (main, ent)
+
+    # G8: knobs round-trip through get_params/set_params (mirrored to window_state)
+    w.r_spin.setValue(7.5); w.q_spin.setValue(0.6); w.hk_combo.setCurrentText("xylene")
+    snap = w.get_params()
+    assert snap["r_spin"] == 7.5 and snap["hk"] == "xylene", snap
+    w2p = MatrixBVMModuleWidget(window_state=ws); w2p._refresh_species()
+    w2p.set_params(snap)
+    assert w2p.r_spin.value() == 7.5 and w2p.hk_combo.currentText() == "xylene"
     w2 = MatrixBVMModuleWidget(window_state=ws)
     w2._refresh_species(); w2._prefill_entrainer()
     assert w2.extractive.isChecked(), "extractive prefilled from second feed"
