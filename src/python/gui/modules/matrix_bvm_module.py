@@ -52,6 +52,8 @@ class MatrixBVMModuleWidget(QWidget):
         self.window_state = window_state
         self._design = None
         self._map = None
+        self._order_warning = ""
+        self._entrainer_prefilled = False
         self._setup_ui()
 
     # ------------------------------------------------------------------ UI
@@ -77,6 +79,10 @@ class MatrixBVMModuleWidget(QWidget):
         opf = QFormLayout(op)
         self.r_spin = self._spin(0.05, 1000.0, 3.0, decimals=3, step=0.25)
         opf.addRow("Reflux ratio R:", self.r_spin)
+        self.q_spin = self._spin(-1.0, 2.0, 1.0, decimals=3, step=0.1)
+        self.q_spin.setToolTip("Feed thermal quality q: 1 = saturated liquid, "
+                               "0 = saturated vapour (like the BVM module).")
+        opf.addRow("Feed quality q:", self.q_spin)
         eff0 = float(getattr(self.window_state, "stage_efficiency", 1.0) or 1.0)
         self.eff_spin = self._spin(0.05, 1.0, eff0, decimals=3, step=0.05)
         self.eff_spin.setToolTip("Murphree vapour efficiency (column-wide); 1 = "
@@ -160,7 +166,29 @@ class MatrixBVMModuleWidget(QWidget):
     def showEvent(self, event):
         # species may have changed on the Initialization tab since last shown
         self._refresh_species()
+        self._prefill_entrainer()
         super().showEvent(event)
+
+    def _prefill_entrainer(self):
+        """Auto-detect a second FEED stream as the entrainer and prefill extractive
+        mode once (E/F from the flow ratio, entrainer species from its dominant
+        component). Runs a single time so it never clobbers later user edits."""
+        if self._entrainer_prefilled or not self.window_state:
+            return
+        main, ent = self._feed_streams()
+        if ent is None or not main or not main.flow:
+            return
+        order = self._species_order()
+        dom = max(ent.composition, key=ent.composition.get)
+        self.extractive.setChecked(True)
+        i = self.entrainer_combo.findText(dom)
+        if i >= 0:
+            self.entrainer_combo.setCurrentIndex(i)
+        self.ef_spin.setValue(float(ent.flow) / float(main.flow))
+        self._entrainer_prefilled = True
+        self.status.setText(f"Detected entrainer stream '{ent.id}' "
+                            f"({dom}, E/F={ent.flow / main.flow:.3g}); main feed "
+                            f"'{main.id}'. Extractive mode prefilled.")
 
     @staticmethod
     def _spin(lo, hi, val, decimals=3, step=0.1):
@@ -175,11 +203,33 @@ class MatrixBVMModuleWidget(QWidget):
     def _species_order(self):
         return self.window_state.get_species_names() if self.window_state else []
 
+    def _feed_streams(self):
+        """(main_feed, entrainer_feed|None) from the shared streams.
+
+        Extractive columns carry a second FEED stream (a near-pure solvent fed
+        high in the column). The entrainer is the near-pure single-component FEED
+        (max mole fraction >= 0.95), or one whose id names it; the main feed is
+        the multicomponent one. With <2 feeds the entrainer is None.
+        """
+        feeds = [s for s in self.window_state.streams.values()
+                 if s.stream_type == StreamType.FEED and s.composition]
+        if not feeds:
+            return None, None
+        if len(feeds) == 1:
+            return feeds[0], None
+
+        def is_entrainer(s):
+            return ("entrain" in s.id.lower()
+                    or (s.composition and max(s.composition.values()) >= 0.95))
+        ent = next((s for s in feeds if "entrain" in s.id.lower()), None) \
+            or next((s for s in feeds if is_entrainer(s)), None)
+        if ent is None:
+            return feeds[0], None
+        main = next((s for s in feeds if s is not ent), feeds[0])
+        return main, ent
+
     def _feed_stream(self):
-        for s in self.window_state.streams.values():
-            if s.stream_type == StreamType.FEED:
-                return s
-        return None
+        return self._feed_streams()[0]
 
     def _gather(self):
         """Build (problem, provider) from window_state + local levers.
@@ -191,7 +241,7 @@ class MatrixBVMModuleWidget(QWidget):
         order = self._species_order()
         if len(order) < 2:
             raise ValueError("Need at least 2 species (Initialization tab).")
-        feed = self._feed_stream()
+        feed, ent_stream = self._feed_streams()
         if feed is None or not feed.flow or not feed.composition:
             raise ValueError("Feed stream needs a flow rate and composition.")
         z = np.array([feed.composition.get(n, 0.0) for n in order], float)
@@ -208,24 +258,49 @@ class MatrixBVMModuleWidget(QWidget):
         gamma_fn = self.window_state.build_gamma_fn(order)
         phi_fn = self.window_state.build_phi_fn(order)   # SRK EOS or None (ideal gas)
         provider = FreeColumnThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
+        self._order_warning = self._volatility_warning(order, antoine, P, provider)
 
         extractive = self.extractive.isChecked()
         x_E = None
         if extractive:
-            ent = self.entrainer_combo.currentIndex()
-            if ent < 0:
-                raise ValueError("Select an entrainer species for extractive mode.")
-            if ent in (lk, hk):
-                raise ValueError("Entrainer must differ from the light/heavy keys.")
-            x_E = np.zeros(len(order)); x_E[ent] = 1.0    # pure-entrainer feed
+            if ent_stream is not None:      # real entrainer stream: use its comp
+                x_E = np.array([ent_stream.composition.get(n, 0.0) for n in order],
+                               float)
+                if x_E.sum() > 0:
+                    x_E = x_E / x_E.sum()
+            else:                            # no stream: pure entrainer from combo
+                e = self.entrainer_combo.currentIndex()
+                if e < 0:
+                    raise ValueError("Select an entrainer species for extractive mode.")
+                if e in (lk, hk):
+                    raise ValueError("Entrainer must differ from the light/heavy keys.")
+                x_E = np.zeros(len(order)); x_E[e] = 1.0
 
         prob = build_problem(
-            comps=order, feeds=[(z, float(feed.flow), 1.0)], pressure=P,
-            lk=lk, hk=hk, rec_lk=self.rec_lk.value(), rec_hk=self.rec_hk.value(),
+            comps=order, feeds=[(z, float(feed.flow), float(self.q_spin.value()))],
+            pressure=P, lk=lk, hk=hk,
+            rec_lk=self.rec_lk.value(), rec_hk=self.rec_hk.value(),
             x_E=x_E, extractive=extractive,
             max_stages=int(self.max_stages.value()),
             efficiency=float(self.eff_spin.value()))
         return prob, provider
+
+    @staticmethod
+    def _volatility_warning(order, antoine, P, provider):
+        """E10: species order is supposed to run light -> heavy (the non-key split
+        rule keys off index position). We validate rather than reorder (reordering
+        would remix the key/entrainer combos): return a warning string when the
+        pure-component bubble points are not ascending, else ''."""
+        try:
+            Tb = [float(provider.bubble_T(np.eye(len(order))[i], P))
+                  for i in range(len(order))]
+        except Exception:
+            return ""
+        bad = [order[i] for i in range(1, len(Tb)) if Tb[i] < Tb[i - 1] - 1e-6]
+        if bad:
+            return ("species not ordered light->heavy by boiling point "
+                    f"({', '.join(bad)} out of order); non-key split may be wrong")
+        return ""
 
     # ------------------------------------------------------------- actions
     def _on_size(self):
@@ -245,6 +320,8 @@ class MatrixBVMModuleWidget(QWidget):
                    f"R_min={rmin:.2f}" if rmin else "Feasible")
             if efmin is not None:
                 msg += f", min E/F={efmin:.2f}"
+            if self._order_warning:
+                msg += f"  [warning: {self._order_warning}]"
             self.status.setText(msg)
             self._fill_table(design["column"])
         else:
@@ -491,8 +568,21 @@ def _demo():
 
     w._on_send()
     assert "rigorous solver" in w.status.text(), w.status.text()
+
+    # second FEED stream -> auto-detected entrainer, extractive prefilled from flows
+    ws.add_stream(Stream(id="Entrainer", stream_type=StreamType.FEED, stage=2,
+                         flow=50.0, composition={"benzene": 0.0, "toluene": 0.0,
+                                                 "xylene": 1.0}))
+    main, ent = w._feed_streams()
+    assert main.id == "Feed" and ent.id == "Entrainer", (main, ent)
+    w2 = MatrixBVMModuleWidget(window_state=ws)
+    w2._refresh_species(); w2._prefill_entrainer()
+    assert w2.extractive.isChecked(), "extractive prefilled from second feed"
+    assert abs(w2.ef_spin.value() - 0.5) < 1e-9, w2.ef_spin.value()  # 50/100
+    assert w2.entrainer_combo.currentText() == "xylene", w2.entrainer_combo.currentText()
     print(f"matrix_bvm_module self-check OK  N={w._design['N_total']} "
-          f"feed@{w._design['feed_stages']} xD={np.round(xD, 3)}")
+          f"feed@{w._design['feed_stages']} xD={np.round(xD, 3)}  "
+          f"entrainer-detect OK (E/F={w2.ef_spin.value():.2f})")
 
 
 if __name__ == "__main__":
