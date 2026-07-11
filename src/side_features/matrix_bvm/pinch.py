@@ -75,16 +75,28 @@ def classify_pinch(J):
     return {"kind": kind, "eigvals": w, "eigvecs": V, "saddle": kind == "saddle"}
 
 
-def bisect_min(feasible_fn, lo, hi, tol=1e-3, max_iter=40):
+def bisect_min(feasible_fn, lo, hi, tol=1e-3, max_iter=40, prescan=12):
     """Smallest x in [lo,hi] with feasible_fn(x) True, by bisection.
 
-    Assumes monotone: infeasible below the threshold, feasible above. Returns
-    None if even `hi` is infeasible.
+    Feasibility in R (and E/F) is an upper set in the ideal case, but E2's local
+    connection tolerance can open a spurious feasible *island* at low x. So we
+    coarse pre-scan first (E14) and bracket the boundary of the final feasible
+    run -- the smallest grid point whose whole tail stays feasible -- then bisect
+    inside that bracket. A lone low-x island is skipped, not mistaken for R_min.
+    Returns None if even `hi` is infeasible.
     """
     if not feasible_fn(hi):
         return None
     if feasible_fn(lo):
         return lo
+    if prescan and prescan >= 2:
+        grid = [lo + (hi - lo) * k / (prescan - 1) for k in range(prescan)]
+        feas = [feasible_fn(x) for x in grid]
+        # first index from which every sample is feasible (start of the final run)
+        start = prescan - 1
+        while start > 0 and feas[start - 1]:
+            start -= 1
+        lo, hi = grid[start - 1], grid[start]     # boundary lies in this cell
     while hi - lo > tol:
         mid = 0.5 * (lo + hi)
         if feasible_fn(mid):
@@ -128,7 +140,14 @@ def _demo():
     assert Rmin is not None and 0.2 < Rmin < 20.0, Rmin
     assert not feasible(Rmin * 0.7), "below R_min should be infeasible"
     assert feasible(Rmin * 1.5), "above R_min should be feasible"
-    print(f"pinch self-check OK  pinch={cl['kind']}  R_min~{Rmin:.2f}")
+
+    # E14: a spurious low-x feasible island must not be reported as the minimum --
+    # the pre-scan brackets the boundary of the final feasible run instead.
+    def islanded(x):
+        return (0.10 <= x <= 0.15) or x >= 5.0     # island at ~0.1, real onset at 5
+    got = bisect_min(islanded, 0.0, 10.0, tol=1e-3, prescan=21)
+    assert 4.5 < got < 5.5, f"island skipped -> boundary near 5, got {got}"
+    print(f"pinch self-check OK  pinch={cl['kind']}  R_min~{Rmin:.2f}  island->{got:.2f}")
 
 
 if __name__ == "__main__":

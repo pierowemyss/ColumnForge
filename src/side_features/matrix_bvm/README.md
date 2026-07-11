@@ -38,7 +38,7 @@ the big block matrix of the rigorous MESH solve.
 | `problem.py` | feeds/draws/entrainer/spec → overall balance `(x_D, x_B, D, B)` |
 | `thermo_adapter.py` | the `ThermoProvider` interface + `FreeColumnThermo` wrapper |
 | `sections.py` | the difference-point chain `(Δ_k, δ_k)` + operating-line coeffs |
-| `march.py` | equilibrium + operating-line stepping, stable-direction selection |
+| `march.py` | equilibrium + operating-line stepping, stable-direction selection, Murphree efficiency |
 | `anchor.py` | product ends, continuation, saddle-pinch manifold launch |
 | `connect.py` | closest-approach connection in full `R^(C-1)` → stage counts |
 | `place.py` | feed operating-line crossover, side-draw purity target |
@@ -59,7 +59,7 @@ from thermo_adapter import FreeColumnThermo
 from problem import build_problem
 import api
 
-tp = FreeColumnThermo(antoine, gamma_fn=gamma_fn)          # §17 provider
+tp = FreeColumnThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)   # §17 provider (SRK optional)
 prob = build_problem(comps, feeds=[(z, F, q)], pressure=P,
                      lk=0, hk=1, rec_lk=0.98, rec_hk=0.02)
 
@@ -131,11 +131,16 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
   machinery, but exact literature stage counts need finer invariant-manifold
   tracing than the current forward-map launch. Feasibility and min-`E/F` *trends*
   are captured; three-digit stage counts for extractive designs are not the goal.
-- **Reactive** provides the Ung–Doherty reaction-invariant transform (validated
-  for invariance); full reactive column sizing marches in transformed coordinates
-  using the physical VLE as the stagewise closure.
+- **Reactive is NOT consumed by the sizing loop.** `reactive.py` provides the
+  Ung–Doherty reaction-invariant transform (validated for invariance), but
+  `size_column` does not march in transformed coordinates — it raises
+  `NotImplementedError` if a `Problem.reactions` set is supplied rather than
+  silently ignoring it. Transformed-space marching (physical VLE as the stagewise
+  closure) is the upgrade path; the GUI exposes no reactive input.
 - **`R_min` / min-`E/F`** come from bisection on the connection boundary (robust,
-  equivalent to pinch tangency) rather than a direct pinch-tangency solve.
+  equivalent to pinch tangency) rather than a direct pinch-tangency solve. The
+  bisection coarse-pre-scans first so a spurious low-`R` feasibility island (from
+  the local connection tolerance) is not mistaken for the minimum.
 - **`dew()` uses a γ(y) proxy**, not a self-consistent γ(x) fixed point. The
   audit-preferred γ(x) dew was implemented and reverted: for the stiff
   MEOH/DMC/EG multicomp reference it has a second (EG-heavy) root the rectifying

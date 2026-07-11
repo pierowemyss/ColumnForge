@@ -199,9 +199,22 @@ def test_warm_start_beats_cold_start():
                               **common)
     cold = solve_bubble_point(z, 100.0, BTX, comps, **common)
     assert warm["found"] and cold["found"]
-    assert warm["iterations"] <= cold["iterations"]
-    # to a consistent structure (same distillate)
+    # both reach the same column (same distillate)
     assert np.allclose(warm["x"][0], cold["x"][0], atol=1e-3)
+    assert warm["iterations"] <= cold["iterations"]
+
+    # The real warm-start win is GUESS QUALITY, not the iteration tail (which is
+    # dominated by the solver's own convergence): the BVM handoff must land the
+    # whole profile materially close to the converged MESH profile, and much
+    # closer than a flat feed-composition cold guess would (E12).
+    xsol = np.asarray(warm["x"])
+    x0 = np.asarray(init["x0"])
+    warm_gap = float(np.abs(x0 - xsol).max())
+    cold_gap = float(np.abs(z[None, :] - xsol).max())      # flat-feed cold guess
+    assert warm_gap < 0.15, warm_gap                        # on-target profile
+    assert warm_gap < 0.5 * cold_gap, (warm_gap, cold_gap)  # real margin over cold
+    # temperatures too: handoff T0 within ~15 K of the converged column
+    assert np.abs(np.asarray(init["T0"]) - np.asarray(warm["T"])).max() < 15.0
 
 
 # -- Sec 19: reactive ------------------------------------------------------

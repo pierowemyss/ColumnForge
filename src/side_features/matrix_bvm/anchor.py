@@ -70,6 +70,15 @@ def saddle_pinch(sec, x_guess, tp, P):
     return cl
 
 
+def unstable_eigvec(cl):
+    """The eigenvector of the largest |lambda| (E8): np.linalg.eig column order is
+    arbitrary, so `eigvecs[:, 0]` can be the *stable* direction and trace the wrong
+    manifold. The unstable manifold -- the one the interior profile follows away
+    from the saddle -- is spanned by the eigenvector whose |lambda| > 1 is largest."""
+    w, V = np.asarray(cl["eigvals"]), np.asarray(cl["eigvecs"])
+    return V[:, int(np.argmax(np.abs(w)))]
+
+
 def launch_from_saddle(sec, xstar, eigvec, tp, P, eps=1e-3, n=200):
     """Trace the (unstable) manifold: march the forward map off x* +/- eps*v.
 
@@ -115,7 +124,11 @@ def _demo():
     cl = saddle_pinch(ext, guess, tp, 760.0)
     assert cl["kind"] in ("saddle", "stable_node", "unstable_node")
     assert np.isfinite(cl["eigvals"]).all()
-    prof = launch_from_saddle(ext, cl["xstar"], cl["eigvecs"][:, 0], tp, 760.0, n=50)
+    # E8: launch off the |lambda|>1 direction, not an arbitrary eig column
+    v = unstable_eigvec(cl)
+    assert abs(cl["eigvals"][int(np.argmax(np.abs(cl["eigvals"])))]) >= \
+        abs(cl["eigvals"][int(np.argmin(np.abs(cl["eigvals"])))])
+    prof = launch_from_saddle(ext, cl["xstar"], v, tp, 760.0, n=50)
     assert prof["X"].shape[0] >= 2
     assert np.linalg.norm(prof["X"][-1] - cl["xstar"]) > 1e-4, "manifold should travel"
 

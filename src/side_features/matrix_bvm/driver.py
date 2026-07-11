@@ -17,7 +17,7 @@ from sections import (single_feed_chain, extractive_chain, multifeed_chain)
 from march import march_section
 from connect import connect
 from place import crossover_stage, side_draw_stage
-from anchor import saddle_pinch, launch_from_saddle
+from anchor import saddle_pinch, launch_from_saddle, unstable_eigvec
 from diagnostics import classify
 from pinch import bisect_min
 
@@ -91,7 +91,7 @@ def _mid_march(mid_sec, anchor, tp, P, max_stages, efficiency=1.0):
     if mprof["status"] == "max" and not mprof["pinched"]:
         cl = saddle_pinch(mid_sec, anchor, tp, P)
         if cl["saddle"]:
-            mprof = launch_from_saddle(mid_sec, cl["xstar"], cl["eigvecs"][:, 0],
+            mprof = launch_from_saddle(mid_sec, cl["xstar"], unstable_eigvec(cl),
                                        tp, P, n=max_stages)
     return mprof
 
@@ -195,6 +195,14 @@ def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive)
 
 def size_column(prob, tp, R, S=None, EF=None):
     """Size the column at (R, S, EF). Returns a `design` dict (see module doc)."""
+    # E11: reactive marching (transformed-coordinate closure) is not wired into the
+    # sizing loop. Rather than silently ignore a reaction set the caller supplied,
+    # refuse it -- reactive.transform is validated for invariance but not consumed
+    # here. Remove this guard when transformed-space marching lands.
+    if getattr(prob, "reactions", None) is not None:
+        raise NotImplementedError(
+            "reactive column sizing is not wired into size_column yet; "
+            "reactive.transform is available but the march does not consume it.")
     extractive = prob.extractive and prob.x_E is not None
     xD, xB, D, B = overall_balance(prob, EF if extractive else None)
     P = prob.pressure

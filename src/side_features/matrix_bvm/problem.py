@@ -52,6 +52,7 @@ class Problem:
     reactions: object = None          # Reactions (reactive.py) or None
     max_stages: int = 200             # per-section marching cap
     efficiency: float = 1.0           # Murphree vapour efficiency (1 = ideal stages)
+    balance_residual: float = 0.0     # E13: unclosed |f - (D xD + B xB)|/F, explicit path
 
     @property
     def C(self):
@@ -100,7 +101,19 @@ def overall_balance(prob, EF=None):
         a = xD - xB
         D = float(a @ (f - F * xB) / (a @ a))
         D = min(max(D, 1e-9), F - 1e-9)
-        return xD, xB, D, F - D
+        B = F - D
+        # E13: least-squares D can absorb products that don't actually close the
+        # component balance. Report the leftover so an inconsistent xD/xB isn't
+        # silently "solved" -- the residual is the mass the products can't account
+        # for, per unit feed.
+        resid = float(np.linalg.norm(f - (D * xD + B * xB)) / F)
+        prob.balance_residual = resid
+        if resid > 1e-3:
+            import warnings
+            warnings.warn(f"explicit xD/xB do not close the feed balance "
+                          f"(residual {resid:.3g} of F); D fit by least squares",
+                          stacklevel=2)
+        return xD, xB, D, B
 
     # recovery-based split
     if prob.nonkey_to_dist is not None:
@@ -162,6 +175,17 @@ def _demo():
                        xD=np.array([0.8, 0.2, 0.0]), xB=np.array([0.05, 0.45, 0.5]))
     xD2, xB2, D2, B2 = overall_balance(p2)
     assert abs(D2 + B2 - 100.0) < 1e-9
+
+    # E13: products inconsistent with the feed -> residual reported, warning raised
+    import warnings
+    # both products omit xylene, which the feed has at 0.25 -> cannot close
+    p3 = build_problem(comps, [(z, 100.0)], pressure=760.0,
+                       xD=np.array([0.9, 0.1, 0.0]), xB=np.array([0.7, 0.3, 0.0]))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        overall_balance(p3)
+    assert p3.balance_residual > 1e-3 and any("balance" in str(w.message)
+                                              for w in caught), p3.balance_residual
     print("problem self-check OK", np.round(xD, 3), np.round(xB, 3), round(D, 2))
 
 
