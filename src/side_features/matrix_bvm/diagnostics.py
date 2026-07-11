@@ -1,196 +1,98 @@
-"""Feasibility classification (blueprint Section 12-13; goal unit 9).
+"""Infeasibility classification (blueprint Sec 11).
 
-Given a Problem, a ThermoProvider and a state U (usually U0), return a list of
-`Finding`s — each naming a failure *class* and the offending stage(s), never a
-bare boolean. The classes mirror the blueprint's failure modes:
+Matrix BVM returns a *classified* verdict, not a boolean. Each finding names the
+offending section and the controlling composition/pinch so the user learns why a
+split failed, not merely that it did. Classes mirror the Sec 11 table:
 
-    pinch_singularity        Jacobian degenerates (a near-singular diagonal block)
-    phase_disappearance      a liquid or vapour flow collapses toward zero
-    thermodynamic_invalidity K undefined / non-positive, or no bubble point
-    flow_reversal            a component flow goes negative
-    infeasible_feed_coupling DOF not square, or a non-positive product rate
+    below_min_reflux        regions pinch before overlapping
+    no_connection           closest approach never within a stage step
+    leaves_simplex          a marched profile went negative / exited
+    boundary_block          required connection lies across a distillation boundary
+    infeasible_entrainer    extractive manifolds cannot bridge at this E/F
+    cannot_anchor           no controlling saddle on the interior-section pathway
+    unreachable_side_purity side-product target never attained on the profile
+    thermo_invalid          thermo returned no valid K / single phase
 
-`assess` bundles them into a structural / physical / thermodynamic feasibility
-report (Section 12).
+`classify` inspects marched profiles + a connection result; it does not re-march.
 """
 
-from dataclasses import dataclass, field
-from typing import List
+from collections import namedtuple
 
 import numpy as np
 
-from residual import unpack, flows
-from jacobian import jacobian_blocks, dense_from_blocks
-
-PINCH = "pinch_singularity"
-PHASE = "phase_disappearance"
-THERMO = "thermodynamic_invalidity"
-REVERSAL = "flow_reversal"
-FEED = "infeasible_feed_coupling"
+Finding = namedtuple("Finding", "cls section detail")
 
 
-@dataclass
-class Finding:
-    cls: str
-    stages: List[int]
-    message: str
-
-    def __repr__(self):
-        return f"Finding({self.cls}, stages={self.stages}, {self.message!r})"
+def _left_simplex(prof):
+    return prof["status"] == "simplex" or float(prof["X"].min()) < -1e-3
 
 
-def _flow_findings(prob, l, v, L, V, floor=1e-6):
-    out = []
-    rev = sorted(set(np.where(l < -1e-9)[0].tolist())
-                 | set(np.where(v < -1e-9)[0].tolist()))
-    if rev:
-        out.append(Finding(REVERSAL, rev, "negative component flow(s)"))
-    gone = sorted(set(np.where(L < floor)[0].tolist())
-                  | set(np.where(V < floor)[0].tolist()))
-    if gone:
-        out.append(Finding(PHASE, gone,
-                           "liquid or vapour flow collapsed toward zero"))
-    return out
+def classify(profiles, conn, *, both_pinched=None, extractive=False,
+             side_draw=None):
+    """Return (feasible, [Finding]). `profiles` maps section name -> march dict.
 
-
-def _thermo_findings(prob, provider, x, T):
-    bad = []
-    try:
-        K = provider.K(x, T, prob.pressure)
-        rows = np.where(~np.all(np.isfinite(K) & (K > 0), axis=1))[0]
-        bad.extend(rows.tolist())
-    except Exception:
-        bad.append(-1)
-    for i in range(prob.n_stages):
-        try:
-            provider.bubble_T(x[i], prob.pressure[i])
-        except Exception:
-            bad.append(i)
-    bad = sorted(set(bad))
-    return [Finding(THERMO, bad, "K non-positive/non-finite or no bubble point")] if bad else []
-
-
-def _feed_findings(prob):
-    out = []
-    rep = prob.dof_report()
-    if rep.status != "exact":
-        out.append(Finding(FEED, [], f"DOF not square ({rep.status}): {rep.message}"))
-    F = float(prob.feed.sum())
-    # raw product rates implied by the specs, before any clipping
-    D = prob.top_spec.value if prob.top_spec.kind == "distillate_rate" else None
-    B = prob.bottom_spec.value if prob.bottom_spec.kind == "bottoms_rate" else None
-    if D is not None and B is not None and abs(D + B - F) > 1e-6 * max(F, 1.0):
-        out.append(Finding(FEED, [], f"distillate + bottoms ({D:.3g}+{B:.3g}) "
-                                     f"conflict with feed {F:.3g}"))
-    if (D is not None and not (0 < D < F)) or (B is not None and not (0 < B < F)):
-        out.append(Finding(FEED, [], f"product rate outside (0, F={F:.3g})"))
-    return out
-
-
-def _pinch_findings(prob, provider, U, cond_tol=1e12):
-    """Near-singular Jacobian => pinch. Reports the worst-conditioned diagonal
-    block's stage(s). Dense SVD is fine at feasibility-assessment scale."""
-    try:
-        A, B, Cc = jacobian_blocks(U, prob, provider)
-    except Exception:
-        return [Finding(PINCH, [], "Jacobian assembly failed")]
-    # smallest singular value of each diagonal block -> most degenerate stage
-    smin = np.array([np.linalg.svd(B[i], compute_uv=False)[-1]
-                     for i in range(prob.n_stages)])
-    smax = np.array([np.linalg.svd(B[i], compute_uv=False)[0]
-                     for i in range(prob.n_stages)])
-    cond = np.where(smin > 0, smax / smin, np.inf)
-    worst = np.where(cond > cond_tol)[0].tolist()
-    if worst:
-        return [Finding(PINCH, worst,
-                        f"near-singular Jacobian block (cond>{cond_tol:.0e})")]
-    return []
-
-
-def classify(prob, provider, U):
-    """All findings for a state U. Empty list => no failure mode detected."""
-    N, C = prob.n_stages, prob.C
-    R = prob.reactions.n_rxn if prob.reactions is not None else 0
-    l, v, T, xi = unpack(U, N, C, R)
-    L, V, x, y = flows(l, v)
+    conn is the connect() result for the controlling section pair. Pass
+    both_pinched=True when both connecting sections reached a pinch without
+    meeting (the R_min / min-E/F signature). side_draw is a place.side_draw_stage
+    result when a side spec is present.
+    """
     findings = []
-    findings += _feed_findings(prob)
-    findings += _flow_findings(prob, l, v, L, V)
-    findings += _thermo_findings(prob, provider, x, T)
-    findings += _pinch_findings(prob, provider, U)
-    return findings
 
+    for name, prof in profiles.items():
+        if _left_simplex(prof):
+            bad = int(np.argmin(prof["X"].min(axis=1)))
+            findings.append(Finding("leaves_simplex", name,
+                                    f"stage {bad} comp {np.round(prof['X'][bad], 3)}"))
 
-@dataclass
-class FeasibilityReport:
-    structural: bool          # Jacobian non-singular at U
-    physical: bool            # mass conserved-ish, no negative/collapsed flow
-    thermodynamic: bool       # all stages admit valid K
-    findings: List[Finding] = field(default_factory=list)
+    if side_draw is not None and side_draw.get("capped"):
+        findings.append(Finding("unreachable_side_purity", "side_draw",
+                                f"best achievable {side_draw['achieved']:.3f}"))
 
-    @property
-    def feasible(self) -> bool:
-        return self.structural and self.physical and self.thermodynamic
+    if conn is not None and not conn["connected"] and not findings:
+        if not conn["in_simplex"]:
+            findings.append(Finding("boundary_block", "connection",
+                                    f"junction outside simplex at {np.round(conn['point'], 3)}"))
+        elif both_pinched:
+            cls = "infeasible_entrainer" if extractive else "below_min_reflux"
+            findings.append(Finding(cls, "connection",
+                                    f"pinched apart, gap {conn['dmin']:.3g} > tol {conn['tol']:.3g}"))
+        else:
+            findings.append(Finding("no_connection", "connection",
+                                    f"closest approach {conn['dmin']:.3g} > tol {conn['tol']:.3g}"))
 
-
-def assess(prob, provider, U):
-    """Structural / physical / thermodynamic feasibility report for state U."""
-    findings = classify(prob, provider, U)
-    cls = {f.cls for f in findings}
-    return FeasibilityReport(
-        structural=PINCH not in cls,
-        physical=not (cls & {PHASE, REVERSAL, FEED}),
-        thermodynamic=THERMO not in cls,
-        findings=findings)
+    feasible = len(findings) == 0 and (conn is None or conn["connected"])
+    return feasible, findings
 
 
 def _demo():
-    import numpy as np
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem, OpSpec
-    from initializer import initialize
-    from residual import pack
+    # a connected result with in-simplex profiles is feasible, no findings
+    good_prof = {"X": np.array([[0.9, 0.1], [0.5, 0.5]]), "status": "pinch"}
+    conn_ok = {"connected": True, "in_simplex": True, "dmin": 0.0, "tol": 0.01,
+               "point": np.array([0.5, 0.5])}
+    feas, f = classify({"rectifying": good_prof}, conn_ok)
+    assert feas and not f
 
-    abc = np.array([(6.90565, 1211.033, 220.79),
-                    (6.95464, 1344.8, 219.48),
-                    (6.99052, 1453.43, 215.31)])
-    tp = FreeColumnThermo(abc)
-    comps = ["benzene", "toluene", "xylene"]
-    N, C = 14, 3
-    prob = build_problem(n_stages=N, comps=comps, feeds=[(7, 100.0, [0.4, 0.35, 0.25])],
-                         pressure=760.0, provider=tp,
-                         top_spec=OpSpec("reflux_ratio", 4.0),
-                         bottom_spec=OpSpec("bottoms_rate", 60.0))
+    # pinched-apart -> below_min_reflux
+    conn_bad = {"connected": False, "in_simplex": True, "dmin": 0.2, "tol": 0.01,
+                "point": np.array([0.5, 0.5])}
+    feas, f = classify({"rectifying": good_prof}, conn_bad, both_pinched=True)
+    assert not feas and f[0].cls == "below_min_reflux", f
 
-    # A healthy U0 is feasible on all three axes.
-    U0 = initialize(prob, tp)
-    rep = assess(prob, tp, U0)
-    assert rep.feasible, rep.findings
+    # extractive variant names the entrainer
+    feas, f = classify({"rectifying": good_prof}, conn_bad, both_pinched=True,
+                       extractive=True)
+    assert f[0].cls == "infeasible_entrainer", f
 
-    # Flow reversal is caught with the offending stages named.
-    Ubad = U0.copy()
-    l, v, T, xi = unpack(Ubad, N, C, 0)
-    l[5, 1] = -1.0
-    Ubad = pack(l, v, T)
-    f = classify(prob, tp, Ubad)
-    assert any(x.cls == "flow_reversal" and 5 in x.stages for x in f), f
+    # a profile that left the simplex is caught first
+    bad_prof = {"X": np.array([[0.9, 0.1], [1.2, -0.2]]), "status": "simplex"}
+    feas, f = classify({"stripping": bad_prof}, conn_ok)
+    assert not feas and f[0].cls == "leaves_simplex", f
 
-    # Phase disappearance: collapse a stage's vapour.
-    l2, v2, T2, _ = unpack(U0.copy(), N, C, 0)
-    v2[9, :] = 1e-9
-    f2 = classify(prob, tp, pack(l2, v2, T2))
-    assert any(x.cls == "phase_disappearance" and 9 in x.stages for x in f2), f2
-
-    # Infeasible feed coupling: distillate exceeds the feed (D>F via a rate spec).
-    prob_bad = build_problem(n_stages=N, comps=comps,
-                             feeds=[(7, 100.0, [0.4, 0.35, 0.25])], pressure=760.0,
-                             provider=tp, top_spec=OpSpec("distillate_rate", 150.0),
-                             bottom_spec=OpSpec("bottoms_rate", 60.0))
-    f3 = _feed_findings(prob_bad)
-    assert any(x.cls == "infeasible_feed_coupling" for x in f3), f3
-
-    print(f"diagnostics self-check OK (healthy U0 feasible; reversal/phase/feed "
-          f"classified with stages)")
+    # capped side draw
+    feas, f = classify({"rectifying": good_prof}, conn_ok,
+                       side_draw={"capped": True, "achieved": 0.7})
+    assert not feas and f[0].cls == "unreachable_side_purity", f
+    print("diagnostics self-check OK")
 
 
 if __name__ == "__main__":

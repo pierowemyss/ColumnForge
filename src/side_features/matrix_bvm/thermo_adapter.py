@@ -104,13 +104,15 @@ class FreeColumnThermo(ThermoProvider):
         h_V(y,T) = sum_i y_i [Cp_i (T - Tref) + lambda_i(T)]
 
     Cp and Tref are the calibration knobs a minimal model still needs (real
-    heat-capacity data slots straight in here). All maps are complex-safe, so
-    the derivative methods use complex-step differentiation.
+    heat-capacity data slots straight in here). Derivative methods use central
+    finite differences (the NRTL closure casts to real, so complex-step can't
+    thread through it); an SRK vapour EOS enters through `phi_fn`.
     """
 
-    def __init__(self, antoine, gamma_fn=None, Cp=None, Tref=0.0):
+    def __init__(self, antoine, gamma_fn=None, phi_fn=None, Cp=None, Tref=0.0):
         self.antoine = np.asarray(antoine, float)
         self.gamma_fn = gamma_fn
+        self.phi_fn = phi_fn            # vapour-phase EOS (SRK); None = ideal gas
         self.n_comps = self.antoine.shape[0]
         # Default Cp: a single representative liquid molar heat capacity. The
         # energy balance only needs a smooth, physically-scaled enthalpy; swap
@@ -122,7 +124,7 @@ class FreeColumnThermo(ThermoProvider):
     # ---- K-values -------------------------------------------------------
     def _K_stage(self, x, T, P):
         """K on one stage: complex-safe. x (C,), T scalar (maybe complex)."""
-        return k_values(T, P, self.antoine, self.gamma_fn, x)
+        return k_values(T, P, self.antoine, self.gamma_fn, x, self.phi_fn)
 
     def K(self, x, T, P):
         x, T, P = np.asarray(x, float), np.asarray(T, float), np.asarray(P, float)
@@ -202,13 +204,46 @@ class FreeColumnThermo(ThermoProvider):
 
     # ---- scalar helpers for the initializer -----------------------------
     def bubble_T(self, x, P):
-        return _bubble_T(np.asarray(x, float), P, self.antoine, gamma_fn=self.gamma_fn)
+        return _bubble_T(np.asarray(x, float), P, self.antoine,
+                         gamma_fn=self.gamma_fn, phi_fn=self.phi_fn)
 
     def dew_T(self, y, P):
-        return _dew_T(np.asarray(y, float), P, self.antoine, gamma_fn=self.gamma_fn)
+        return _dew_T(np.asarray(y, float), P, self.antoine,
+                      gamma_fn=self.gamma_fn, phi_fn=self.phi_fn)
 
     def Psat(self, T):
         return antoine_psat(T, self.antoine)
+
+    # ---- conjugate-composition steps (the BVM marching equilibrium, Sec 17) ---
+    def bubble(self, x, P):
+        """Bubble point of liquid x at P -> (y, T): the vapour it boils into.
+
+        y_i = K_i(x, T) x_i, normalised. Used by the stripping-direction march.
+        """
+        x = np.asarray(x, float)
+        x = x / x.sum()
+        T = _bubble_T(x, P, self.antoine, gamma_fn=self.gamma_fn, phi_fn=self.phi_fn)
+        y = k_values(T, P, self.antoine, self.gamma_fn, x, self.phi_fn) * x
+        return y / y.sum(), T
+
+    def dew(self, y, P):
+        """Dew point of vapour y at P -> (x, T): the liquid it condenses to.
+
+        x_i = y_i / K_i, normalised. Used by the rectifying march.
+
+        ponytail: gamma is evaluated at y as a PROXY, not at the true liquid x.
+        A self-consistent gamma(x) fixed point (audit E6) was tried and reverted:
+        for the stiff MEOH/DMC/EG multicomp reference the global gamma(x) dew has
+        a second, EG-heavy root that the rectifying march jumps to at stage ~2
+        (T -> 1700 K, blows up), breaking the multicomp .colx contract. The proxy
+        stays on the physical MEOH-rich branch. Upgrade path: branch-continuation
+        dew seeded from the previous stage's liquid, tracked in the audit.
+        """
+        y = np.asarray(y, float)
+        y = y / y.sum()
+        T = _dew_T(y, P, self.antoine, gamma_fn=self.gamma_fn, phi_fn=self.phi_fn)
+        x = y / k_values(T, P, self.antoine, self.gamma_fn, y, self.phi_fn)
+        return x / x.sum(), T
 
 
 def _demo():

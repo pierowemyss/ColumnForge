@@ -41,12 +41,13 @@ def _z(stream, order):
 
 
 def _build(ws, lk, hk, *, extractive=False, entrainer=None, rec_lk=0.98,
-           rec_hk=0.02, main_id="Feed"):
+           rec_hk=0.02, main_id="Feed", phi=True):
     """Mirror matrix_bvm_module._gather -> (prob, provider), no Qt needed."""
     order = ws.get_species_names()
     tc = ws.thermodynamics_config
+    phi_fn = ws.build_phi_fn(order) if phi else None
     provider = FreeColumnThermo(tc.psat_params(order),
-                               gamma_fn=ws.build_gamma_fn(order))
+                               gamma_fn=ws.build_gamma_fn(order), phi_fn=phi_fn)
     P = tc.pressure_in_psat_unit(ws.pressure)
     feeds = {s.id: s for s in ws.streams.values() if s.stream_type == StreamType.FEED}
     main = feeds[main_id]
@@ -97,6 +98,42 @@ def test_extractive_feasible_and_entrainer_in_balance():
     # two feed stages in order, both interior
     fs = d["feed_stages"]
     assert len(fs) == 2 and 0 < fs[0] < fs[1] < d["N_total"] - 1
+
+
+def test_extractive_stage_count_with_efficiency():
+    """Acceptance: extractive @ R=3, E/F=1, eff=0.5 sizes to N within +-25% of the
+    file's Inside-Out reference (48 real stages), entrainer stage near the top and
+    the main feed in the lower part of the column."""
+    ws = _load("extract_col.colx")
+    prob, tp = _build(ws, "MEOH", "DMC", extractive=True, entrainer="AN",
+                      rec_lk=0.995)
+    prob.efficiency = float(ws.stage_efficiency)      # 0.5 in the file
+    d = size_column(prob, tp, R=3.0, EF=1.0)
+    assert d["feasible"], [f.cls for f in d["findings"]]
+    assert 36 <= d["N_total"] <= 60, d["N_total"]
+    ent_stage, feed_stage = d["feed_stages"]
+    assert ent_stage < d["N_total"] // 2 < feed_stage, d["feed_stages"]
+
+
+def test_srk_keeps_rectifying_march_in_simplex():
+    """E7/S3.2 guard: multicomp_col sets eos_model=SRK. With phi_fn threaded the
+    real-efficiency rectifying march tracks the physical (light) branch and pinches
+    inside the simplex; drop SRK (phi_fn=None) and the same march runs off into the
+    heavy corner and leaves the simplex. Silently dropping SRK is a real bug, not a
+    cosmetic one."""
+    from problem import overall_balance
+    from sections import single_feed_chain
+    from march import march_section
+
+    ws = _load("multicomp_col.colx")
+    for phi, want in ((True, "pinch"), (False, "simplex")):
+        prob, tp = _build(ws, "DMC", "EG", phi=phi)
+        prob.efficiency = 0.5
+        xD, xB, D, B = overall_balance(prob)
+        rect, _ = single_feed_chain(prob, 1.0, xD, xB, D, B)
+        r = march_section(rect, xD, tp, prob.pressure, prob.max_stages,
+                          efficiency=prob.efficiency)
+        assert r["status"] == want, (phi, r["status"])
 
 
 def test_extractive_infeasible_without_entrainer():

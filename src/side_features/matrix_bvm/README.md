@@ -1,165 +1,151 @@
 # Matrix BVM
 
-A universal **feasibility solver + MESH-initialization framework** for staged
-separation columns, implemented per `MatBVM_blueprint.md`. It builds the full
-Naphtali–Sandholm residual system `R(U) = 0` in component-flow variables, a
-structured initial guess `U⁰`, and offers a damped-Newton / continuation solve
-on top — but its primary product is the **feasibility report and `U⁰`** you can
-hand to any external nonlinear solver.
+A **boundary-value column sizing & feasibility** side module for FreeColumn,
+implementing the difference-point-chain method of `MatBVM_blueprint.md` (v4).
 
-It is a self-contained side module: it consumes FreeColumn's thermodynamics
-(`core.thermodynamics`) through a thin adapter and never reimplements VLE or
-enthalpy.
+Given a separation and an operating point `(R, S, E/F)`, Matrix BVM answers:
+**is the split feasible, and if so how many equilibrium stages does each section
+need, and where do the feeds and draws go?** It does this by building a
+*difference-point chain* for the column topology, marching composition profiles
+inward from each product end, connecting adjacent profiles by closest approach
+in full composition space, and iterating over reflux / boilup / entrainer ratio.
 
-## Formulation
+Matrix BVM is a **conceptual-design / sizing** method. It does **not** converge
+the rigorous MESH system — its output (stages per section + full profiles) is the
+**warm start** handed to FreeColumn's existing rigorous solver
+(`core.column_solvers.solve_bubble_point`), sharply cutting that solver's burden.
 
-Stages are numbered `0 .. N-1`, top → bottom; liquid flows down, vapour up.
-Per-stage unknowns are component flows plus temperature (plus reaction extents),
-packed with a **constant stride** so the tridiagonal kernels port to C:
+## What it is (and isn't)
 
-```
-block i = [ l_i0..l_i,C-1 | v_i0..v_i,C-1 | T_i | ξ_i0..ξ_i,R-1 ]   length m = 2C+1+R
-L_i = Σ_j l_ij   V_i = Σ_j v_ij   x_ij = l_ij/L_i   y_ij = v_ij/V_i
-```
+The genuinely "Matrix" content lives in three places classic ternary BVM handles
+only by accident of low dimension:
 
-Equation rows in each block:
+1. **Connection** is closest approach in full `R^(C-1)`, not a geometric
+   curve-crossing (which only exists at `C = 3`). See `connect.py`.
+2. **Interior sections** (`S > 2`) have no product anchor; they are anchored by
+   continuation or, when strongly pinched, at a **saddle pinch** via its
+   invariant manifolds. See `anchor.py`.
+3. **Feed / draw placement** is an operating-line crossover / purity target,
+   computed, not guessed. See `place.py`.
 
-| rows | equation | form |
-|------|----------|------|
-| `0 .. C-1`      | material balance | `(1+rₗ)l_ij + (1+r_v)v_ij − l_{i-1,j} − v_{i+1,j} − f_ij − Σ_r ν_rj ξ_ir` |
-| `C .. 2C-1`     | equilibrium (cleared) | `K_ij·l_ij·V_i − v_ij·L_i` |
-| `2C`            | energy balance | N–S enthalpy balance (**replaced by the terminal spec** on stages `0`, `N-1`) |
-| `2C+1 .. 2C+R`  | reaction closure | kinetic `ξ − holdup·k·∏x^order` or equilibrium `∏x^ν − K_eq` (`ξ=0` on non-reactive stages) |
+The "matrix" is the **Jacobian eigenstructure at the pinches** (`pinch.py`) — not
+the big block matrix of the rigorous MESH solve.
 
-Boundaries: `l_{-1}=0`, `v_N=0`. So the top stage's vapour `v_0` **is** the
-(partial-condenser) distillate of rate `D`, and the bottom stage's liquid
-`l_{N-1}` is the bottoms.
-
-**Squareness (why it stays block-tridiagonal).** The base system is exactly
-`2C+1` equations/unknowns per stage. The two terminal energy balances are
-*replaced* by the reflux/boilup-family operating specs; the freed
-condenser/reboiler duties are **recovered** afterward. Nothing is appended, so
-the system stays square and block-tridiagonal, and the required-spec count is the
-ordinary MESH design-DoF — borrowed from `core.dof.DoFAnalyzer`. Multifeed, side
-draws, pumparounds and inter-heaters are parameter changes (non-zero array
-entries / sidedraw ratios), never new equation types.
-
-## Modules
+## Module map (blueprint §18)
 
 | module | role |
-|--------|------|
-| `problem`        | topology + specs + a square DOF ledger (`build_problem`, `Problem`, `OpSpec`, `Reactions`) |
-| `thermo_adapter` | `ThermoProvider` interface + `FreeColumnThermo` wrapper |
-| `residual`       | `R(U)` assembly and `pack`/`unpack`/`mass_balance_residual` |
-| `jacobian`       | analytic block-tridiagonal `A_i, B_i, C_i` (+ `fd_jacobian` oracle) |
-| `linsolve`       | `block_thomas` — block Thomas / LU sweep, O(N·m³) |
-| `initializer`    | `U⁰`: FUG split → BVM trajectory stepping → CMO flows → bubble-T |
-| `newton`         | LM-damped, projected, backtracking Newton (`newton`, `recover_duties`) |
-| `continuation`   | `thermodynamic_homotopy` (ideal→real) + `parameter_homotopy` |
-| `diagnostics`    | `classify` / `assess` — failure classes + offending stages |
-| `api`            | `assess_feasibility`, `initialize`, `converge`, external-solver hooks |
+|---|---|
+| `problem.py` | feeds/draws/entrainer/spec → overall balance `(x_D, x_B, D, B)` |
+| `thermo_adapter.py` | the `ThermoProvider` interface + `FreeColumnThermo` wrapper |
+| `sections.py` | the difference-point chain `(Δ_k, δ_k)` + operating-line coeffs |
+| `march.py` | equilibrium + operating-line stepping, stable-direction selection |
+| `anchor.py` | product ends, continuation, saddle-pinch manifold launch |
+| `connect.py` | closest-approach connection in full `R^(C-1)` → stage counts |
+| `place.py` | feed operating-line crossover, side-draw purity target |
+| `pinch.py` | fixed-point + eigenvalue classification → `R_min`, min `E/F` |
+| `reactive.py` | reaction-invariant transformed-composition variables |
+| `diagnostics.py` | classified infeasibility (names the offending section/pinch) |
+| `driver.py` | size a column, sweep `(R, S, E/F)`, build the design map |
+| `handoff.py` | package stages + profiles for the rigorous solver |
+| `api.py` | `size_column` / `feasibility_map` / `to_solver` |
 
-## Quick start
+Kernels are pure functions over NumPy arrays (C-port friendly); no Python objects
+live in the marching hot loop.
+
+## API
 
 ```python
-import numpy as np
 from thermo_adapter import FreeColumnThermo
-from problem import build_problem, OpSpec
-from api import assess_feasibility, converge
+from problem import build_problem
+import api
 
-abc = np.array([(6.90565, 1211.033, 220.79),
-                (6.95464, 1344.8, 219.48),
-                (6.99052, 1453.43, 215.31)])          # benzene/toluene/xylene, mmHg·°C
-tp = FreeColumnThermo(abc)                            # optional gamma_fn=<NRTL closure>
+tp = FreeColumnThermo(antoine, gamma_fn=gamma_fn)          # §17 provider
+prob = build_problem(comps, feeds=[(z, F, q)], pressure=P,
+                     lk=0, hk=1, rec_lk=0.98, rec_hk=0.02)
 
-prob = build_problem(
-    n_stages=16, comps=["benzene", "toluene", "xylene"],
-    feeds=[(8, 100.0, [0.4, 0.35, 0.25])],            # (stage, flow, z[, T_feed])
-    pressure=760.0, provider=tp,
-    top_spec=OpSpec("reflux_ratio", 3.0),
-    bottom_spec=OpSpec("bottoms_rate", 60.0))
+design = api.size_column(prob, tp, R=4.0)                  # -> design dict
+if design["feasible"]:
+    N   = design["N_total"]           # total stages (an OUTPUT)
+    fs  = design["feed_stages"]        # section boundaries (stage indices)
+    col = design["column"]             # x, y, T, liquid_flow, vapor_flow, feed_stage
+    Rmin = design["R_min"]
+    init = api.to_solver(design)       # warm start for the rigorous MESH solver
+else:
+    for f in design["findings"]:       # classified reasons (§11)
+        print(f.cls, f.section, f.detail)
 
-# feasibility first — report + structured guess, no solve
-fa = assess_feasibility(prob, tp)
-print(fa["feasible"], fa["findings"])
-
-# convergence (offered, not the point)
-sol = converge(prob, tp)
-print(sol["converged"], sol["xD"], sol["xB"], sol["condenser_duty"])
+fmap = api.feasibility_map(prob, tp, R_grid=[1, 2, 4, 8])  # feasibility + stages grid
 ```
 
-`converge` returns a profile dict oriented **bottom → top** (index 0 =
-reboiler/bottoms), matching `core.column_solvers`, plus `condenser_duty`,
-`reboiler_duty`, and a `mass_balance` audit.
+- **`size_column(prob, provider, R, S=None, EF=None) → design`** — size at one
+  operating point; attaches `R_min` (and `EF_min` in extractive mode).
+- **`feasibility_map(prob, provider, R_grid, S_grid=None, EF_grid=None) → map`** —
+  feasibility (bool grid) + stage count (int grid, `-1` where infeasible).
+- **`to_solver(design) → init_state`** — plain warm-start dict (§12).
 
-### Spec kinds
+**Conventions.** Stage 0 = distillate (top), matching the FreeColumn GUI.
+Components are listed light → heavy; `lk < hk` index into that list. Strictly
+non-distributing components are kept at a `1e-4` trace in each product so profiles
+can leave a simplex face (heavies amplify downward in the rectifying section).
 
-- top: `reflux_ratio`, `reflux_rate`, `distillate_rate`, `dist_purity` (with `comp=`)
-- bottom: `boilup_ratio`, `boilup_rate`, `bottoms_rate`, `bottoms_purity` (with `comp=`)
+## ThermoProvider contract (§17)
 
-LK/HK recovery is deliberately **not** a spec: it is a projection used to shape
-the initializer (blueprint §10), never a governing equation.
-
-## ThermoProvider contract
-
-Subclass `thermo_adapter.ThermoProvider` (or reuse `FreeColumnThermo`). All
-methods take stage-major arrays — `x`/`y` are `(N, C)`, `T`/`P` are `(N,)` — and
-return:
+The module consumes FreeColumn thermo through a narrow adapter — it never
+reimplements VLE/enthalpy. A provider supplies:
 
 ```
-K(x,T,P)      -> (N, C)        dK_dx(x,T,P) -> (N, C, C)   # dK_j/dx_k
-dK_dT(x,T,P)  -> (N, C)        dK_dP(x,T,P) -> (N, C) | None
-h_L(x,T)      -> (N,)          h_V(y,T)     -> (N,)
-dhL_dx(x,T)   -> (N, C)        dhL_dT(x,T)  -> (N,)
-dhV_dy(y,T)   -> (N, C)        dhV_dT(y,T)  -> (N,)
-bubble_T(x,P) -> scalar        dew_T(y,P)   -> scalar      Psat(T) -> (C,)
+K(x, T, P)        -> (N, C)      equilibrium ratios y = K x
+bubble(x, P)      -> (y, T)      conjugate vapour + stage T   (stripping march)
+dew(y, P)         -> (x, T)      conjugate liquid + stage T   (rectifying march)
+bubble_T/dew_T    -> T
+Psat(T) / K       -> vapour pressure / K-values
+h_L, h_V          -> molar enthalpies (only for energy-corrected flows)
 ```
 
-The solver **does not assume where a derivative came from** — analytic,
-complex-step or finite-difference are all valid. `FreeColumnThermo` uses central
-finite differences (the `core` NRTL closure casts to real, so complex-step can't
-thread through it) and an analytic `dK_dP = −K/P`. Enthalpies are a constant-`Cp`
-sensible term plus a Clausius–Clapeyron latent heat; `Cp` and `Tref` are the
-calibration knobs (real heat-capacity data slots straight in).
+`FreeColumnThermo` wraps `core.thermodynamics` (Antoine/PLXANT `Psat`, γ via any
+FreeColumn activity model, optional γ–φ). Default flow model is **constant molar
+overflow**; an energy-corrected variant can update section flows from the shared
+enthalpy functions.
 
-## External solvers
+## Handoff to the rigorous solver (§12)
 
-Matrix BVM hands the raw pieces to any nonlinear solver:
+`to_solver(design)` returns a plain dict — `n_stages`, `feed_stage`,
+`draw_stages`, `R`, `D`, `B`, `pressure`, `comps`, and the warm-start profiles
+`x0 (N,C)`, `y0`, `T0`, `L0`, `V0` (stage 0 = top). `solve_bubble_point` consumes
+`x0`/`T0` directly through its warm-start hook, converging in materially fewer
+iterations than a cold start (see `tests/test_validation.py`).
 
-```python
-from api import residual_fn, jacobian_fn, dense_jacobian_fn, initialize
-f  = residual_fn(prob, tp)          # U -> R
-J  = jacobian_fn(prob, tp)          # U -> (A, B, C) block diagonals
-Jd = dense_jacobian_fn(prob, tp)    # U -> dense J   (for scipy.optimize.root)
-U0 = initialize(prob, tp)
-```
-
-Row-scale the residual (see `newton._row_scale`) before feeding a generic solver
-— the energy row is ~10⁶ larger than the material rows.
-
-## Convergence notes
-
-The energy-coupled MESH is stiff from a CMO cold start (the energy imbalance is
-~10⁶). `newton` handles it with **adaptive Levenberg–Marquardt / pseudo-transient
-damping** on the diagonal blocks, a positivity projection (instead of
-fraction-to-boundary, which a trace component would otherwise lock), and Armijo
-backtracking on the scaled merit. When Newton still stalls on a strongly
-non-ideal column, `converge` falls back to the ideal→real thermodynamic homotopy.
-Near a minimum-reflux pinch the last digits crawl (a vanishing component sits at
-the flow floor) — that is where the feasibility diagnostics, not tighter
-tolerances, are the right tool.
-
-## Running the checks
+## Running
 
 ```bash
-python run_checks.py                 # every module's _demo self-check
-python tests/test_validation.py      # Section-15 cross-cutting validation
-# or: pytest tests/
+# each kernel is runnable and asserts its own sanity
+python sections.py && python march.py && python connect.py && python driver.py
+
+# the validation suite (blueprint §19), headless
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
 ```
 
-Both need `src/python` on the path for `core` (the package `__init__` and the
-runners add it automatically). The kernels validated: analytic Jacobian vs FD to
-~1e-9, block Thomas vs dense solve to 1e-10, mass-balance closure on every
-returned state, agreement with `core.column_solvers.solve_bubble_point`,
-homotopy rescue of a Newton-stalling NRTL case, and a converged reactive column
-that conserves atoms.
+## Known ceilings (marked `ponytail:` in the source)
+
+- **Extractive / strongly-pinched interior sections** run through the saddle-pinch
+  machinery, but exact literature stage counts need finer invariant-manifold
+  tracing than the current forward-map launch. Feasibility and min-`E/F` *trends*
+  are captured; three-digit stage counts for extractive designs are not the goal.
+- **Reactive** provides the Ung–Doherty reaction-invariant transform (validated
+  for invariance); full reactive column sizing marches in transformed coordinates
+  using the physical VLE as the stagewise closure.
+- **`R_min` / min-`E/F`** come from bisection on the connection boundary (robust,
+  equivalent to pinch tangency) rather than a direct pinch-tangency solve.
+- **`dew()` uses a γ(y) proxy**, not a self-consistent γ(x) fixed point. The
+  audit-preferred γ(x) dew was implemented and reverted: for the stiff
+  MEOH/DMC/EG multicomp reference it has a second (EG-heavy) root the rectifying
+  march jumps to (T→1700 K, blow-up), breaking the reference contract. SRK
+  fugacities (`phi_fn`, wired) keep the proxy march on the physical branch.
+  Upgrade path: branch-continuation dew seeded from the previous stage's liquid.
+- **Murphree efficiency** (`Problem.efficiency`, GUI spin) inflates the ideal-stage
+  march per direction. For sloppy difference-point splits whose rectifying section
+  already pinches deep (e.g. the multicomp reference, ~45 *ideal* stages), stacking
+  `E<1` on top over-counts; the reference stage count there is matched by the
+  ideal march. Efficiency is validated on cleaner columns (extractive, BTX).
+- **Columns with more than three sections** (multiple interior sections) size the
+  enclosing two-section problem; full N-section assembly is not wired yet.

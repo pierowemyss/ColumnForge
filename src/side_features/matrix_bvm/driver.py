@@ -60,10 +60,10 @@ def _base(prob, xD, xB, D, B, R):
 
 def _size_two(prob, tp, rect, strip, xD, xB, P, out):
     """Single-feed (two product-anchored sections) sizing + assembly."""
-    rprof = march_section(rect, xD, tp, P, prob.max_stages)
-    sprof = march_section(strip, xB, tp, P, prob.max_stages)
+    rprof = march_section(rect, xD, tp, P, prob.max_stages, efficiency=prob.efficiency)
+    sprof = march_section(strip, xB, tp, P, prob.max_stages, efficiency=prob.efficiency)
     profiles = {"rectifying": rprof, "stripping": sprof}
-    conn = connect(rprof, sprof)
+    conn = connect(rprof, sprof, efficiency=prob.efficiency)
     both_pinched = rprof["pinched"] and sprof["pinched"]
     side = side_draw_stage(sprof, prob.side_draws[0]) if prob.side_draws else None
     feasible, findings = classify(profiles, conn, both_pinched=both_pinched,
@@ -84,10 +84,10 @@ def _size_two(prob, tp, rect, strip, xD, xB, P, out):
     return out
 
 
-def _mid_march(mid_sec, anchor, tp, P, max_stages):
+def _mid_march(mid_sec, anchor, tp, P, max_stages, efficiency=1.0):
     """March the interior section from `anchor`, escalating to a saddle launch
     if the ordinary continuation crawls to the cap without pinching (Sec 6.3)."""
-    mprof = march_section(mid_sec, anchor, tp, P, max_stages)
+    mprof = march_section(mid_sec, anchor, tp, P, max_stages, efficiency=efficiency)
     if mprof["status"] == "max" and not mprof["pinched"]:
         cl = saddle_pinch(mid_sec, anchor, tp, P)
         if cl["saddle"]:
@@ -106,15 +106,16 @@ def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive)
     from there, and test whether it connects to the opposite product profile;
     feasible iff any launch bridges, and we keep the minimum-stage one (Sec 6.2).
     """
-    tprof = march_section(top_sec, xD, tp, P, prob.max_stages)
-    bprof = march_section(bot_sec, xB, tp, P, prob.max_stages)
+    E = prob.efficiency
+    tprof = march_section(top_sec, xD, tp, P, prob.max_stages, efficiency=E)
+    bprof = march_section(bot_sec, xB, tp, P, prob.max_stages, efficiency=E)
 
     best = None                    # (N_total, pieces dict) minimised over switch stage
     rep = None                     # a representative (mprof, conn) for diagnostics
     if mid_sec.dir > 0:            # interior marches down: continue off the top profile
         for k in range(1, tprof["n"]):
-            mprof = _mid_march(mid_sec, tprof["X"][k], tp, P, prob.max_stages)
-            low = connect(mprof, bprof)
+            mprof = _mid_march(mid_sec, tprof["X"][k], tp, P, prob.max_stages, E)
+            low = connect(mprof, bprof, efficiency=E)
             if rep is None:
                 rep = (mprof, low)
             if not low["connected"]:
@@ -126,8 +127,8 @@ def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive)
                             "bot_n": bot_n, "conn": low, "reverse_mid": False})
     else:                         # interior marches up: continue off the bottom profile
         for l in range(1, bprof["n"]):
-            mprof = _mid_march(mid_sec, bprof["X"][l], tp, P, prob.max_stages)
-            up = connect(tprof, mprof)
+            mprof = _mid_march(mid_sec, bprof["X"][l], tp, P, prob.max_stages, E)
+            up = connect(tprof, mprof, efficiency=E)
             if rep is None:
                 rep = (mprof, up)
             if not up["connected"]:
@@ -139,7 +140,7 @@ def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive)
                             "bot_n": l, "conn": up, "reverse_mid": True})
 
     if rep is None:                # top/bottom profiles too short to scan
-        rep = (march_section(mid_sec, 0.5 * (xD + xB), tp, P, prob.max_stages),
+        rep = (march_section(mid_sec, 0.5 * (xD + xB), tp, P, prob.max_stages, efficiency=E),
                {"connected": False, "in_simplex": True, "dmin": np.inf, "tol": 0.0,
                 "point": 0.5 * (xD + xB), "pointA": xD, "pointB": xB})
 

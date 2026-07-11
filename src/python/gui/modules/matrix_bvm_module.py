@@ -1,16 +1,19 @@
-"""Matrix BVM side module.
+"""Matrix BVM side module -- boundary-value column sizing & feasibility.
 
-A thin GUI over `src/side_features/matrix_bvm` — the Naphtali-Sandholm
-feasibility solver + MESH initializer. Feed, pressure, species, keys and the
-Antoine/activity thermo come from the shared window_state (same as the BVM
-module); only the Matrix-BVM knobs (stage count, feed stage, reflux ratio,
-bottoms rate) are entered here.
+A GUI over `src/side_features/matrix_bvm`: the difference-point-chain design
+method (MatBVM_blueprint.md, v4). Feed, pressure, species, keys and the thermo
+model come from the shared window_state (same as the BVM / RCM modules); the
+Matrix-BVM levers -- reflux R (single or swept), key recoveries, optional
+entrainer E/F, and the connection/marching tolerances -- are entered here.
 
-Two actions:
-  * Assess Feasibility — build the structured guess U0 and classify it
-    (feasible / offending stages), no solve.
-  * Converge — damped-Newton / continuation solve; plots the stage profile and
-    reports condenser/reboiler duties + mass-balance closure.
+Stage count is an OUTPUT, not an input: the method marches profiles from each
+product end until they connect and reports the stages required, the feed/draw
+locations, R_min, and a classified feasibility verdict. Three actions:
+
+  * Size Column   -- size at the chosen R; plot the profile, mark the feed stage.
+  * Design Map    -- sweep R; plot stage count vs R and click a point to load it.
+  * Send to Solver -- hand the sized profiles to the rigorous MESH solver (warm
+                     start) and report its convergence.
 """
 
 import os as _os
@@ -20,90 +23,115 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFormLayout, QGroupBox, QLabel,
-    QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QTableWidget,
-    QTableWidgetItem,
+    QComboBox, QSpinBox, QPushButton, QCheckBox, QTableWidget, QTableWidgetItem,
 )
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvas
 
+from ..panels.sci_spin_box import SciDoubleSpinBox
 from ..state.window_state import StreamType
 from ..plotting import CompactNavigationToolbar, TEMP_C as _TEMP_C
 
-# The matrix_bvm package uses bare intra-package imports (so each kernel runs
-# standalone), so it is imported by putting its own directory on sys.path — same
-# idea as the BVM file-path load. Refs are captured now, before any later path
-# insert (e.g. freeRCM) could shadow the generic module names.
+# matrix_bvm uses bare intra-package imports, so it is loaded by putting its own
+# directory on sys.path (same idea as the BVM file-path load). Refs captured now.
 _MBVM_DIR = _os.path.abspath(_os.path.join(
     _os.path.dirname(__file__), "..", "..", "..", "side_features", "matrix_bvm"))
 if _MBVM_DIR not in _sys.path:
     _sys.path.insert(0, _MBVM_DIR)
-import api as _mbvm_api                       # noqa: E402
-from problem import build_problem, OpSpec     # noqa: E402
-from thermo_adapter import FreeColumnThermo    # noqa: E402
+import api as _mbvm_api                          # noqa: E402
+from problem import build_problem                # noqa: E402
+from thermo_adapter import FreeColumnThermo       # noqa: E402
 
 
 class MatrixBVMModuleWidget(QWidget):
-    """Parameter panel + profile plot for a Matrix BVM feasibility / solve run."""
+    """Parameter panel + profile / design-map plot for a Matrix BVM run."""
 
     def __init__(self, window_state=None, parent=None):
         super().__init__(parent)
         self.window_state = window_state
-        self._sol = None
+        self._design = None
+        self._map = None
         self._setup_ui()
 
     # ------------------------------------------------------------------ UI
     def _setup_ui(self):
         layout = QHBoxLayout(self)
 
-        left = QWidget()
-        left.setMaximumWidth(320)
+        left = QWidget(); left.setMaximumWidth(340)
         left_col = QVBoxLayout(left)
 
-        params = QGroupBox("Matrix BVM Parameters")
-        form = QFormLayout(params)
+        spec = QGroupBox("Separation")
+        form = QFormLayout(spec)
+        self.lk_combo = QComboBox()
+        self.hk_combo = QComboBox()
+        form.addRow("Light key:", self.lk_combo)
+        form.addRow("Heavy key:", self.hk_combo)
+        self.rec_lk = self._spin(0.5, 0.99999, 0.98, decimals=4, step=0.01)
+        self.rec_hk = self._spin(1e-5, 0.5, 0.02, decimals=4, step=0.01)
+        form.addRow("LK recovery to distillate:", self.rec_lk)
+        form.addRow("HK recovery to distillate:", self.rec_hk)
+        left_col.addWidget(spec)
 
-        self.n_spin = self._int_spin(3, 500, 16)
-        form.addRow("Number of stages N:", self.n_spin)
+        op = QGroupBox("Operating point")
+        opf = QFormLayout(op)
+        self.r_spin = self._spin(0.05, 1000.0, 3.0, decimals=3, step=0.25)
+        opf.addRow("Reflux ratio R:", self.r_spin)
+        eff0 = float(getattr(self.window_state, "stage_efficiency", 1.0) or 1.0)
+        self.eff_spin = self._spin(0.05, 1.0, eff0, decimals=3, step=0.05)
+        self.eff_spin.setToolTip("Murphree vapour efficiency (column-wide); 1 = "
+                                 "ideal stages. Defaults to the shared column value.")
+        opf.addRow("Stage efficiency:", self.eff_spin)
+        self.rmax_spin = self._spin(0.1, 1000.0, 10.0, decimals=2, step=1.0)
+        opf.addRow("Design-map R max:", self.rmax_spin)
+        self.map_pts = self._int_spin(4, 60, 16)
+        opf.addRow("Design-map points:", self.map_pts)
+        self.extractive = QCheckBox("Extractive distillation")
+        opf.addRow(self.extractive)
+        self.entrainer_combo = QComboBox()
+        opf.addRow("Entrainer:", self.entrainer_combo)
+        self.ef_spin = self._spin(0.0, 20.0, 0.5, decimals=3, step=0.1)
+        opf.addRow("Entrainer ratio E/F:", self.ef_spin)
+        left_col.addWidget(op)
 
-        self.feed_spin = self._int_spin(0, 499, 8)
-        form.addRow("Feed stage (0 = distillate):", self.feed_spin)
+        adv = QGroupBox("Advanced"); adv.setCheckable(True); adv.setChecked(False)
+        advf = QFormLayout(adv)
+        self.max_stages = self._int_spin(20, 1000, 200)
+        advf.addRow("Max stages / section:", self.max_stages)
+        self.eps_stage = self._spin(1e-4, 0.2, 1e-2, decimals=4, step=1e-3)
+        advf.addRow("Connection tol (eps_stage):", self.eps_stage)
+        left_col.addWidget(adv)
 
-        self.r_spin = self._spin(0.01, 1000.0, 3.0, decimals=3, step=0.5)
-        form.addRow("Reflux ratio:", self.r_spin)
-
-        self.bottom_combo = QComboBox()
-        self.bottom_combo.addItems(["Bottoms rate", "Distillate rate"])
-        form.addRow("Bottom spec:", self.bottom_combo)
-
-        self.rate_spin = self._spin(0.0, 1e9, 60.0, decimals=3, step=5.0)
-        form.addRow("Rate value:", self.rate_spin)
-
-        left_col.addWidget(params)
-        left_col.addStretch()
+        self.size_btn = QPushButton("Size Column"); self.size_btn.clicked.connect(self._on_size)
+        self.map_btn = QPushButton("Design Map"); self.map_btn.clicked.connect(self._on_map)
+        self.send_btn = QPushButton("Send to Rigorous Solver")
+        self.send_btn.clicked.connect(self._on_send)
+        for b in (self.size_btn, self.map_btn, self.send_btn):
+            left_col.addWidget(b)
 
         self.status = QLabel("Feed, pressure and thermo come from the shared "
-                             "column setup.")
+                             "column setup. Stage count is computed, not entered.")
         self.status.setWordWrap(True)
         left_col.addWidget(self.status)
-
-        self.assess_btn = QPushButton("Assess Feasibility")
-        self.assess_btn.clicked.connect(self._on_assess)
-        left_col.addWidget(self.assess_btn)
-
-        self.converge_btn = QPushButton("Converge")
-        self.converge_btn.clicked.connect(self._on_converge)
-        left_col.addWidget(self.converge_btn)
-
+        left_col.addStretch()
         layout.addWidget(left)
 
-        right = QWidget()
-        right_col = QVBoxLayout(right)
+        right = QWidget(); right_col = QVBoxLayout(right)
         self.figure = Figure(figsize=(5, 4))
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.mpl_connect("pick_event", self._on_pick)
         self.toolbar = CompactNavigationToolbar(self.canvas, self)
         right_col.addWidget(self.toolbar)
         right_col.addWidget(self.canvas, stretch=3)
+
+        view_row = QHBoxLayout()
+        view_row.addStretch()
+        view_row.addWidget(QLabel("View:"))
+        self.view_combo = QComboBox()
+        self.view_combo.addItems(["Ternary (LK vs HK)", "Full profile"])
+        self.view_combo.currentIndexChanged.connect(self._on_view_changed)
+        view_row.addWidget(self.view_combo)
+        right_col.addLayout(view_row)
 
         self.data_table = QTableWidget(0, 2)
         self.data_table.setHorizontalHeaderLabels(["Stage", "T (degC)"])
@@ -111,23 +139,39 @@ class MatrixBVMModuleWidget(QWidget):
         right_col.addWidget(self.data_table, stretch=1)
         layout.addWidget(right, stretch=1)
 
+        self._refresh_species()
+
+    def _refresh_species(self):
+        """(Re)populate the key/entrainer combos from the shared species list,
+        preserving each selection by name across species edits upstream."""
+        names = self._species_order()
+        for combo, default in ((self.lk_combo, 0),
+                               (self.hk_combo, 1),
+                               (self.entrainer_combo, len(names) - 1)):
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(names)
+            i = combo.findText(prev)
+            combo.setCurrentIndex(i if i >= 0 else min(max(default, 0),
+                                                       len(names) - 1))
+            combo.blockSignals(False)
+
+    def showEvent(self, event):
+        # species may have changed on the Initialization tab since last shown
+        self._refresh_species()
+        super().showEvent(event)
+
     @staticmethod
     def _spin(lo, hi, val, decimals=3, step=0.1):
-        s = QDoubleSpinBox()
-        s.setDecimals(decimals)
-        s.setRange(lo, hi)
-        s.setSingleStep(step)
-        s.setValue(val)
-        return s
+        s = SciDoubleSpinBox(); s.setDecimals(decimals); s.setRange(lo, hi)
+        s.setSingleStep(step); s.setValue(val); return s
 
     @staticmethod
     def _int_spin(lo, hi, val):
-        s = QSpinBox()
-        s.setRange(lo, hi)
-        s.setValue(val)
-        return s
+        s = QSpinBox(); s.setRange(lo, hi); s.setValue(val); return s
 
-    # ------------------------------------------------------- state -> solver
+    # ------------------------------------------------------- state -> problem
     def _species_order(self):
         return self.window_state.get_species_names() if self.window_state else []
 
@@ -138,151 +182,272 @@ class MatrixBVMModuleWidget(QWidget):
         return None
 
     def _gather(self):
-        """Build (problem, provider) from window_state + local knobs.
+        """Build (problem, provider) from window_state + local levers.
 
-        Raises ValueError with a user-facing message when the shared setup is
-        incomplete.
+        Raises ValueError with a user-facing message when setup is incomplete.
         """
         if not self.window_state:
             raise ValueError("No column state available.")
         order = self._species_order()
         if len(order) < 2:
             raise ValueError("Need at least 2 species (Initialization tab).")
-
         feed = self._feed_stream()
         if feed is None or not feed.flow or not feed.composition:
             raise ValueError("Feed stream needs a flow rate and composition.")
-        zF = np.array([feed.composition.get(name, 0.0) for name in order], float)
-        if abs(zF.sum() - 1.0) > 1e-3:
-            raise ValueError(f"Feed composition sums to {zF.sum():.4f}, not 1.")
+        z = np.array([feed.composition.get(n, 0.0) for n in order], float)
+        if abs(z.sum() - 1.0) > 1e-3:
+            raise ValueError(f"Feed composition sums to {z.sum():.4f}, not 1.")
 
-        N = int(self.n_spin.value())
-        fstage = int(self.feed_spin.value())
-        if not (0 <= fstage < N):
-            raise ValueError(f"Feed stage {fstage} must be in 0..{N - 1} "
-                             "(0 = distillate).")
-        # App convention is 0 = distillate; Problem stages are 0-based top->bottom
-        # — the same orientation, so no flip.
-        fstage_internal = fstage
+        lk, hk = self.lk_combo.currentIndex(), self.hk_combo.currentIndex()
+        if lk < 0 or hk < 0 or lk == hk:
+            raise ValueError("Light and heavy keys must be two distinct species.")
 
         antoine = self.window_state.thermodynamics_config.psat_params(order)
         P = self.window_state.thermodynamics_config.pressure_in_psat_unit(
             self.window_state.pressure)
         gamma_fn = self.window_state.build_gamma_fn(order)
-        provider = FreeColumnThermo(antoine, gamma_fn=gamma_fn)
+        phi_fn = self.window_state.build_phi_fn(order)   # SRK EOS or None (ideal gas)
+        provider = FreeColumnThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
 
-        rate = float(self.rate_spin.value())
-        F = float(feed.flow)
-        if self.bottom_combo.currentText() == "Bottoms rate":
-            if not (0 < rate < F):
-                raise ValueError(f"Bottoms rate must be in (0, feed={F:g}).")
-            bottom_spec = OpSpec("bottoms_rate", rate)
-        else:
-            if not (0 < rate < F):
-                raise ValueError(f"Distillate rate must be in (0, feed={F:g}).")
-            bottom_spec = OpSpec("bottoms_rate", F - rate)
+        extractive = self.extractive.isChecked()
+        x_E = None
+        if extractive:
+            ent = self.entrainer_combo.currentIndex()
+            if ent < 0:
+                raise ValueError("Select an entrainer species for extractive mode.")
+            if ent in (lk, hk):
+                raise ValueError("Entrainer must differ from the light/heavy keys.")
+            x_E = np.zeros(len(order)); x_E[ent] = 1.0    # pure-entrainer feed
 
         prob = build_problem(
-            n_stages=N, comps=order, feeds=[(fstage_internal, F, zF)], pressure=P,
-            provider=provider, top_spec=OpSpec("reflux_ratio", self.r_spin.value()),
-            bottom_spec=bottom_spec)
+            comps=order, feeds=[(z, float(feed.flow), 1.0)], pressure=P,
+            lk=lk, hk=hk, rec_lk=self.rec_lk.value(), rec_hk=self.rec_hk.value(),
+            x_E=x_E, extractive=extractive,
+            max_stages=int(self.max_stages.value()),
+            efficiency=float(self.eff_spin.value()))
         return prob, provider
 
     # ------------------------------------------------------------- actions
-    def _on_assess(self):
+    def _on_size(self):
         try:
             prob, provider = self._gather()
-            fa = _mbvm_api.assess_feasibility(prob, provider)
+            EF = self.ef_spin.value() if self.extractive.isChecked() else None
+            design = _mbvm_api.size_column(prob, provider, R=self.r_spin.value(), EF=EF)
         except Exception as exc:
-            self.status.setText(f"Assess failed: {exc}")
+            self.status.setText(f"Sizing failed: {exc}")
             return
-        rep = fa["report"]
-        if fa["feasible"]:
-            self.status.setText("Feasible: structural, physical and "
-                                "thermodynamic checks pass at the initial guess.")
+        self._design = design
+        if design["feasible"]:
+            rmin = design.get("R_min")
+            efmin = design.get("EF_min")
+            msg = (f"Feasible: {design['N_total']} stages, "
+                   f"feed@{design['feed_stages']}. "
+                   f"R_min={rmin:.2f}" if rmin else "Feasible")
+            if efmin is not None:
+                msg += f", min E/F={efmin:.2f}"
+            self.status.setText(msg)
+            self._fill_table(design["column"])
         else:
-            msg = "; ".join(f"{f.cls}" + (f" @ {f.stages}" if f.stages else "")
-                            for f in rep.findings)
-            self.status.setText(f"Not feasible: {msg}")
-        # show the structured guess profile
-        sol = _mbvm_api.extract_profiles(fa["U0"], prob, provider)
-        self._plot_profile(sol, title="Initial guess (U0)")
-        self._fill_table(sol)
-
-    def _on_converge(self):
-        try:
-            prob, provider = self._gather()
-            sol = _mbvm_api.converge(prob, provider)
-        except Exception as exc:
-            self.status.setText(f"Converge failed: {exc}")
-            return
-        self._sol = sol
-        info = sol["info"]
-        if sol["converged"]:
-            from core.thermodynamics import KJH_TO_KW
-            mb = np.max(np.abs(sol["mass_balance"]["per_component"]))
+            reasons = "; ".join(f"{f.cls}"
+                                + (f" [{f.section}]" if f.section else "")
+                                for f in design["findings"])
+            conn = design.get("connection")
+            gap = (f" -- closest approach {conn['dmin']:.3f} (need <= {conn['tol']:.3f})"
+                   if conn else "")
             self.status.setText(
-                f"Converged in {info['iterations']} iters (|R|="
-                f"{info['residual']:.1e}). "
-                f"Qc={sol['condenser_duty'] * KJH_TO_KW:.1f} kW, "
-                f"Qr={sol['reboiler_duty'] * KJH_TO_KW:.1f} kW; "
-                f"mass-balance closure {mb:.1e}.")
-        else:
-            findings = sol.get("findings", [])
-            msg = "; ".join(f.cls for f in findings) or info["message"]
-            self.status.setText(f"Did not converge: {msg}")
-        self._plot_profile(sol, title="Converged profile")
-        self._fill_table(sol)
+                f"Infeasible at R={self.r_spin.value():g}: {reasons}{gap}")
+            self.data_table.setRowCount(0)
+        self._plot_current()
+
+    def _on_view_changed(self, *_):
+        if self._design is not None:
+            self._plot_current()
+
+    def _on_map(self):
+        try:
+            prob, provider = self._gather()
+            R_grid = np.linspace(0.2, self.rmax_spin.value(), int(self.map_pts.value()))
+            fm = _mbvm_api.feasibility_map(prob, provider, R_grid=R_grid)
+        except Exception as exc:
+            self.status.setText(f"Design map failed: {exc}")
+            return
+        self._map = fm
+        self._plot_map(fm)
+        n_feas = int(np.count_nonzero(fm["feasible"]))
+        self.status.setText(f"Design map: {n_feas}/{len(R_grid)} R values feasible. "
+                            "Click a point to size that column.")
+
+    def _on_send(self):
+        if self._design is None or not self._design.get("feasible"):
+            self.status.setText("Size a feasible column first, then send it.")
+            return
+        try:
+            init = _mbvm_api.to_solver(self._design)
+            from core.column_solvers import solve_bubble_point
+            sol = solve_bubble_point(
+                np.array([self._feed_stream().composition.get(n, 0.0)
+                          for n in self._species_order()]),
+                float(self._feed_stream().flow),
+                self.window_state.thermodynamics_config.psat_params(self._species_order()),
+                self._species_order(), N=init["n_stages"],
+                feed_stage=init["feed_stage"], R=init["R"], D=init["D"],
+                P=init["pressure"], gamma_fn=self.window_state.build_gamma_fn(
+                    self._species_order()),
+                efficiency=float(self.eff_spin.value()),
+                x0=init["x0"], T0=init["T0"])
+        except Exception as exc:
+            self.status.setText(f"Handoff failed: {exc}")
+            return
+        ok = sol.get("found")
+        self.status.setText(
+            f"Warm start -> rigorous solver: {'converged' if ok else 'did not converge'} "
+            f"in {sol['iterations']} iterations ({sol['message']}).")
 
     # -------------------------------------------------------------- plotting
-    def _plot_profile(self, sol, title=""):
+    _SECTION_LS = {"rectifying": "-", "stripping": "--", "intermediate": ":",
+                   "extractive": "-."}
+
+    def _plot_current(self):
+        if self._design is None:
+            return
+        if self.view_combo.currentIndex() == 0:
+            self._plot_ternary(self._design)
+        else:
+            self._plot_full(self._design)
+
+    def _plot_ternary(self, design):
+        """LK/HK projection (Sec 13) on the composition right-triangle: each
+        section's marched profile in the (x_LK, x_HK) plane, with products, feed,
+        and the closest-approach gap. Drawn feasible or not, so a below-R_min run
+        shows how close it came. Styled like the freeRCM ternary: no border, the
+        three triangle legs (hypotenuse x_LK + x_HK = 1), vertices labelled."""
         self.figure.clear()
-        comps = list(sol["comps"])
-        x, T = sol["x"], sol["T"]                       # top->bottom, 0 = distillate
-        stages = np.arange(x.shape[0])
+        ax = self.figure.add_subplot(111)
+        lk, hk = design["lk"], design["hk"]
+        comps = design["comps"]
 
+        # composition triangle: keep the bottom/left axes (ticks + labels) as the
+        # two legs, drop the surrounding box, draw the hypotenuse x_LK + x_HK = 1.
+        ax.plot([0, 1], [1, 0], "k-", lw=1.5)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.set_aspect("equal")
+
+        for name, prof in design.get("profiles", {}).items():
+            X = np.asarray(prof["X"])
+            ax.plot(X[:, lk], X[:, hk], self._SECTION_LS.get(name, "-"),
+                    lw=1.5, label=name)
+        for pt, mark, lbl in ((design["xD"], "^", "x_D"),
+                              (design["xB"], "v", "x_B"),
+                              (design["feed_z"], "s", "feed")):
+            ax.plot(pt[lk], pt[hk], mark, ms=8, mfc="none", mec="0.2", label=lbl)
+        conn = design.get("connection")
+        if conn is not None:
+            pA, pB = conn.get("pointA"), conn.get("pointB")
+            if pA is not None:
+                col = "tab:green" if conn["connected"] else "tab:red"
+                ax.plot([pA[lk], pB[lk]], [pA[hk], pB[hk]], "-", color=col, lw=2)
+                ax.plot(conn["point"][lk], conn["point"][hk], "o", color=col, ms=7)
+
+        ax.set_xlabel(f"{comps[lk]} mole fraction (LK)")
+        ax.set_ylabel(f"{comps[hk]} mole fraction (HK)")
+        ok = design["feasible"]
+        title = (f"Ternary projection -- {design['N_total']} stages"
+                 if ok else
+                 f"Ternary projection -- gap {conn['dmin']:.3f} "
+                 f"(need <= {conn['tol']:.3f})" if conn else "Ternary projection")
+        ax.set_title(title)
+        ax.set_xlim(0, 1.0); ax.set_ylim(0, 1.0)
+        ax.legend(fontsize=8, loc="upper right")
+        self.figure.tight_layout(); self.canvas.draw()
+
+    def _plot_full(self, design):
+        """Composition + temperature vs stage. When feasible, the assembled
+        column; when not, the marched section profiles vs their own stage index
+        (so an infeasible run still shows what was marched)."""
+        self.figure.clear()
+        comps = design["comps"]
         ax1 = self.figure.add_subplot(121)
-        for j, name in enumerate(comps):
-            ax1.plot(stages, x[:, j], "-o", ms=3, label=name)
-        ax1.set_xlabel("Stage (0 = distillate)")
-        ax1.set_ylabel("Liquid mole fraction x")
-        ax1.set_ylim(0, 1)
-        ax1.set_title(title or "Column profile")
-        ax1.legend(fontsize=8)
-
         ax2 = self.figure.add_subplot(122)
-        ax2.plot(stages, T, "-o", ms=3, color=_TEMP_C)
-        ax2.set_xlabel("Stage (0 = distillate)")
-        ax2.set_ylabel("T (degC)")
-        ax2.set_title("Temperature profile")
+        col = design.get("column")
+        if col is not None:
+            x, T = col["x"], col["T"]
+            stages = np.arange(x.shape[0])
+            for j, name in enumerate(comps):
+                ax1.plot(stages, x[:, j], "-o", ms=3, label=name)
+            ax2.plot(stages, T, "-o", ms=3, color=_TEMP_C)
+            for fs in design["feed_stages"]:
+                ax1.axvline(fs, color="0.5", ls="--", lw=1)
+                ax2.axvline(fs, color="0.5", ls="--", lw=1)
+            ax1.set_title(f"Profile -- {design['N_total']} stages")
+        else:
+            for name, prof in design.get("profiles", {}).items():
+                X = np.asarray(prof["X"]); st = np.arange(len(X))
+                ls = self._SECTION_LS.get(name, "-")
+                for j in range(len(comps)):
+                    ax1.plot(st, X[:, j], ls, lw=1.2,
+                             color=f"C{j}", label=comps[j] if name.startswith("rect") else None)
+                ax2.plot(st, prof["T"], ls, lw=1.2, label=name)
+            ax2.legend(fontsize=8)
+            ax1.set_title("Marched sections (did not connect)")
+        ax1.set_xlabel("Stage (0 = distillate)"); ax1.set_ylabel("Liquid x")
+        ax1.set_ylim(0, 1); ax1.legend(fontsize=8)
+        ax2.set_xlabel("Stage (0 = distillate)"); ax2.set_ylabel("T (degC)")
+        ax2.set_title("Temperature")
+        self.figure.tight_layout(); self.canvas.draw()
 
-        self.figure.tight_layout()
-        self.canvas.draw()
+    def _plot_map(self, fm):
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        R = np.atleast_1d(fm["R"]); N = np.atleast_1d(fm["stages"])
+        feas = np.atleast_1d(fm["feasible"])
+        good = feas & (N > 0)
+        if good.any():
+            ax.plot(R[good], N[good], "-o", ms=5, color="tab:blue",
+                    picker=6, label="feasible")
+        if (~feas).any():
+            ax.plot(R[~feas], np.zeros(np.count_nonzero(~feas)), "x",
+                    color="tab:red", label="infeasible")
+        # R_min marker: first feasible R
+        if good.any():
+            ax.axvline(R[good][0], color="0.4", ls="--", lw=1,
+                       label=f"~R_min={R[good][0]:.2f}")
+        ax.set_xlabel("Reflux ratio R"); ax.set_ylabel("Total stages")
+        ax.set_title("Design map (click a feasible point to load)")
+        ax.legend(fontsize=8)
+        self.figure.tight_layout(); self.canvas.draw()
 
-    def _fill_table(self, sol):
-        comps = list(sol["comps"])
+    def _on_pick(self, event):
+        if self._map is None:
+            return
+        xdata = event.artist.get_xdata()
+        R = float(xdata[event.ind[0]])
+        self.r_spin.setValue(R)
+        self._on_size()
+
+    def _fill_table(self, col):
+        comps = self._species_order()
         headers = ["Stage", "T (degC)"] + [f"x {c}" for c in comps]
-        x, T = sol["x"], sol["T"]                       # top->bottom, 0 = distillate
-        n = x.shape[0]
+        x, T = col["x"], col["T"]
         self.data_table.setColumnCount(len(headers))
         self.data_table.setHorizontalHeaderLabels(headers)
-        self.data_table.setRowCount(n)
-        for r in range(n):                              # distillate (0) on top row
+        self.data_table.setRowCount(x.shape[0])
+        for r in range(x.shape[0]):
             row = [r, round(float(T[r]), 2)] + [round(float(v), 4) for v in x[r]]
             for c, v in enumerate(row):
                 self.data_table.setItem(r, c, QTableWidgetItem(str(v)))
 
 
 def _demo():
-    """Headless self-check: drive gather+converge off a stub state, no event loop."""
+    """Headless self-check: drive gather + size off a stub state, no event loop."""
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
     from PySide6.QtWidgets import QApplication
     from gui.state.window_state import WindowState, Species, Stream, StreamType
 
-    QApplication.instance() or QApplication([])  # Qt keeps the singleton alive
+    QApplication.instance() or QApplication([])
     ws = WindowState()
-    ws.pressure = 1.01325                                # bar (= 760 mmHg)
+    ws.pressure = 1.01325
     ws.light_key_index = 0
     abc = [(6.90565, 1211.033, 220.79), (6.95464, 1344.8, 219.48),
            (6.99052, 1453.43, 215.31)]
@@ -293,26 +458,41 @@ def _demo():
     ws.add_stream(Stream(id="Feed", stream_type=StreamType.FEED, stage=8,
                          flow=100.0, composition={"benzene": 0.4, "toluene": 0.35,
                                                   "xylene": 0.25}))
-
     w = MatrixBVMModuleWidget(window_state=ws)
-    w.n_spin.setValue(16); w.feed_spin.setValue(8); w.r_spin.setValue(3.0)
+    w._refresh_species()                       # showEvent won't fire headlessly
+    assert [w.lk_combo.itemText(i) for i in range(w.lk_combo.count())] == \
+        ["benzene", "toluene", "xylene"], "combos populated by species name"
+    w.lk_combo.setCurrentText("benzene"); w.hk_combo.setCurrentText("toluene")
+    w.r_spin.setValue(4.0)
     prob, provider = w._gather()
-    assert prob.n_stages == 16 and prob.C == 3
+    assert prob.C == 3 and prob.lk == 0 and prob.hk == 1
 
-    w._on_assess()
-    assert w.data_table.rowCount() == 16, "assess should fill the profile table"
-    assert "easible" in w.status.text(), w.status.text()
-
-    w._on_converge()
-    assert w._sol is not None and w._sol["converged"], w.status.text()
-    assert w.data_table.rowCount() == 16
-    assert w.data_table.item(0, 0).text() == "0", \
-        "distillate (stage 0) belongs on the top row"
-    # separation happened
-    xD, xB = w._sol["xD"], w._sol["xB"]
+    w._on_size()
+    assert w._design is not None and w._design["feasible"], w.status.text()
+    assert w.data_table.rowCount() == w._design["N_total"]
+    assert w.data_table.item(0, 0).text() == "0", "distillate on the top row"
+    xD, xB = w._design["xD"], w._design["xB"]
     assert xD[0] > 0.4 > xB[0], (xD, xB)
-    print(f"matrix_bvm_module self-check OK "
-          f"({w._sol['info']['iterations']} iters, xD={np.round(xD, 3)})")
+    # default view is ternary; both views render without error
+    assert w.view_combo.currentIndex() == 0, "ternary is the default view"
+    w.view_combo.setCurrentIndex(1); w.view_combo.setCurrentIndex(0)
+
+    # below R_min: still plots the marched profiles + the closest-approach gap
+    w.r_spin.setValue(0.3)
+    w._on_size()
+    assert not w._design["feasible"], "R=0.3 should be below R_min"
+    assert w._design["profiles"] and w._design["connection"] is not None
+    assert "closest approach" in w.status.text(), w.status.text()
+    w.view_combo.setCurrentIndex(1); w.view_combo.setCurrentIndex(0)  # both render
+    w.r_spin.setValue(4.0); w._on_size()       # restore a feasible design
+
+    w._on_map()
+    assert w._map is not None and np.count_nonzero(w._map["feasible"]) > 0
+
+    w._on_send()
+    assert "rigorous solver" in w.status.text(), w.status.text()
+    print(f"matrix_bvm_module self-check OK  N={w._design['N_total']} "
+          f"feed@{w._design['feed_stages']} xD={np.round(xD, 3)}")
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ def _seg_seg(p1, p2, q1, q2):
     return float(np.linalg.norm(cp - cq)), float(s), float(t), 0.5 * (cp + cq)
 
 
-def connect(profA, profB, eps_stage=1e-2):
+def connect(profA, profB, eps_stage=1e-2, efficiency=1.0):
     """Closest approach between two marched profiles (dicts from march_section).
 
     Returns dict(connected, dmin, nA, nB, point, in_simplex, tol). nA/nB are the
@@ -60,7 +60,14 @@ def connect(profA, profB, eps_stage=1e-2):
     pinched, so a median step collapses to ~0 and the eps_stage floor wrongly
     rules for C>=4 (Sec 7.1); the meaningful question is whether the gap is within
     a stage of travel *at the junction*.
+
+    With Murphree efficiency E<1 the per-stage composition step is ~E times the
+    equilibrium step, so the raw local step understates the gap a feed stage can
+    bridge. The junction is a feed mixing jump set by the thermodynamics, not by
+    E; dividing the tolerance by E recovers the equilibrium-scale bridge width
+    (E=1 leaves the ideal-stage behaviour unchanged).
     """
+    E = max(float(efficiency), 1e-6)
     XA, XB = profA["X"], profB["X"]
     best = (np.inf, 0.0, 0.0, XA[0])
     bi = bj = 0
@@ -76,7 +83,7 @@ def connect(profA, profB, eps_stage=1e-2):
     pB = XB[bj] + t * (XB[bj + 1] - XB[bj])
     locA = float(np.linalg.norm(XA[bi + 1] - XA[bi]))   # local step at the junction
     locB = float(np.linalg.norm(XB[bj + 1] - XB[bj]))
-    tol = max(eps_stage, 0.5 * (locA + locB))
+    tol = max(eps_stage, 0.5 * (locA + locB) / E)
     in_simplex = bool(mid.min() > -1e-6 and mid.max() < 1.0 + 1e-6)
     return {"connected": bool(dmin <= tol and in_simplex), "dmin": float(dmin),
             "nA": float(nA), "nB": float(nB), "point": mid,
