@@ -22,6 +22,12 @@ IMPLEMENTED_VLE = ThermodynamicsConfig.IMPLEMENTED_VLE
 IMPLEMENTED_ACTIVITY = ThermodynamicsConfig.IMPLEMENTED_ACTIVITY
 IMPLEMENTED_EOS = ThermodynamicsConfig.IMPLEMENTED_EOS
 
+# Full option lists (implemented + greyed-out) — shared with the Simulation tab's
+# mirror combos so the two stay in lock-step.
+VLE_MODELS = ["Antoine", "Wagner", "PLXANT", "Ideal"]
+ACTIVITY_MODELS = ["Ideal", "NRTL", "UNIQUAC", "Wilson", "Margules", "UNIFAC"]
+EOS_MODELS = ["Ideal Gas", "SRK", "PR", "BWRS"]
+
 
 def _grey_unimplemented(combo, implemented):
     """Disable (grey out) combo entries whose model isn't wired to a solver,
@@ -39,6 +45,7 @@ class InitializationTab(QWidget):
     """Initialization tab with Thermodynamics and Chemical Species sub-tabs."""
 
     speciesChanged = Signal()
+    thermoChanged = Signal()   # vle/activity/eos model changed; Simulation tab mirrors it
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -59,12 +66,6 @@ class InitializationTab(QWidget):
 
         # Right: Stacked widget for sub-tab content
         self.stack = QStackedWidget(self)
-        self.stack.setStyleSheet("""
-            QStackedWidget {
-                background-color: #2d2d2d;
-            }
-        """)
-
         # Chemical Species page (Index 0 now)
         self.species_page = self._create_species_page()
         self.stack.addWidget(self.species_page)
@@ -96,7 +97,7 @@ class InitializationTab(QWidget):
         model_layout = QHBoxLayout(model_group)
 
         self.vle_combo = QComboBox(self)
-        self.vle_combo.addItems(["Antoine", "Wagner", "PLXANT", "Ideal"])
+        self.vle_combo.addItems(VLE_MODELS)
         _grey_unimplemented(self.vle_combo, IMPLEMENTED_VLE)
         self.vle_combo.currentTextChanged.connect(self._on_thermo_changed)
         model_layout.addWidget(QLabel("Vapor Pressure:"))
@@ -104,8 +105,7 @@ class InitializationTab(QWidget):
         model_layout.addSpacing(20)
 
         self.activity_combo = QComboBox(self)
-        self.activity_combo.addItems(["Ideal", "NRTL", "UNIQUAC", "Wilson",
-                                      "Margules", "UNIFAC"])
+        self.activity_combo.addItems(ACTIVITY_MODELS)
         _grey_unimplemented(self.activity_combo, IMPLEMENTED_ACTIVITY)
         self.activity_combo.currentTextChanged.connect(self._on_thermo_changed)
         model_layout.addWidget(QLabel("Activity Coefficient:"))
@@ -113,7 +113,7 @@ class InitializationTab(QWidget):
         model_layout.addSpacing(20)
 
         self.eos_combo = QComboBox(self)
-        self.eos_combo.addItems(["Ideal Gas", "SRK", "PR", "BWRS"])
+        self.eos_combo.addItems(EOS_MODELS)
         _grey_unimplemented(self.eos_combo, IMPLEMENTED_EOS)
         self.eos_combo.currentTextChanged.connect(self._on_thermo_changed)
         model_layout.addWidget(QLabel("Equation of State:"))
@@ -382,21 +382,8 @@ class InitializationTab(QWidget):
         return page
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-                color: #cccccc;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
+        # Group-box styling now comes from the central theme (gui/theme/app.qss).
+        pass
 
     def _on_sub_tab_changed(self, index: int):
         """Handle sub-tab change."""
@@ -412,6 +399,20 @@ class InitializationTab(QWidget):
             self.window_state.thermodynamics_config.energy_balance = \
                 self.energy_balance_check.isChecked()
             self.window_state.is_modified = True
+            self.thermoChanged.emit()
+
+    def refresh_thermo(self):
+        """Re-sync the model combos from window_state (called when the Simulation
+        tab's mirror combos change them). Signals blocked to avoid a feedback loop."""
+        if not self.window_state:
+            return
+        thermo = self.window_state.thermodynamics_config
+        for combo, value in ((self.vle_combo, thermo.vle_model),
+                             (self.activity_combo, thermo.activity_model),
+                             (self.eos_combo, thermo.eos_model)):
+            combo.blockSignals(True)
+            combo.setCurrentText(value)
+            combo.blockSignals(False)
 
     def _on_species_selected(self):
         """Handle species selection from list."""
@@ -731,11 +732,11 @@ class InitializationTab(QWidget):
             
         self.species_props.set_species_list(list(self.window_state.species.keys()))
         
-        # Load Thermodynamics Config
+        # Load Thermodynamics Config. Signals must stay blocked while setting the
+        # three combos: _on_thermo_changed reads all three at once, so setting them
+        # one at a time unblocked clobbers the not-yet-set ones back to defaults.
         thermo = self.window_state.thermodynamics_config
-        self.vle_combo.setCurrentText(thermo.vle_model)
-        self.activity_combo.setCurrentText(thermo.activity_model)
-        self.eos_combo.setCurrentText(thermo.eos_model)
+        self.refresh_thermo()
         self.energy_balance_check.setChecked(bool(thermo.energy_balance))
 
         # Point the parameter inspector at the loaded vapour-pressure model so its

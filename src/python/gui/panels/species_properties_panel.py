@@ -27,7 +27,7 @@ class SpeciesPropertiesPanel(QWidget):
         main_layout.setSpacing(10)
 
         self.header_label = QLabel("Select a species to view properties")
-        self.header_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.header_label.setObjectName("panelHeader")
         main_layout.addWidget(self.header_label)
 
         properties_group = QGroupBox("Physical Properties")
@@ -106,26 +106,8 @@ class SpeciesPropertiesPanel(QWidget):
         main_layout.addStretch()
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QLabel {
-                min-width: 80px;
-            }
-            QPushButton {
-                min-width: 120px;
-            }
-        """)
+        # Styling comes from the central theme (gui/theme/app.qss).
+        pass
 
     def set_window_state(self, window_state):
         """Set the window state reference."""

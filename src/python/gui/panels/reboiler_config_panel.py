@@ -1,10 +1,11 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QGroupBox
 )
 from PySide6.QtCore import Signal
 
 from .unit_combo_box import UnitComboBox
+from .sci_spin_box import SciDoubleSpinBox
 
 
 class ReboilerConfigPanel(QWidget):
@@ -43,7 +44,7 @@ class ReboilerConfigPanel(QWidget):
 
         boilup_layout = QHBoxLayout()
         boilup_layout.addWidget(QLabel("Boilup Ratio (V/B):"))
-        self.boilup_spin = QDoubleSpinBox(self)
+        self.boilup_spin = SciDoubleSpinBox(self)
         self.boilup_spin.setRange(0, 1000)
         self.boilup_spin.setDecimals(4)
         boilup_layout.addWidget(self.boilup_spin)
@@ -60,30 +61,15 @@ class ReboilerConfigPanel(QWidget):
 
         hint = QLabel("These also appear in Operating Specifications — "
                       "same value, two places to edit.")
-        hint.setStyleSheet("color: #666666; font-style: italic;")
+        hint.setProperty("hint", True)
         hint.setWordWrap(True)
         main_layout.addWidget(hint)
 
         main_layout.addStretch()
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QLabel {
-                min-width: 120px;
-            }
-        """)
+        # Styling comes from the central theme (gui/theme/app.qss).
+        pass
 
     def _connect_signals(self):
         self.type_combo.currentTextChanged.connect(self._on_type_changed)

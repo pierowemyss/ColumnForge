@@ -1,8 +1,10 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QGroupBox, QGridLayout, QSpinBox
 )
 from PySide6.QtCore import Signal
+
+from .sci_spin_box import SciDoubleSpinBox
 
 
 
@@ -54,7 +56,7 @@ class ModuleConfigPanel(QWidget):
         # Boilup/Reflux ratio
         ratio_layout = QHBoxLayout()
         ratio_layout.addWidget(QLabel("Boilup Ratio (V/B):"))
-        self.boilup_spin = QDoubleSpinBox(self)
+        self.boilup_spin = SciDoubleSpinBox(self)
         self.boilup_spin.setRange(0, 1000)
         self.boilup_spin.setDecimals(4)
         ratio_layout.addWidget(self.boilup_spin)
@@ -63,7 +65,7 @@ class ModuleConfigPanel(QWidget):
 
         reflux_layout = QHBoxLayout()
         reflux_layout.addWidget(QLabel("Reflux Ratio (L/D):"))
-        self.reflux_spin = QDoubleSpinBox(self)
+        self.reflux_spin = SciDoubleSpinBox(self)
         self.reflux_spin.setRange(0, 1000)
         self.reflux_spin.setDecimals(4)
         reflux_layout.addWidget(self.reflux_spin)
@@ -74,7 +76,7 @@ class ModuleConfigPanel(QWidget):
         # (intercooler). This is the knob the energy balance actually consumes.
         duty_layout = QHBoxLayout()
         duty_layout.addWidget(QLabel("Duty (kW, +heat/-cool):"))
-        self.duty_spin = QDoubleSpinBox(self)
+        self.duty_spin = SciDoubleSpinBox(self)
         self.duty_spin.setRange(-1e9, 1e9)
         self.duty_spin.setDecimals(3)
         duty_layout.addWidget(self.duty_spin)
@@ -112,23 +114,8 @@ class ModuleConfigPanel(QWidget):
         main_layout.addStretch()
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QLabel {
-                min-width: 100px;
-            }
-        """)
+        # Styling comes from the central theme (gui/theme/app.qss).
+        pass
 
     def _connect_signals(self):
         self.type_combo.currentTextChanged.connect(self._on_type_changed)

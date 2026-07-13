@@ -282,6 +282,8 @@ def _finish_profile(si, x, T, L, V, B, extra=None, efficiency=1.0):
         "feed_stages": feed_stages,
         "xD": xD, "xB": xB, "D": si.D, "B": B,
         "R": float(si.R),                                 # resolved reflux ratio
+        # boilup ratio = reboiler vapour / bottoms liquid (V leaving bottom stage)
+        "boilup_ratio": float(V[-1] / B) if B > 0 else None,
         "feed_totals": np.asarray(si.feed.sum(axis=0)),   # per-component molar feed
         "feed_q": float(si.q[feed_stages[0]]) if feed_stages else 1.0,
         "side_draws": side_draws,
@@ -296,7 +298,7 @@ def _finish_profile(si, x, T, L, V, B, extra=None, efficiency=1.0):
 def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                        feed_stage=None, R=None, D=None, P=None,
                        max_iter=500, tol=1e-6, gamma_fn=None, efficiency=1.0,
-                       cancel=None, report=None):
+                       cancel=None, report=None, x0=None, T0=None):
     """Bubble-point (Wang-Henke) column solve.
 
     Canonical call: solve_bubble_point(solver_input, max_iter=..., tol=...).
@@ -306,6 +308,9 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     equilibrium stages. Returns a profile dict (see _finish_profile).
     cancel: optional callable -> bool, checked each iteration for real Abort.
     report: optional callable (iteration, dT_residual) for progress display.
+    x0/T0: optional (N,C)/(N,) warm-start profiles (e.g. a Matrix BVM design,
+    stage 0 = top); when shape-compatible they replace the flat feed guess so a
+    good initial column converges in fewer iterations.
     """
     si = _coerce_input(si_or_zF, F, antoine, comps, N=N, feed_stage=feed_stage,
                        R=R, D=D, P=P, gamma_fn=gamma_fn)
@@ -313,9 +318,16 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     V, L, B = _cmo_flows(si)
 
     zmix = si.feed.sum(axis=0) / si.feed.sum()   # flow-mixed overall feed
-    T = np.full(Nst, bubble_T(zmix, float(np.mean(si.pressure)), si.antoine,
-                              gamma_fn=si.gamma_fn, phi_fn=si.phi_fn))
-    x = np.tile(zmix, (Nst, 1))
+    if T0 is not None and np.shape(T0) == (Nst,):
+        T = np.asarray(T0, float).copy()
+    else:
+        T = np.full(Nst, bubble_T(zmix, float(np.mean(si.pressure)), si.antoine,
+                                  gamma_fn=si.gamma_fn, phi_fn=si.phi_fn))
+    if x0 is not None and np.shape(x0) == (Nst, n):
+        x = np.asarray(x0, float).copy()
+        x = x / x.sum(axis=1, keepdims=True)
+    else:
+        x = np.tile(zmix, (Nst, 1))
 
     iterations = 0
     aborted = False

@@ -1,5 +1,7 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QDoubleSpinBox, QComboBox
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QComboBox
 from PySide6.QtCore import Signal
+
+from .sci_spin_box import SciDoubleSpinBox
 
 
 class UnitComboBox(QWidget):
@@ -22,8 +24,7 @@ class UnitComboBox(QWidget):
         self.layout.setSpacing(5)
         self.layout.setContentsMargins(0, 0, 0, 0)
 
-        self.spin_box = QDoubleSpinBox(self)
-        self.spin_box.setDecimals(4)
+        self.spin_box = SciDoubleSpinBox(self)
         self.spin_box.setRange(-1e10, 1e10)
         self.spin_box.valueChanged.connect(self._on_value_changed)
 
@@ -75,14 +76,9 @@ class UnitComboBox(QWidget):
             self.unit_combo.setCurrentIndex(0)          # back to kmol/h
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QDoubleSpinBox {
-                min-width: 80px;
-            }
-            QComboBox {
-                min-width: 70px;
-            }
-        """)
+        # Only layout minimums; colours come from the central theme.
+        self.spin_box.setMinimumWidth(80)
+        self.unit_combo.setMinimumWidth(70)
 
     def _on_value_changed(self, value):
         self.valueChanged.emit(value)

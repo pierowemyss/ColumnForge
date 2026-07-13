@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 
 from .unit_combo_box import UnitComboBox
+from ..theme import set_state
 
 
 class StreamConfigPanel(QWidget):
@@ -33,7 +34,7 @@ class StreamConfigPanel(QWidget):
 
         # Stream header
         self.header_label = QLabel("Select a stream to configure")
-        self.header_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.header_label.setObjectName("panelHeader")
         main_layout.addWidget(self.header_label)
 
         # Stream type dropdown
@@ -117,7 +118,7 @@ class StreamConfigPanel(QWidget):
 
         # Composition validation
         self.comp_sum_label = QLabel("Sum: 0.0000")
-        self.comp_sum_label.setStyleSheet("font-weight: bold;")
+        set_state(self.comp_sum_label, "neutral")
         comp_layout.addWidget(self.comp_sum_label)
 
         main_layout.addWidget(comp_group)
@@ -125,26 +126,8 @@ class StreamConfigPanel(QWidget):
         main_layout.addStretch()
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QLabel {
-                min-width: 80px;
-            }
-            QPushButton {
-                min-width: 120px;
-            }
-        """)
+        # Styling comes from the central theme (gui/theme/app.qss).
+        pass
 
     def set_species_list(self, names: list):
         """Set the list of available species names."""
@@ -388,10 +371,8 @@ class StreamConfigPanel(QWidget):
                 pass
 
         self.comp_sum_label.setText(f"Sum: {total:.4f}")
-        if abs(total - 1.0) > 0.0001:
-            self.comp_sum_label.setStyleSheet("font-weight: bold; color: red;")
-        else:
-            self.comp_sum_label.setStyleSheet("font-weight: bold; color: green;")
+        set_state(self.comp_sum_label,
+                  "error" if abs(total - 1.0) > 0.0001 else "ok")
         self.flow_input.refresh_units()      # composition drives kg/h validity
 
     def get_stream_data(self) -> dict:

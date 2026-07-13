@@ -39,23 +39,10 @@ class MainWindow(QMainWindow):
         self._setup_menu()
         self._connect_signals()
 
-        self.statusBar().setStyleSheet("""
-            QStatusBar {
-                background-color: #2d2d2d;
-                color: #cccccc;
-                border-top: 1px solid #444444;
-            }
-        """)
         self.statusBar().showMessage("Ready")
 
     def _setup_ui(self):
         central_widget = QWidget(self)
-        central_widget.setStyleSheet("""
-            QWidget {
-                background-color: #2d2d2d;
-                color: #cccccc;
-            }
-        """)
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(central_widget)
@@ -65,29 +52,6 @@ class MainWindow(QMainWindow):
         self.tab_widget = QTabWidget(self)
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.setTabsClosable(False)
-        self.tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                background-color: #2d2d2d;
-                border: 1px solid #444444;
-            }
-            QTabBar::tab {
-                background-color: #1a1a1a;
-                color: #888888;
-                padding: 10px 20px;
-                margin-right: 2px;
-                border: 1px solid #333333;
-                border-bottom: none;
-            }
-            QTabBar::tab:selected {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                font-weight: bold;
-            }
-            QTabBar::tab:hover:!selected {
-                background-color: #333333;
-                color: #cccccc;
-            }
-        """)
 
         self.init_tab = InitializationTab(self)
         self.specs_tab = SpecificationsTab(self)
@@ -98,11 +62,17 @@ class MainWindow(QMainWindow):
         # Set window state on tabs
         self.init_tab.set_window_state(self.window_state)
         self.specs_tab.set_window_state(self.window_state)
+        self.sim_tab.set_window_state(self.window_state)
         self.modules_tab.set_window_state(self.window_state)
         self.results_tab.set_window_state(self.window_state)
 
         # Connect species changes to refresh specs tab
         self.init_tab.speciesChanged.connect(self.specs_tab.refresh)
+
+        # Keep the Simulation tab's mirror thermo combos in lock-step with the
+        # Initialization tab's (both write the same window_state config).
+        self.init_tab.thermoChanged.connect(self.sim_tab.refresh_thermo)
+        self.sim_tab.thermoChanged.connect(self.init_tab.refresh_thermo)
 
         self.tab_widget.addTab(self.init_tab, "Initialization")
         self.tab_widget.addTab(self.specs_tab, "Specifications")
@@ -114,78 +84,39 @@ class MainWindow(QMainWindow):
 
         self.toolbar = self.addToolBar("Main")
         self.toolbar.setMovable(False)
-        self.toolbar.setStyleSheet("""
-            QToolBar {
-                spacing: 5px;
-                padding: 3px;
-                background-color: #111111;
-                border-bottom: 1px solid #333333;
-            }
-            QToolBar QToolButton {
-                min-width: 60px;
-                padding: 5px 10px;
-                color: #888888;
-                background-color: transparent;
-                border: none;
-            }
-            QToolBar QToolButton:hover {
-                background-color: #333333;
-                color: #cccccc;
-            }
-            QToolBar QToolButton:pressed {
-                background-color: #444444;
-            }
-        """)
 
-        new_act = QAction("New", self)
+        from .theme.iconset import icon
+
+        new_act = QAction(icon("new"), "New", self)
         new_act.setShortcut("Ctrl+N")
         new_act.triggered.connect(self.new_config)
         self.toolbar.addAction(new_act)
 
-        open_act = QAction("Open", self)
+        open_act = QAction(icon("open"), "Open", self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self.load_config)
         self.toolbar.addAction(open_act)
 
-        save_act = QAction("Save", self)
+        save_act = QAction(icon("save"), "Save", self)
         save_act.setShortcut("Ctrl+S")
         save_act.triggered.connect(self.save_config)
         self.toolbar.addAction(save_act)
 
         self.toolbar.addSeparator()
 
-        run_act = QAction("Run", self)
+        run_act = QAction(icon("run"), "Run", self)
         run_act.setShortcut("F5")
         run_act.triggered.connect(self.run_simulation)
         self.toolbar.addAction(run_act)
 
         self.toolbar.addSeparator()
 
-        prefs_act = QAction("Preferences", self)
+        prefs_act = QAction(icon("settings"), "Preferences", self)
         prefs_act.triggered.connect(self.show_preferences)
         self.toolbar.addAction(prefs_act)
 
     def _setup_menu(self):
         menubar = self.menuBar()
-        menubar.setStyleSheet("""
-            QMenuBar {
-                background-color: #2d2d2d;
-                color: #cccccc;
-                border-bottom: 1px solid #444444;
-                padding: 2px;
-            }
-            QMenuBar::item:selected {
-                background-color: #3d3d3d;
-            }
-            QMenu {
-                background-color: #2d2d2d;
-                color: #cccccc;
-                border: 1px solid #444444;
-            }
-            QMenu::item:selected {
-                background-color: #3d3d3d;
-            }
-        """)
 
         file_menu = menubar.addMenu("File")
         new_act = QAction("New", self)
@@ -284,6 +215,7 @@ class MainWindow(QMainWindow):
                 # repopulate every tab from the restored state
                 self.init_tab.set_window_state(self.window_state)
                 self.specs_tab.set_window_state(self.window_state)
+                self.sim_tab.set_window_state(self.window_state)
                 self.modules_tab.set_window_state(self.window_state)
                 self.results_tab.clear_results()
 
@@ -362,18 +294,8 @@ class MainWindow(QMainWindow):
                 )
 
     def run_simulation(self):
-        """Run the column simulation via the BVM solver."""
+        """Run the column simulation via the selected rigorous MESH solver."""
         method = self.sim_tab.solver_combo.currentText()
-        # Shortcut (FUG) is a pre-design screening tool: closed-form, instant, no
-        # worker or stage profile, and it needs only the keys + feed (not a fully
-        # resolved DoF), so it runs ahead of the specification gate and opens its
-        # own report dialog.
-        if method.startswith("Shortcut"):
-            if getattr(self, "_solver_thread", None) and self._solver_thread.isRunning():
-                return
-            self._run_shortcut()
-            return
-
         can_run = self._check_specification()
 
         if not can_run:
@@ -408,34 +330,18 @@ class MainWindow(QMainWindow):
 
     def _make_solver_job(self, method):
         """A thread-safe callable (report, cancel) -> profile for `method`.
-        All Qt widget access happens in here, on the GUI thread."""
-        if method == "Bubble-Point" or "Inside-Out" in method \
-                or method.startswith("HYSIM"):
+        All Qt widget access happens in here, on the GUI thread. Only the two
+        rigorous MESH solvers are dispatched here; BVM/FUG live in Modules."""
+        if method == "Bubble-Point" or "Inside-Out" in method:
             from core.column_solvers import solve_bubble_point, solve_inside_out
             solver = (solve_bubble_point if method == "Bubble-Point"
                       else solve_inside_out)
             si, knobs = self._gather_rigorous_inputs()
             return lambda report, cancel: solver(si, report=report,
                                                  cancel=cancel, **knobs)
-        if method.startswith("BVM"):
-            widget = self.modules_tab.ensure_bvm()     # widget built here
-            kwargs = widget._gather_inputs()           # spins read here
-            int_tol = widget.int_tol_spin.value()
-
-            def job(report, cancel):
-                from gui.modules.bvm_module import (bound_val_method,
-                                                    build_column_profile)
-                result = bound_val_method(**kwargs)    # direct march, no iters
-                profile = build_column_profile(result, int_tol=int_tol)
-                if not profile.get("found"):
-                    raise ValueError(profile.get(
-                        "message", "No feasible intersection at these specs."))
-                widget._result = result                # keep the plot path live
-                return profile
-            return job
         raise ValueError(
-            f"{method} is not implemented yet — choose Bubble-Point, "
-            "HYSIM Inside-Out, or BVM (preliminary).")
+            f"{method} is not implemented yet — choose Bubble-Point or "
+            "Inside-Out (HYSIM).")
 
     def _start_solver(self, job):
         import time
@@ -552,85 +458,6 @@ class MainWindow(QMainWindow):
             "runtime": "< 1 s",
             "data": rows,
         }
-
-    def _gather_fug_inputs(self):
-        """Build FUG (shortcut) inputs from the current state: constant relative
-        volatilities at the feed bubble point, the mixed feed, the two keys and
-        their recoveries. Raises a user-facing ValueError when the setup can't
-        support a shortcut design."""
-        import numpy as np
-        from core.thermodynamics import bubble_T, k_values
-        from core.dof import SpecKind
-        from .state.window_state import StreamType
-
-        ws = self.window_state
-        order = ws.get_species_names()
-        if len(order) < 2:
-            raise ValueError("Need at least 2 species (Initialization tab).")
-        lk, hk = ws.light_key_index, ws.heavy_key_index
-        if lk == hk:
-            raise ValueError("Light and heavy keys must differ "
-                             "(Specifications tab).")
-
-        # Flow-weighted mixed feed and quality.
-        zsum = np.zeros(len(order)); Ftot = 0.0; qF = 0.0
-        for s in ws.streams.values():
-            if s.stream_type != StreamType.FEED or not s.flow or not s.composition:
-                continue
-            z = np.array([s.composition.get(nm, 0.0) for nm in order], float)
-            if z.sum() <= 0.0:
-                continue
-            z = z / z.sum()
-            zsum += float(s.flow) * z; Ftot += float(s.flow)
-            qF += ws.feed_quality(s, order) * float(s.flow)
-        if Ftot <= 0.0:
-            raise ValueError("At least one feed with a flow and composition is "
-                             "required.")
-        z_mixed = zsum / Ftot
-        q = qF / Ftot
-
-        antoine = ws.thermodynamics_config.psat_params(order)
-        P = ws.thermodynamics_config.pressure_in_psat_unit(ws.pressure)
-        gamma_fn = ws.build_gamma_fn(order)
-        phi_fn = ws.build_phi_fn(order)
-        Tb = bubble_T(z_mixed, P, antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
-        K = k_values(Tb, P, antoine, gamma_fn, z_mixed, phi_fn)
-        alpha = np.asarray(K, float) / float(K[hk])
-        if alpha[lk] <= alpha[hk]:
-            raise ValueError(
-                f"'{order[lk]}' is not more volatile than '{order[hk]}' at the "
-                "feed bubble point — pick keys so the light key boils lower.")
-
-        # Recoveries from spec kinds if present, else a sharp-ish default.
-        rec = {SpecKind.LK_RECOVERY: 0.98, SpecKind.HK_RECOVERY: 0.02}
-        for s in ws.collect_specs():
-            if s.kind in rec:
-                rec[s.kind] = float(s.value)
-        R_op = next((float(s.value) for s in ws.collect_specs()
-                     if s.kind == SpecKind.REFLUX_RATIO), None)
-        return dict(alpha=alpha, z=z_mixed, lk=lk, hk=hk,
-                    rec_lk=rec[SpecKind.LK_RECOVERY],
-                    rec_hk=rec[SpecKind.HK_RECOVERY], q=q, R_op=R_op), order
-
-    def _run_shortcut(self):
-        """Compute the FUG shortcut design and show its report dialog."""
-        from core.shortcut import fug_design
-        from .fug_report_dialog import FUGReportDialog
-        try:
-            kwargs, order = self._gather_fug_inputs()
-            report = fug_design(**kwargs)
-        except ValueError as exc:
-            QMessageBox.warning(self, "Cannot Run Shortcut", str(exc))
-            return
-        except Exception:
-            import traceback
-            self._on_solver_failed("Shortcut design failed",
-                                   traceback.format_exc(), False)
-            return
-        self.statusBar().showMessage(
-            f"Shortcut (FUG): Nmin={report['Nmin']:.1f}, "
-            f"Rmin={report['Rmin']:.2f}, N≈{report['N']:.1f}")
-        FUGReportDialog(report, order, self).exec()
 
     def _gather_rigorous_inputs(self):
         """Build the canonical SolverInput for the rigorous solvers from
@@ -889,6 +716,10 @@ def main():
     _setup_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    from .theme import load_theme
+    from .theme.mpl_style import apply as apply_mpl_style
+    app.setStyleSheet(load_theme())      # one app-wide dark theme
+    apply_mpl_style()                    # matplotlib figures match the shell
 
     window = MainWindow()
     window.show()

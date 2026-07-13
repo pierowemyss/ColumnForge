@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
+from gui.theme import set_state
 from gui.panels.sub_tab_bar import SubTabBar
 from gui.panels.stream_config_panel import StreamConfigPanel
 from gui.panels.condenser_config_panel import CondenserConfigPanel
@@ -124,21 +125,10 @@ class SpecificationsTab(QWidget):
         eff_layout.addWidget(self.efficiency_spin)
         operating_layout.addWidget(eff_group)
 
-        # Light/heavy key pickers — these drive recovery/purity spec
-        # resolution for the main Run; shared with the BVM module widget via
-        # window_state.light_key_index / heavy_key_index.
-        keys_group = QGroupBox("Key Components")
-        keys_layout = QHBoxLayout(keys_group)
-        keys_layout.addWidget(QLabel("Light key:"))
-        self.lk_combo = QComboBox(self)
-        keys_layout.addWidget(self.lk_combo)
-        keys_layout.addWidget(QLabel("Heavy key:"))
-        self.hk_combo = QComboBox(self)
-        keys_layout.addWidget(self.hk_combo)
-        keys_layout.addStretch()
-        operating_layout.addWidget(keys_group)
-
-        # Operating specifications (Aspen-style: pick any N variables)
+        # Operating specifications (Aspen-style: pick any N variables). The
+        # light/heavy keys live inline on the recovery-spec rows now (they still
+        # write window_state.light_key_index / heavy_key_index, shared with the
+        # BVM/FUG modules); there's no separate Key Components box.
         op_specs_group = QGroupBox("Operating Specifications")
         op_specs_layout = QVBoxLayout(op_specs_group)
         self.operating_specs_panel = OperatingSpecsPanel(self)
@@ -236,7 +226,7 @@ class SpecificationsTab(QWidget):
         overview_layout.addWidget(self.column_canvas)
 
         self.dof_status_label = QLabel("Under-specified: Need 2 more specs.")
-        self.dof_status_label.setStyleSheet("font-weight: bold; color: orange;")
+        set_state(self.dof_status_label, "warn")
         overview_layout.addWidget(self.dof_status_label)
 
         layout.addWidget(overview_group, 1)
@@ -252,7 +242,7 @@ class SpecificationsTab(QWidget):
             "(condenser, reboiler, or any stream label)\n"
             "to configure it here."
         )
-        self.ov_placeholder.setStyleSheet("color: #666666; font-style: italic;")
+        self.ov_placeholder.setProperty("hint", True)
         self.ov_editor_stack.addWidget(self.ov_placeholder)
 
         # Page 1/2/3: reuse the real component panels
@@ -293,7 +283,7 @@ class SpecificationsTab(QWidget):
                       "until complex-column support lands. Modules in a "
                       "loaded file can still be deleted.")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #999999; font-style: italic;")
+        note.setProperty("hint", True)
         list_layout.addWidget(note)
 
         self.module_list = QTableWidget(0, 1)
@@ -333,57 +323,14 @@ class SpecificationsTab(QWidget):
         return page
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-                color: #cccccc;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
+        # Group-box styling now comes from the central theme (gui/theme/app.qss).
+        pass
 
     def _connect_signals(self):
         self.pressure_input.valueChanged.connect(self._on_config_changed)
         self.pressure_drop_spin.valueChanged.connect(self._on_config_changed)
         self.efficiency_spin.valueChanged.connect(self._on_config_changed)
-        self.lk_combo.currentIndexChanged.connect(self._on_keys_changed)
-        self.hk_combo.currentIndexChanged.connect(self._on_keys_changed)
         self.column_canvas.specsChanged.connect(self._on_config_changed)
-
-    def _on_keys_changed(self, *_):
-        """Persist LK/HK selections to the shared window_state."""
-        if not self.window_state:
-            return
-        lk, hk = self.lk_combo.currentIndex(), self.hk_combo.currentIndex()
-        if lk >= 0:
-            self.window_state.light_key_index = lk
-        if hk >= 0:
-            self.window_state.heavy_key_index = hk
-        self.window_state.mark_modified()
-
-    def _rebuild_key_combos(self):
-        """Populate LK/HK dropdowns from species, preserving stored indices
-        (same defaulting as the BVM module: hk falls back to lk+1)."""
-        ws = self.window_state
-        order = ws.get_species_names() if ws else []
-        lk = getattr(ws, "light_key_index", 0) or 0
-        hk = getattr(ws, "heavy_key_index", None)
-        if hk is None:
-            hk = min(lk + 1, len(order) - 1)
-        for combo, idx in ((self.lk_combo, lk), (self.hk_combo, hk)):
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(order)
-            if 0 <= idx < len(order):
-                combo.setCurrentIndex(idx)
-            combo.blockSignals(False)
 
     def _on_sub_tab_changed(self, index: int):
         """Handle main sub-tab change."""
@@ -779,8 +726,7 @@ class SpecificationsTab(QWidget):
             return
         icon, message, can_run = self.window_state.get_specification_status()
         self.dof_status_label.setText(f"{icon} {message}")
-        color = "green" if can_run else "orange"
-        self.dof_status_label.setStyleSheet(f"font-weight: bold; color: {color};")
+        set_state(self.dof_status_label, "ok" if can_run else "warn")
         if can_run:
             self.window_state.auto_balance()
             self._update_column_canvas()
@@ -809,10 +755,11 @@ class SpecificationsTab(QWidget):
         self._load_condenser_into(self.condenser_panel)
         self._load_reboiler_into(self.reboiler_panel)
 
-        # Operating-spec slots
+        # Operating-spec slots (window_state first so recovery rows can read the
+        # shared light/heavy key indices for their inline pickers).
+        self.operating_specs_panel.set_window_state(self.window_state)
         self.operating_specs_panel.set_species(self.window_state.get_species_names())
         self.operating_specs_panel.set_specs(self.window_state.specs)
-        self._rebuild_key_combos()
 
         # Load Streams
         self.stream_list.setRowCount(0)

@@ -13,13 +13,14 @@ import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFormLayout, QGroupBox, QLabel,
-    QComboBox, QDoubleSpinBox, QCheckBox, QPushButton, QTableWidget,
+    QComboBox, QCheckBox, QPushButton, QTableWidget,
     QTableWidgetItem,
 )
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvas
 
+from ..panels.sci_spin_box import SciDoubleSpinBox
 from ..state.window_state import StreamType
 from ..plotting import (
     CompactNavigationToolbar, ternary_axes,
@@ -164,7 +165,7 @@ class BVMModuleWidget(QWidget):
 
     @staticmethod
     def _spin(lo, hi, val, decimals=3, step=0.1):
-        s = QDoubleSpinBox()
+        s = SciDoubleSpinBox()
         s.setDecimals(decimals)
         s.setRange(lo, hi)
         s.setSingleStep(step)

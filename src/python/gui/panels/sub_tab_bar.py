@@ -18,35 +18,7 @@ class SubTabBar(QFrame):
         self.layout.addStretch()
 
         self.tab_buttons = []
-        self._setup_styles()
-
-    def _setup_styles(self):
-        self.setStyleSheet("""
-            QFrame#subTabBar {
-                background-color: #1a1a1a;
-                border-right: 1px solid #333333;
-            }
-            QPushButton {
-                text-align: left;
-                padding: 12px 15px;
-                border: none;
-                background-color: transparent;
-                color: #888888;
-                font-size: 13px;
-                font-weight: normal;
-                min-height: 20px;
-            }
-            QPushButton:hover {
-                background-color: #2d2d2d;
-                color: #cccccc;
-            }
-            QPushButton[selected="true"] {
-                background-color: #2d2d2d;
-                font-weight: 600;
-                color: #ffffff;
-                border-left: 3px solid #0078d4;
-            }
-        """)
+        # Styling (QFrame#subTabBar + its buttons) comes from gui/theme/app.qss.
 
     def addTab(self, name: str) -> int:
         """Add a tab button and return its index."""

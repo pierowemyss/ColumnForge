@@ -10,7 +10,9 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvas
 from matplotlib.ticker import MaxNLocator
 
+from gui.state.window_state import StreamType
 from gui.panels.sub_tab_bar import SubTabBar
+from gui.panels.sci_spin_box import fmt
 from gui.plotting import (
     CompactNavigationToolbar, ternary_axes, composition_from_click,
     residue_curve, residue_curve_map, singular_points,
@@ -139,6 +141,7 @@ class ResultsTab(QWidget):
         self.sub_tab_bar = SubTabBar(self)
         self.sub_tab_bar.addTab("View")
         self.sub_tab_bar.addTab("Streams")
+        self.sub_tab_bar.addTab("Performance")
         self.sub_tab_bar.tabClicked.connect(self._on_sub_tab_changed)
         main_layout.addWidget(self.sub_tab_bar)
 
@@ -236,13 +239,14 @@ class ResultsTab(QWidget):
             "Iterations: --\n"
             "Runtime: --"
         )
-        self.summary_label.setStyleSheet("font-family: monospace;")
+        self.summary_label.setProperty("mono", True)
         summary_layout.addWidget(self.summary_label)
 
         view_layout.addWidget(summary_group, 1)
 
         self.stack.addWidget(view_page)
         self.stack.addWidget(self._build_streams_page())
+        self.stack.addWidget(self._build_performance_page())
         main_layout.addWidget(self.stack)
 
     def _build_streams_page(self):
@@ -260,7 +264,7 @@ class ResultsTab(QWidget):
         lay.addWidget(prod_group, 3)
 
         self.duty_label = QLabel("Run a simulation to see stream results.")
-        self.duty_label.setStyleSheet("font-family: monospace;")
+        self.duty_label.setProperty("mono", True)
         lay.addWidget(self.duty_label)
 
         spec_group = QGroupBox("Specifications: target vs achieved")
@@ -271,6 +275,62 @@ class ResultsTab(QWidget):
         sg.addWidget(self.spec_table)
         lay.addWidget(spec_group, 2)
         return page
+
+    def _build_performance_page(self):
+        """Scalar column figures (reflux/boilup ratio, rates, duties) in one
+        place, read from the raw profile."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(10, 10, 10, 10)
+        grp = QGroupBox("Column performance")
+        g = QVBoxLayout(grp)
+        self.perf_table = QTableWidget(0, 2)
+        self.perf_table.setHorizontalHeaderLabels(["Quantity", "Value"])
+        self.perf_table.horizontalHeader().setStretchLastSection(True)
+        self.perf_table.verticalHeader().setVisible(False)
+        g.addWidget(self.perf_table)
+        lay.addWidget(grp)
+        return page
+
+    def _fill_performance(self):
+        """Populate the Performance sub-view from the raw profile."""
+        prof = self._profile()
+        if not prof or "D" not in prof:      # BVM-style profiles have no products
+            self.perf_table.setRowCount(0)
+            return
+        u = self._units()
+        D, B = float(prof["D"]), float(prof["B"])
+        F = float(np.nansum(np.asarray(prof.get("feed_totals", [0.0]))))
+        comps = prof["comps"]
+        species = getattr(self.window_state, "species", {}) or {}
+        mws = [getattr(species.get(c), "mw", None) for c in comps]
+
+        def flow_str(val, comp):
+            mw = (float(np.asarray(comp) @ np.asarray(mws, float))
+                  if all(m is not None for m in mws) else None)
+            v = u.F(val, mw) if u.flow == "kg/h" and mw else val
+            return f"{fmt(v)} {u.f_label()}"
+
+        Qc, Qr = prof.get("condenser_duty"), prof.get("reboiler_duty")
+        rows = [
+            ("Reflux ratio (R)", fmt(prof.get("R"))),
+            ("Boilup ratio", fmt(prof.get("boilup_ratio"))),
+            ("Distillate rate (D)", flow_str(D, prof["xD"])),
+            ("Bottoms rate (B)", flow_str(B, prof["xB"])),
+            ("D / F", fmt(D / F) if F > 0 else "—"),
+            ("B / F", fmt(B / F) if F > 0 else "—"),
+            ("Feed quality (q)", fmt(prof.get("feed_q"))),
+            ("Condenser duty",
+             f"{fmt(u.Q(Qc))} {u.q_label()}" if Qc is not None else "—"),
+            ("Reboiler duty",
+             f"{fmt(u.Q(Qr))} {u.q_label()}" if Qr is not None else "—"),
+            ("Number of stages", fmt(prof.get("n_stages"))),
+            ("Feed stage (from top)", fmt(prof.get("feed_stage", 0) + 1)),
+        ]
+        self.perf_table.setRowCount(len(rows))
+        for r, (name, val) in enumerate(rows):
+            self.perf_table.setItem(r, 0, QTableWidgetItem(name))
+            self.perf_table.setItem(r, 1, QTableWidgetItem(str(val)))
 
     def _on_sub_tab_changed(self, index: int):
         """Handle sub-tab change."""
@@ -290,28 +350,9 @@ class ResultsTab(QWidget):
             table_widget.setVisible(True)
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QTableWidget {
-                gridline-color: #cccccc;
-            }
-            QHeaderView::section {
-                background-color: #f0f0f0;
-                padding: 4px;
-                border: 1px solid #cccccc;
-            }
-        """)
+        # Styling comes from the central theme (gui/theme/app.qss); this method
+        # is kept as a no-op seam for any results-specific tweak.
+        pass
 
     def set_view_type(self, view_type: str):
         """Set the current view type (Plot or Table)."""
@@ -339,6 +380,7 @@ class ResultsTab(QWidget):
         self._update_data_choices()
         self._fill_table()
         self._fill_stream_summary()
+        self._fill_performance()
         self._draw_plot()
 
     def _sync_unit_combos(self):
@@ -381,7 +423,7 @@ class ResultsTab(QWidget):
                 else p["flow"]
             cells = [f"{p['name']} ({p['phase']})",
                      f"{flow:.3f}", f"{u.T(p['T']):.2f}"] \
-                + [f"{v:.4f}" for v in p["comp"]]
+                + [fmt(v) for v in p["comp"]]
             for c, v in enumerate(cells):
                 self.stream_table.setItem(r, c, QTableWidgetItem(v))
 
@@ -421,7 +463,7 @@ class ResultsTab(QWidget):
                         rows.append((f"{s.kind.value} ({comps[idx]})", s.value, rec))
         self.spec_table.setRowCount(len(rows))
         for r, (name, target, got) in enumerate(rows):
-            for c, v in enumerate((name, f"{target:.4f}", f"{got:.4f}")):
+            for c, v in enumerate((name, fmt(target), fmt(got))):
                 self.spec_table.setItem(r, c, QTableWidgetItem(v))
 
     def _profile(self):
@@ -454,6 +496,7 @@ class ResultsTab(QWidget):
         if self._profile():
             self._fill_table()
             self._fill_stream_summary()
+            self._fill_performance()
             self._draw_plot()
 
     def _data_available(self, dtype, prof):
@@ -572,12 +615,36 @@ class ResultsTab(QWidget):
                 ax.set_ylabel(_SERIES_LABELS.get(dtype, dtype))
             ax.plot(N, series, "-o", color=DATA_C)
 
-        ax.axvline(prof["feed_stage"], color="grey", ls="--", lw=1)
+        self._draw_feed_lines(ax, prof)
         ax.set_xlabel("Stage (0 = distillate)")
         ax.set_xlim(0, prof["n_stages"] - 1)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         self.figure.tight_layout()
         self.canvas.draw()
+
+    def _feed_stages(self, prof):
+        """{stage: [stream ids]} for every feed that has a flow (GUI stage
+        convention, 0 = distillate). Falls back to the profile's single
+        feed_stage when there's no window_state to read streams from."""
+        stages = {}
+        ws = self.window_state
+        if ws:
+            for s in ws.streams.values():
+                if s.stream_type == StreamType.FEED and s.flow and s.composition:
+                    stages.setdefault(int(s.stage), []).append(s.id)
+        if not stages and "feed_stage" in prof:
+            stages[int(prof["feed_stage"])] = ["Feed"]
+        return stages
+
+    def _draw_feed_lines(self, ax, prof):
+        """One dashed marker per feed stage, labelled with the feed id(s)."""
+        for stage, ids in self._feed_stages(prof).items():
+            if 0 <= stage < prof["n_stages"]:
+                ax.axvline(stage, color="grey", ls="--", lw=1)
+                ax.text(stage, 0.98, ", ".join(ids),
+                        transform=ax.get_xaxis_transform(),
+                        ha="right", va="top", fontsize=7, color="grey",
+                        rotation=90)
 
     def _thermo_ctx(self):
         """(P, antoine, gamma_fn) in the Psat-fit unit, or None if the shared
@@ -683,4 +750,5 @@ class ResultsTab(QWidget):
         )
         self.data_table.setRowCount(0)
         self._fill_stream_summary()
+        self._fill_performance()
         self._draw_plot()

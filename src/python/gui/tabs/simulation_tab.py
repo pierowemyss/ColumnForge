@@ -1,10 +1,17 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QProgressBar,
-    QPushButton, QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QStackedWidget
+    QPushButton, QGroupBox, QFormLayout, QSpinBox, QStackedWidget
 )
 from PySide6.QtCore import Signal
 
+from gui.theme import set_state
 from gui.panels.sub_tab_bar import SubTabBar
+from gui.panels.sci_spin_box import SciDoubleSpinBox
+from gui.tabs.initialization_tab import (
+    VLE_MODELS, ACTIVITY_MODELS, EOS_MODELS,
+    IMPLEMENTED_VLE, IMPLEMENTED_ACTIVITY, IMPLEMENTED_EOS,
+    _grey_unimplemented,
+)
 
 
 class SimulationTab(QWidget):
@@ -12,12 +19,13 @@ class SimulationTab(QWidget):
 
     runSimulation = Signal()
     abortSimulation = Signal()
+    thermoChanged = Signal()   # mirror combos changed the thermo model
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self.window_state = None
         self._setup_ui()
-        self._setup_styles()
         self._connect_signals()
 
     def _setup_ui(self):
@@ -44,11 +52,11 @@ class SimulationTab(QWidget):
         options_layout = QFormLayout(options_group)
 
         self.solver_combo = QComboBox(self)
+        # Only the rigorous MESH solvers live here; BVM and FUG are feasibility/
+        # shortcut methods and now have their own widgets in the Modules tab.
         self.solver_combo.addItems([
+            "Inside-Out (HYSIM)",      # rigorous, inner/outer (implemented) — default
             "Bubble-Point",            # rigorous, CMO + ideal VLE (implemented)
-            "BVM (preliminary)",       # feasibility / profile, via the BVM module
-            "Inside-Out (HYSIM)",      # rigorous, inner/outer (implemented)
-            "Shortcut (FUG)",          # Fenske-Underwood-Gilliland design report
         ])
         options_layout.addRow("Method:", self.solver_combo)
 
@@ -57,13 +65,38 @@ class SimulationTab(QWidget):
         self.max_iter_spin.setValue(500)
         options_layout.addRow("Max Iterations:", self.max_iter_spin)
 
-        self.tolerance_spin = QDoubleSpinBox(self)
+        self.tolerance_spin = SciDoubleSpinBox(self)
         self.tolerance_spin.setRange(1e-10, 1e-1)
-        self.tolerance_spin.setDecimals(8)
         self.tolerance_spin.setValue(1e-7)
         options_layout.addRow("Tolerance:", self.tolerance_spin)
 
         solver_layout.addWidget(options_group)
+
+        # Thermodynamics mirror — same models as the Initialization tab, kept in
+        # lock-step through window_state so the model can be tuned without
+        # tab-hopping. See _on_thermo_changed / refresh_thermo.
+        thermo_group = QGroupBox("Thermodynamics")
+        thermo_layout = QFormLayout(thermo_group)
+
+        self.vle_combo = QComboBox(self)
+        self.vle_combo.addItems(VLE_MODELS)
+        _grey_unimplemented(self.vle_combo, IMPLEMENTED_VLE)
+        self.vle_combo.currentTextChanged.connect(self._on_thermo_changed)
+        thermo_layout.addRow("Vapor Pressure:", self.vle_combo)
+
+        self.activity_combo = QComboBox(self)
+        self.activity_combo.addItems(ACTIVITY_MODELS)
+        _grey_unimplemented(self.activity_combo, IMPLEMENTED_ACTIVITY)
+        self.activity_combo.currentTextChanged.connect(self._on_thermo_changed)
+        thermo_layout.addRow("Activity Coefficient:", self.activity_combo)
+
+        self.eos_combo = QComboBox(self)
+        self.eos_combo.addItems(EOS_MODELS)
+        _grey_unimplemented(self.eos_combo, IMPLEMENTED_EOS)
+        self.eos_combo.currentTextChanged.connect(self._on_thermo_changed)
+        thermo_layout.addRow("Equation of State:", self.eos_combo)
+
+        solver_layout.addWidget(thermo_group)
 
         # Bottom Row: Run/Abort + Progress
         bottom_layout = QHBoxLayout()
@@ -73,12 +106,14 @@ class SimulationTab(QWidget):
         button_layout = QVBoxLayout()
         button_layout.setSpacing(10)
 
-        self.run_btn = QPushButton("Run")
+        from gui.theme.iconset import icon
+        self.run_btn = QPushButton(icon("run"), "Run")
+        self.run_btn.setObjectName("run_btn")
         self.run_btn.setMinimumHeight(40)
-        self.run_btn.setStyleSheet("font-weight: bold;")
         button_layout.addWidget(self.run_btn)
 
-        self.abort_btn = QPushButton("Abort")
+        self.abort_btn = QPushButton(icon("abort"), "Abort")
+        self.abort_btn.setObjectName("abort_btn")
         self.abort_btn.setMinimumHeight(40)
         self.abort_btn.setEnabled(False)
         button_layout.addWidget(self.abort_btn)
@@ -108,7 +143,7 @@ class SimulationTab(QWidget):
 
         # Status message
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("font-weight: bold;")
+        set_state(self.status_label, "neutral")
         progress_layout.addWidget(self.status_label)
 
         bottom_layout.addWidget(progress_group, 2)
@@ -123,34 +158,6 @@ class SimulationTab(QWidget):
         """Handle sub-tab change."""
         self.stack.setCurrentIndex(index)
         self.sub_tab_bar.setCurrentIndex(index)
-
-    def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QPushButton#run_btn {
-                background-color: #4CAF50;
-                color: white;
-                font-weight: bold;
-            }
-            QPushButton#abort_btn {
-                background-color: #f44336;
-                color: white;
-            }
-            QPushButton:checked {
-                background-color: #666666;
-            }
-        """)
 
     def _connect_signals(self):
         self.run_btn.clicked.connect(self._on_run_clicked)
@@ -189,10 +196,36 @@ class SimulationTab(QWidget):
     def set_status(self, message: str, is_error: bool = False):
         """Set status message."""
         self.status_label.setText(message)
-        if is_error:
-            self.status_label.setStyleSheet("font-weight: bold; color: red;")
-        else:
-            self.status_label.setStyleSheet("font-weight: bold; color: green;")
+        set_state(self.status_label, "error" if is_error else "ok")
+
+    def set_window_state(self, window_state):
+        """Give the tab the shared state and sync the mirror combos to it."""
+        self.window_state = window_state
+        self.refresh_thermo()
+
+    def _on_thermo_changed(self):
+        """Write the mirror combos through to the shared thermo config and let
+        the Initialization tab re-sync."""
+        if self.window_state:
+            tc = self.window_state.thermodynamics_config
+            tc.vle_model = self.vle_combo.currentText()
+            tc.activity_model = self.activity_combo.currentText()
+            tc.eos_model = self.eos_combo.currentText()
+            self.window_state.is_modified = True
+            self.thermoChanged.emit()
+
+    def refresh_thermo(self):
+        """Re-sync the mirror combos from window_state (signals blocked to avoid
+        a feedback loop with the Initialization tab)."""
+        if not self.window_state:
+            return
+        tc = self.window_state.thermodynamics_config
+        for combo, value in ((self.vle_combo, tc.vle_model),
+                             (self.activity_combo, tc.activity_model),
+                             (self.eos_combo, tc.eos_model)):
+            combo.blockSignals(True)
+            combo.setCurrentText(value)
+            combo.blockSignals(False)
 
     def get_solver_config(self) -> dict:
         """Get current solver configuration."""

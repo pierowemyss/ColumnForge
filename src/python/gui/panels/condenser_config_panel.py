@@ -1,10 +1,11 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QGroupBox, QCheckBox
 )
 from PySide6.QtCore import Signal
 
 from .unit_combo_box import UnitComboBox
+from .sci_spin_box import SciDoubleSpinBox
 
 
 class CondenserConfigPanel(QWidget):
@@ -57,7 +58,7 @@ class CondenserConfigPanel(QWidget):
         self.reflux_group = QGroupBox("Reflux")
         reflux_layout = QHBoxLayout(self.reflux_group)
         reflux_layout.addWidget(QLabel("Reflux Ratio (L/D):"))
-        self.reflux_spin = QDoubleSpinBox(self)
+        self.reflux_spin = SciDoubleSpinBox(self)
         self.reflux_spin.setRange(0, 1000)
         self.reflux_spin.setDecimals(4)
         reflux_layout.addWidget(self.reflux_spin)
@@ -74,30 +75,15 @@ class CondenserConfigPanel(QWidget):
 
         hint = QLabel("Reflux ratio and distillate rate also appear in "
                       "Operating Specifications — same value, two places to edit.")
-        hint.setStyleSheet("color: #666666; font-style: italic;")
+        hint.setProperty("hint", True)
         hint.setWordWrap(True)
         main_layout.addWidget(hint)
 
         main_layout.addStretch()
 
     def _setup_styles(self):
-        self.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QLabel {
-                min-width: 120px;
-            }
-        """)
+        # Styling comes from the central theme (gui/theme/app.qss).
+        pass
 
     def _connect_signals(self):
         self.type_combo.currentTextChanged.connect(self._on_type_changed)

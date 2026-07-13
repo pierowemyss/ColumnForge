@@ -1,0 +1,209 @@
+/* FreeColumn theme — one dark surface hierarchy. Bracketed tokens are
+   substituted from gui/theme/palette.py at load; after substitution this is QSS a
+   C++ build can consume as-is. Structured by widget class + objectName so a
+   light palette is a constants swap, not a rewrite. */
+
+/* ---- base ---------------------------------------------------------------- */
+QMainWindow, QDialog {
+    background-color: @window@;
+}
+QWidget {
+    color: @text@;
+    font-size: @font_size@;
+}
+QToolTip {
+    background-color: @toolbar@;
+    color: @text@;
+    border: 1px solid @border@;
+    padding: 3px;
+}
+
+/* ---- menu bar / menus ---------------------------------------------------- */
+QMenuBar {
+    background-color: @window@;
+    color: @text@;
+    border-bottom: 1px solid @border@;
+    padding: 2px;
+}
+QMenuBar::item:selected { background-color: @hover@; }
+QMenu {
+    background-color: @window@;
+    color: @text@;
+    border: 1px solid @border@;
+}
+QMenu::item:selected { background-color: @hover@; }
+
+/* ---- toolbar ------------------------------------------------------------- */
+QToolBar {
+    spacing: 5px;
+    padding: 3px;
+    background-color: @toolbar@;
+    border-bottom: 1px solid @divider@;
+}
+QToolBar QToolButton {
+    min-width: 60px;
+    padding: 5px 10px;
+    color: @text_muted@;
+    background-color: transparent;
+    border: none;
+    border-radius: @radius@;
+}
+QToolBar QToolButton:hover { background-color: @divider@; color: @text@; }
+QToolBar QToolButton:pressed { background-color: @border@; }
+
+/* ---- tabs ---------------------------------------------------------------- */
+QTabWidget::pane {
+    background-color: @window@;
+    border: 1px solid @border@;
+}
+QTabBar::tab {
+    background-color: @raised@;
+    color: @text_muted@;
+    padding: 10px 20px;
+    margin-right: 2px;
+    border: 1px solid @divider@;
+    border-bottom: none;
+}
+QTabBar::tab:selected {
+    background-color: @window@;
+    color: @text_bright@;
+    font-weight: bold;
+}
+QTabBar::tab:hover:!selected { background-color: @divider@; color: @text@; }
+
+/* ---- side nav (SubTabBar) ------------------------------------------------ */
+QFrame#subTabBar {
+    background-color: @raised@;
+    border-right: 1px solid @divider@;
+}
+QFrame#subTabBar QPushButton {
+    text-align: left;
+    padding: 12px 15px;
+    border: none;
+    background-color: transparent;
+    color: @text_muted@;
+    font-size: @font_size@;
+    min-height: 20px;
+}
+QFrame#subTabBar QPushButton:hover { background-color: @window@; color: @text@; }
+QFrame#subTabBar QPushButton[selected="true"] {
+    background-color: @window@;
+    font-weight: 600;
+    color: @text_bright@;
+    border-left: 3px solid @accent@;
+}
+
+/* ---- status bar ---------------------------------------------------------- */
+QStatusBar {
+    background-color: @window@;
+    color: @text@;
+    border-top: 1px solid @border@;
+}
+
+/* ---- group boxes --------------------------------------------------------- */
+QGroupBox {
+    font-weight: bold;
+    border: 1px solid @border@;
+    border-radius: @radius@;
+    margin-top: 10px;
+    padding-top: 10px;
+    color: @text@;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 5px;
+}
+QStackedWidget { background-color: @window@; }
+
+/* ---- buttons ------------------------------------------------------------- */
+QPushButton {
+    background-color: @field@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: @radius@;
+    padding: 5px 12px;
+    min-height: 20px;
+}
+QPushButton:hover { background-color: @hover@; }
+QPushButton:pressed { background-color: @border@; }
+QPushButton:disabled { color: @text_muted@; background-color: @window@; }
+QPushButton:checked { background-color: @border@; }
+QPushButton#run_btn {
+    background-color: @ok@; color: @text_bright@; font-weight: bold;
+    border: none;
+}
+QPushButton#run_btn:hover { background-color: #37b24d; }
+QPushButton#abort_btn {
+    background-color: @error@; color: @text_bright@; border: none;
+}
+QPushButton#abort_btn:hover { background-color: #f03e3e; }
+
+/* ---- inputs -------------------------------------------------------------- */
+QLineEdit, QComboBox, QAbstractSpinBox, QPlainTextEdit, QTextEdit {
+    background-color: @field@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: @radius@;
+    padding: 3px 6px;
+    min-height: 18px;
+    selection-background-color: @accent@;
+}
+QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {
+    border: 1px solid @accent@;
+}
+QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {
+    color: @text_muted@; background-color: @window@;
+}
+QComboBox::drop-down { border: none; width: 18px; }
+QComboBox QAbstractItemView {
+    background-color: @field@;
+    color: @text@;
+    selection-background-color: @accent@;
+    border: 1px solid @border@;
+}
+
+/* ---- tables -------------------------------------------------------------- */
+QTableWidget, QTableView {
+    background-color: @window@;
+    alternate-background-color: @raised@;
+    gridline-color: @divider@;
+    color: @text@;
+    border: 1px solid @border@;
+    selection-background-color: @accent@;
+    selection-color: @text_bright@;
+}
+QHeaderView::section {
+    background-color: @raised@;
+    color: @text@;
+    padding: 4px;
+    border: 1px solid @divider@;
+}
+QTableCornerButton::section { background-color: @raised@; border: 1px solid @divider@; }
+
+/* ---- checkboxes / progress ---------------------------------------------- */
+QCheckBox { color: @text@; spacing: 6px; }
+QProgressBar {
+    border: 1px solid @border@;
+    border-radius: @radius@;
+    background-color: @field@;
+    text-align: center;
+    color: @text@;
+}
+QProgressBar::chunk { background-color: @accent@; }
+
+/* ---- scrollbars (quiet) -------------------------------------------------- */
+QScrollBar:vertical, QScrollBar:horizontal { background: @window@; border: none; }
+QScrollBar::handle { background: @border@; border-radius: 4px; min-height: 20px; }
+QScrollBar::handle:hover { background: @text_muted@; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+
+/* ---- semantic labels (dynamic properties, set from code) ----------------- */
+QLabel#panelHeader { font-size: @header_font@; font-weight: bold; }
+QLabel[hint="true"] { color: @text_hint@; font-style: italic; }
+QLabel[mono="true"] { font-family: monospace; }
+QLabel[state="neutral"] { font-weight: bold; color: @text@; }
+QLabel[state="ok"] { font-weight: bold; color: @ok@; }
+QLabel[state="warn"] { font-weight: bold; color: @warn@; }
+QLabel[state="error"] { font-weight: bold; color: @error@; }
+QLabel[strong="true"] { font-weight: bold; }
