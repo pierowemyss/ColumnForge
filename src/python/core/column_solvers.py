@@ -129,7 +129,7 @@ def make_energy_balance(cp_liq, hvap_Tb, tb, tc, relax=0.5,
     ponytail: feed enthalpy uses the local stage T as the feed T (we don't carry
     a separate feed temperature); relax=0.5 damps the L/V update — lower it if a
     steep column oscillates. Upgrade path: a full Naphtali-Sandholm energy row is
-    already in Matrix BVM (roadmap Path B).
+    already in BVM (roadmap Path B).
     """
     from core.enthalpy import enthalpy_fns
     hL_c, hV_c = enthalpy_fns(cp_liq, hvap_Tb, tb, tc)
@@ -308,7 +308,7 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     equilibrium stages. Returns a profile dict (see _finish_profile).
     cancel: optional callable -> bool, checked each iteration for real Abort.
     report: optional callable (iteration, dT_residual) for progress display.
-    x0/T0: optional (N,C)/(N,) warm-start profiles (e.g. a Matrix BVM design,
+    x0/T0: optional (N,C)/(N,) warm-start profiles (e.g. a BVM design,
     stage 0 = top); when shape-compatible they replace the flat feed guess so a
     good initial column converges in fewer iterations.
     """

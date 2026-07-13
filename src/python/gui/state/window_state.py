@@ -307,7 +307,6 @@ class WindowState:
         # BVM solver knobs live in the Modules/BVM widget; mirrored here so they
         # round-trip through to_dict()/load_from_dict() (.colx). {} = use defaults.
         self.bvm_params: dict = {}
-        self.matrix_bvm_params: dict = {}    # same idea for the Matrix BVM widget
 
         # Spec/DoF: structured extra specs (e.g. key-recovery) + CMO flag.
         # Condenser/reboiler/side-draw specs are derived from config in
@@ -343,7 +342,6 @@ class WindowState:
         self.thermodynamics_config = ThermodynamicsConfig()
         self.modules = {}
         self.bvm_params = {}
-        self.matrix_bvm_params = {}
         self.specs = []
         self.energy_balance = False
         self.light_key_index = 0
@@ -381,8 +379,7 @@ class WindowState:
     # window_state when the BVM panel should round-trip too.
     _PERSIST = ("num_stages", "pressure", "pressure_drop", "stage_efficiency",
                 "species", "streams", "condenser_config", "reboiler_config",
-                "thermodynamics_config", "modules", "bvm_params",
-                "matrix_bvm_params", "specs",
+                "thermodynamics_config", "modules", "bvm_params", "specs",
                 "energy_balance", "light_key_index", "heavy_key_index",
                 "display_units", "solver_mode")
 

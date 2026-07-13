@@ -4,14 +4,13 @@ The everyday VLE-inspection tool. Picks two species from the loaded set (or
 adds one from the bundled database), sweeps the binary at the session's
 selected thermo models, and draws the bubble/dew loci or the y-x curve. The
 azeotrope table below classifies the singular points (pure ends + azeotropes)
-via gui.plotting.singular_points. A "Ternary RCM" mode appears once three or
-more species are loaded.
+via gui.plotting.singular_points. Ternary residue-curve maps live in the
+dedicated RCM module.
 
 All math is in core.vle_diagrams / gui.plotting; this file is only the widget.
 """
 import csv
 
-import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvas
 from PySide6.QtWidgets import (
@@ -20,17 +19,14 @@ from PySide6.QtWidgets import (
 )
 
 from core import vle_diagrams
-from gui.plotting import (
-    CompactNavigationToolbar, singular_points, residue_curve_map,
-    plot_residue_curves, ternary_axes,
-)
+from gui.plotting import CompactNavigationToolbar, singular_points
 from .module_thermo import session_models
 from ..panels.unit_combo_box import UnitComboBox
 from ..panels.species_search_dialog import SpeciesSearchDialog
 
 
 class TxyModuleWidget(QWidget):
-    MODES = ["Txy (fixed P)", "Pxy (fixed T)", "xy (fixed P)", "Ternary RCM"]
+    MODES = ["Txy (fixed P)", "Pxy (fixed T)", "xy (fixed P)"]
 
     def __init__(self, window_state=None, parent=None):
         super().__init__(parent)
@@ -149,11 +145,6 @@ class TxyModuleWidget(QWidget):
             combo.setCurrentIndex(idx if idx >= 0
                                   else min(default, len(order) - 1))
             combo.blockSignals(False)
-        # enable the ternary mode only with 3+ species
-        ternary_ok = len(order) >= 3
-        item = self.mode_combo.model().item(self.MODES.index("Ternary RCM"))
-        item.setEnabled(ternary_ok)
-        item.setToolTip("" if ternary_ok else "Needs 3+ loaded species")
         self._update_label()
 
     def _add_from_db(self):
@@ -192,9 +183,6 @@ class TxyModuleWidget(QWidget):
         if not self.window_state:
             return
         mode = self.mode_combo.currentText()
-        if mode.startswith("Ternary"):
-            self._plot_ternary()
-            return
         order = self._order()
         if order[0] == order[1]:
             self.status.setText("Pick two different components.")
@@ -251,33 +239,7 @@ class TxyModuleWidget(QWidget):
         msg = f"{mode}: {len(data['azeotropes'])} azeotrope(s)."
         self.status.setText(msg + ("  " + note if note else ""))
 
-    def _plot_ternary(self):
-        order = self.window_state.get_species_names()[:3]
-        try:
-            antoine, gamma_fn, _, label, _ = session_models(
-                self.window_state, order)
-        except ValueError as exc:
-            self.status.setText(str(exc))
-            return
-        P = self._pressure_psat_unit()
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        ternary_axes(ax, order)
-        try:
-            curves = residue_curve_map(P, antoine, order, gamma_fn=gamma_fn)
-            plot_residue_curves(ax, curves)
-        except Exception as exc:                     # noqa: BLE001 - draw best-effort
-            self.status.setText(f"RCM partial: {exc}")
-        self.figure.tight_layout()
-        self.canvas.draw()
-        self._fill_az_table(order, antoine, gamma_fn, label, ternary=True)
-        self.export_btn.setEnabled(False)
-        self._last = None
-        self.status.setText(
-            f"Ternary RCM for {', '.join(order)} ({label}); "
-            f"{self.az_table.rowCount()} singular point(s).")
-
-    def _fill_az_table(self, order, antoine, gamma_fn, label, ternary=False):
+    def _fill_az_table(self, order, antoine, gamma_fn, label):
         P = self._pressure_psat_unit()
         try:
             pts = singular_points(P, antoine, order, gamma_fn=gamma_fn)
