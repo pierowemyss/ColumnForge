@@ -25,7 +25,7 @@ def crossover_stage(prof_up, prof_far):
     exactly the closest-approach junction (Sec 7). Returns the upstream stage
     index at the junction.
     """
-    from connect import connect
+    from .connect import connect
     c = connect(prof_up, prof_far)
     return int(round(c["nA"]))
 
@@ -37,8 +37,8 @@ def total_stages_for_switch(prof_up, k, sec_dn, prof_far, tp, P, max_stages=200)
     and finds its closest approach to the far fixed profile. Returns
     (N_total, connected, dmin).
     """
-    from march import march_section
-    from connect import connect
+    from .march import march_section
+    from .connect import connect
     anchor = prof_up["X"][int(k)]
     dn = march_section(sec_dn, anchor, tp, P, max_stages=max_stages)
     c = connect(dn, prof_far)
@@ -65,10 +65,10 @@ def side_draw_stage(prof, draw):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem, overall_balance
-    from sections import single_feed_chain
-    from march import march_section
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem, overall_balance
+    from .sections import single_feed_chain
+    from .march import march_section
 
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),
@@ -86,11 +86,11 @@ def _demo():
     k = crossover_stage(r, s)
     assert 0 < k < r["n"], k
     # it coincides with the connection junction (operating-line intersection)
-    from connect import connect
+    from .connect import connect
     assert abs(k - connect(r, s)["nA"]) < 1.0
 
     # side draw: purity target capped by the profile
-    from problem import SideDraw
+    from .problem import SideDraw
     draw_hi = SideDraw(W=10.0, phase="L", comp_index=1, purity=0.99)  # unreachable
     res = side_draw_stage(s, draw_hi)
     assert res["capped"] and res["achieved"] < 0.99, res

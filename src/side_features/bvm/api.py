@@ -14,9 +14,9 @@ section, feed/draw locations, R_min / min-E/F, and the full top->bottom profiles
 
 import numpy as np
 
-from driver import (size_column as _size, feasibility_map as _fmap,
+from .driver import (size_column as _size, feasibility_map as _fmap,
                     r_min as _rmin, ef_min as _efmin)
-from handoff import to_solver
+from .handoff import to_solver
 
 
 def size_column(prob, provider, R, S=None, EF=None, with_limits=True):
@@ -43,8 +43,8 @@ def ef_min(prob, provider, R, **kw):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem
 
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),

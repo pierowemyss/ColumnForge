@@ -12,14 +12,14 @@ Stage 0 = distillate (top), matching the FreeColumn GUI convention.
 
 import numpy as np
 
-from problem import overall_balance, SideDraw
-from sections import (single_feed_chain, extractive_chain, multifeed_chain)
-from march import march_section
-from connect import connect
-from place import crossover_stage, side_draw_stage
-from anchor import saddle_pinch, launch_from_saddle, unstable_eigvec
-from diagnostics import classify
-from pinch import bisect_min
+from .problem import overall_balance, SideDraw
+from .sections import (single_feed_chain, extractive_chain, multifeed_chain)
+from .march import march_section
+from .connect import connect
+from .place import crossover_stage, side_draw_stage
+from .anchor import saddle_pinch, launch_from_saddle, unstable_eigvec
+from .diagnostics import classify
+from .pinch import bisect_min
 
 
 def _concat(top_prof, top_n, bot_prof_rev, bot_n, secs_top, secs_bot):
@@ -263,8 +263,8 @@ def feasibility_map(prob, tp, R_grid, S_grid=None, EF_grid=None):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem
 
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),

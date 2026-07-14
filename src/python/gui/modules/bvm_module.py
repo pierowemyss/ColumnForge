@@ -1,6 +1,6 @@
 """BVM side module -- boundary-value column sizing & feasibility.
 
-A GUI over `src/side_features/matrix_bvm`: the difference-point-chain design
+A GUI over `src/side_features/bvm`: the difference-point-chain design
 method (MatBVM_blueprint.md, v4). Feed, pressure, species, keys and the thermo
 model come from the shared window_state (same as the RCM module); the
 BVM levers -- reflux R (single or swept), key recoveries, optional
@@ -16,9 +16,6 @@ locations, R_min, and a classified feasibility verdict. Three actions:
                      start) and report its convergence.
 """
 
-import os as _os
-import sys as _sys
-
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -33,15 +30,9 @@ from ..panels.sci_spin_box import SciDoubleSpinBox
 from ..state.window_state import StreamType
 from ..plotting import CompactNavigationToolbar, TEMP_C as _TEMP_C
 
-# matrix_bvm uses bare intra-package imports, so it is loaded by putting its own
-# directory on sys.path. Refs captured now.
-_MBVM_DIR = _os.path.abspath(_os.path.join(
-    _os.path.dirname(__file__), "..", "..", "..", "side_features", "matrix_bvm"))
-if _MBVM_DIR not in _sys.path:
-    _sys.path.insert(0, _MBVM_DIR)
-import api as _mbvm_api                          # noqa: E402
-from problem import build_problem                # noqa: E402
-from thermo_adapter import FreeColumnThermo       # noqa: E402
+from side_features.bvm import api as _mbvm_api
+from side_features.bvm.problem import build_problem
+from side_features.bvm.thermo_adapter import FreeColumnThermo
 
 
 class BVMModuleWidget(QWidget):
@@ -628,7 +619,9 @@ class BVMModuleWidget(QWidget):
 def _demo():
     """Headless self-check: drive gather + size off a stub state, no event loop."""
     import sys, os
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    _src_py = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # src/python
+    sys.path.insert(0, _src_py)
+    sys.path.insert(0, os.path.dirname(_src_py))                           # src (for side_features)
     from PySide6.QtWidgets import QApplication
     from gui.state.window_state import WindowState, Species, Stream, StreamType
 

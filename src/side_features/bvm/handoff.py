@@ -41,9 +41,9 @@ def to_solver(design):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem
-    from driver import size_column
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem
+    from .driver import size_column
 
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),

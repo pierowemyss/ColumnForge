@@ -21,8 +21,8 @@ adjacent product-anchored profile.
 import numpy as np
 from scipy.optimize import fsolve
 
-from march import march_section
-from pinch import jacobian_G, classify_pinch
+from .march import march_section
+from .pinch import jacobian_G, classify_pinch
 
 
 def product_anchor(xprod):
@@ -104,9 +104,9 @@ def launch_from_saddle(sec, xstar, eigvec, tp, P, eps=1e-3, n=200):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem, overall_balance
-    from sections import extractive_chain
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem, overall_balance
+    from .sections import extractive_chain
 
     abc = np.array([(7.11714, 1210.595, 229.664),   # acetone
                     (7.20211, 1582.271, 239.726),   # methanol

@@ -1,4 +1,4 @@
-"""Matrix BVM -- boundary-value column sizing & feasibility (side module).
+"""BVM -- boundary-value column sizing & feasibility (side module).
 
 A self-contained conceptual-design solver (see MatBVM_blueprint.md, v4). It
 builds a *difference-point chain* for any S-section topology, marches composition
@@ -30,16 +30,9 @@ Module map (blueprint Sec 18):
     api            size_column / feasibility_map / to_solver
 """
 
-# Bootstrap: this module imports FreeColumn's thermo as `core.*` (the repo's
-# cross-package convention, resolved by launch.py adding src/python to the path).
-# Ensure that path is present so the package is importable on its own.
-import os as _os
-import sys as _sys
-
-_SRC_PY = _os.path.normpath(
-    _os.path.join(_os.path.dirname(__file__), "..", "..", "python"))
-if _SRC_PY not in _sys.path:
-    _sys.path.insert(0, _SRC_PY)
+# This package imports FreeColumn's thermo as `core.*` (the repo's cross-package
+# convention, resolved by launch.py adding src/python to the path). It is imported
+# as `side_features.bvm` with src on the path -- see launch.py.
 
 __all__ = [
     "problem", "thermo_adapter", "sections", "march", "anchor", "connect",

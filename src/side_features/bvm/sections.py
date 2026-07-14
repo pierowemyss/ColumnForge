@@ -104,7 +104,7 @@ def multifeed_chain(prob, R, xD, xB, D, B):
 
 
 def _demo():
-    from problem import build_problem, overall_balance
+    from .problem import build_problem, overall_balance
     z = np.array([0.4, 0.35, 0.25])
     prob = build_problem(["b", "t", "x"], [(z, 100.0, 1.0)], 760.0,
                          rec_lk=0.98, rec_hk=0.02)

@@ -9,7 +9,9 @@ Provides a clean entry point to the PySide6-based GUI.
 import sys
 import os
 
-# Set up Python path to include our modules
+# Set up Python path to include our modules. `src/python` exposes core/gui;
+# `src` exposes side_features (e.g. side_features.bvm).
+sys.path.insert(0, os.path.abspath('src'))
 sys.path.insert(0, os.path.abspath('src/python'))
 
 def main():

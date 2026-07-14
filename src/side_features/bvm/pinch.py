@@ -18,7 +18,7 @@ pinch-tangency solve would be faster but no more correct for sizing.
 
 import numpy as np
 
-from march import march_section
+from .march import march_section
 
 
 def pinch_point(sec, x0, tp, P, max_stages=400):
@@ -107,10 +107,10 @@ def bisect_min(feasible_fn, lo, hi, tol=1e-3, max_iter=40, prescan=12):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem, overall_balance
-    from sections import single_feed_chain
-    from connect import connect
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem, overall_balance
+    from .sections import single_feed_chain
+    from .connect import connect
 
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),

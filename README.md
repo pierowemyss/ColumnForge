@@ -21,7 +21,7 @@ through, from the Antoine fit to the final tridiagonal solve. It was built to
 answer a specific question honestly: *what does it actually take to converge
 a multicomponent column, end to end?* Three independent solver paths (a
 classical Wang-Henke MESH solve, a Boston-Sullivan Inside-Out solve, and a
-Naphtali-Sandholm boundary-value sizing tool) exist so their answers can be
+difference-point-chain boundary-value sizing tool) exist so their answers can be
 checked against each other, not just against a textbook.
 
 ## Quick Start
@@ -31,9 +31,10 @@ pip install -r requirements.txt        # PySide6, numpy, scipy, matplotlib
 python launch.py                       # run the GUI (canonical entry point)
 ```
 
-`launch.py` puts `src/python` on the path and calls `gui.main_window.main()`.
-To run a module directly, replicate that path:
-`PYTHONPATH=src/python python -m gui.main_window`.
+`launch.py` puts `src/python` (for `core`/`gui`) and `src` (for
+`side_features.*`) on the path and calls `gui.main_window.main()`. To run a
+module directly, replicate those paths:
+`PYTHONPATH=src:src/python python -m gui.main_window`.
 
 ## Architecture
 
@@ -60,8 +61,8 @@ plain-data description of the column and hands it to a solver.
                              │ (BVM sizes → warm-starts →)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  side_features/matrix_bvm/   Naphtali-Sandholm boundary-value    │
-│                               sizing (Modules tab)                │
+│  side_features/bvm/          difference-point-chain             │
+│                              boundary-value sizing (Modules tab)│
 │  side_features/freeRCM/      residue-curve maps (Modules tab)    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -78,7 +79,7 @@ itself.
 |---|---|---|---|
 | **Bubble-Point** | Wang-Henke MESH | rigorous tray-by-tray profile | CMO, total condenser |
 | **Inside-Out (HYSIM)** | Boston-Sullivan two-tier | same, faster on stiff systems | CMO or full energy balance |
-| **BVM** | Naphtali-Sandholm difference-point chain | *is this split feasible, and how many stages does it need?* | sizing/feasibility, energy balance, reactive stages |
+| **BVM** | difference-point-chain boundary-value method | *is this split feasible, and how many stages does it need?* | sizing/feasibility, energy balance, reactive stages |
 | **Shortcut (FUG)** | Fenske-Underwood-Gilliland-Kirkbride | back-of-envelope N, R<sub>min</sub>, feed stage | screening tool, constant α |
 
 ### Bubble-Point — Wang-Henke MESH
@@ -89,16 +90,21 @@ stop moving. FreeColumn assembles the per-component material balance as a
 tridiagonal system in liquid composition and solves it with the Thomas
 algorithm — one linear solve per component, per outer iteration:
 
-```
-Material balance (stage n, component i):
+$$
+\underbrace{-\,V_{n-1}K_{i,n-1}x_{i,n-1}}_{\text{from stage above}}
++ \big(L_n + V_n\big)x_{i,n}
+\underbrace{-\,L_{n+1}x_{i,n+1}}_{\text{from stage below}}
+= F_n z_{i,n}
+$$
 
-  -V(n-1) K(i,n-1) x(i,n-1)  +  [L(n) + V(n)] x(i,n)  -  L(n+1) x(i,n+1)
-      = F(n) z(i,n)
+$$
+\text{Equilibrium:}\quad y_{i,n} = K_{i,n}\,x_{i,n}
+\qquad
+\text{Summation:}\quad \sum_i K_{i,n}\,x_{i,n} = 1 \;\Rightarrow\; T_n\ \text{(bubble point)}
+$$
 
-Equilibrium:      y(i,n) = K(i,n) x(i,n),   K = gamma * Psat(T) * phi / P
-
-Summation:        sum_i  K(i,n) x(i,n)  =  1     →  solved for T(n) (bubble point)
-```
+with $K = \gamma\,P^{\mathrm{sat}}(T)\,\phi/P$ (see
+[Thermodynamics](docs/thermodynamics.md)).
 
 Outer loop: assemble the tridiagonal system at the current `T` profile →
 Thomas-solve for `x` → bubble-point each stage for a new `T` → repeat until
@@ -115,55 +121,65 @@ refreshes rigorous K-values and freezes them into per-stage relative
 volatilities, and a cheap **inner** loop that iterates only those frozen
 ratios against the material balance:
 
-```
-OUTER (expensive thermo, once per pass):
-  K(i,n)   = gamma(i,n) * Psat_i(T_n) * phi_i / P        — rigorous
-  Kb(n)    = geometric mean of K(:,n)                     — per-stage base K
-  alpha(i,n) = K(i,n) / Kb(n)                              — frozen below
+**Outer** (expensive thermo, once per pass) — refresh rigorous K-values, then
+freeze a per-stage base K and relative volatilities:
 
-INNER (cheap, no thermo calls, iterated to `tol`):
-  x        = tridiagonal solve at K = alpha * Kb           — material balance
-  Kb_new   = 1 / sum_i( alpha(i,n) * x(i,n) )              — bubble constraint
-  repeat until |Kb_new - Kb| / Kb < tol
+$$
+K_{i,n} = \gamma_{i,n}\,P^{\mathrm{sat}}_i(T_n)\,\phi_i/P,
+\qquad
+K^{b}_{n} = \Big(\textstyle\prod_i K_{i,n}\Big)^{1/n_c},
+\qquad
+\alpha_{i,n} = \frac{K_{i,n}}{K^{b}_{n}}
+$$
 
-Refresh T from rigorous bubble-point on the new x, repeat OUTER until
-max|ΔT| < tol.
-```
+**Inner** (cheap, no thermo calls, iterated to `tol`) — hold $\alpha$ fixed and
+converge the base K against the material balance and bubble constraint:
 
-Because the inner loop reuses one frozen `alpha`, most of the iteration
+$$
+x = \text{tridiagonal solve at } K = \alpha\,K^{b},
+\qquad
+K^{b}_{\text{new}} = \Big(\textstyle\sum_i \alpha_{i,n}\,x_{i,n}\Big)^{-1},
+\qquad
+\text{until } \frac{|K^{b}_{\text{new}} - K^{b}|}{K^{b}} < \text{tol}
+$$
+
+Refresh $T$ from a rigorous bubble-point on the new $x$, and repeat the outer
+pass until $\max|\Delta T| < \text{tol}$.
+
+Because the inner loop reuses one frozen $\alpha$, most of the iteration
 avoids the thermo evaluation that dominates cost on multicomponent,
 non-ideal mixtures — the same reason production simulators default to it.
 
-### BVM — Naphtali-Sandholm difference-point chain
+### BVM — difference-point chain (Boundary Value Method)
 
 BVM answers a different question than the two solvers above: not *converge
 this column*, but *is this split even reachable, and with how many stages?*
 Given an operating point `(R, S, E/F)`, it builds a **difference-point
-chain** — one difference point Δ<sub>k</sub> per column section — and marches
+chain** — one difference point $\Delta_k$ per column section — and marches
 composition profiles inward from each product end until adjacent profiles
-meet:
+meet. The difference point is the net-flow composition of section $k$ (a mass
+balance), collinear with every $(x,y)$ pair the section passes through:
 
-```
-Difference point (mass balance, defines the operating line for section k):
+$$
+\Delta_k = \frac{V_k\,y_k - L_k\,x_k}{V_k - L_k}
+$$
 
-  Δ_k  =  (V_k y_k − L_k x_k) / (V_k − L_k)     — net flow composition,
-                                                    collinear with every
-                                                    (x, y) pair the section
-                                                    passes
+Each section is then marched stage by stage — an equilibrium step followed by
+an operating-line step anchored on $\Delta_k$:
 
-Stage-by-stage march (equilibrium + operating-line step, per section):
-
-  y_stage = K(x, T, P) · x                       — equilibrium
-  x_next  = operating line through Δ_k and y_stage
-```
+$$
+y_{\text{stage}} = K(x,T,P)\cdot x
+\qquad\longrightarrow\qquad
+x_{\text{next}} = \text{operating line through } \Delta_k \text{ and } y_{\text{stage}}
+$$
 
 Two profiles are **connected** when they come within tolerance of each
-other in full `R^(C−1)` composition space (not a 2-D curve crossing — that
+other in full $\mathbb{R}^{\,C-1}$ composition space (not a 2-D curve crossing — that
 only exists for ternaries, which is why classical textbook BVM is
 ternary-only). The stage count where that connection happens *is* the
 design output, not an input. Feasibility, R<sub>min</sub>, feed/draw
 placement, and reactive-stage support (Ung-Doherty transform) all build on
-top of this chain; see `src/side_features/matrix_bvm/README.md` for the
+top of this chain; see `src/side_features/bvm/README.md` for the
 full module-by-module writeup. Module map:
 
 ```
@@ -190,31 +206,54 @@ the whole reason a sizing tool and a rigorous solver share a repository.
 The pencil-and-paper method, kept honest as closed-form correlations rather
 than a solve — the "where do I even start" tool that seeds a rigorous run:
 
-```
-Fenske (minimum stages, total reflux):
-  Nmin = ln[ (xLK/xHK)_D · (xHK/xLK)_B ] / ln(alpha_LK,HK)
+**Fenske** — minimum stages at total reflux:
 
-Underwood (minimum reflux):
-  sum_i  alpha_i z_i / (alpha_i − θ)  =  1 − q        (root θ between the keys)
-  Rmin + 1  =  sum_i  alpha_i xD_i / (alpha_i − θ)
+$$
+N_{\min} = \frac{\ln\!\big[(x_{LK}/x_{HK})_D\,(x_{HK}/x_{LK})_B\big]}{\ln \alpha_{LK,HK}}
+$$
 
-Gilliland/Molokanov (actual stages at operating reflux R):
-  X = (R − Rmin)/(R + 1),   Y = 1 − exp[ ((1+54.4X)/(11+117.2X)) · (X−1)/√X ]
-  N = (Y + Nmin) / (1 − Y)
+**Underwood** — minimum reflux (find the root $\theta$ between the key volatilities):
 
-Kirkbride (feed-stage location, Ns = stripping stages, Nr = rectifying):
-  Ns/Nr = [ (B/D)(xF,HK/xF,LK)(xB,LK/xD,HK)^2 ] ^ 0.206
-```
+$$
+\sum_i \frac{\alpha_i z_i}{\alpha_i - \theta} = 1 - q
+\qquad\Longrightarrow\qquad
+R_{\min} + 1 = \sum_i \frac{\alpha_i x_{D,i}}{\alpha_i - \theta}
+$$
+
+**Gilliland/Molokanov** — actual stages at operating reflux $R$:
+
+$$
+X = \frac{R - R_{\min}}{R + 1},
+\qquad
+Y = 1 - \exp\!\left[\frac{1 + 54.4X}{11 + 117.2X}\cdot\frac{X - 1}{\sqrt{X}}\right],
+\qquad
+N = \frac{Y + N_{\min}}{1 - Y}
+$$
+
+**Kirkbride** — feed-stage location ($N_s$ stripping, $N_r$ rectifying stages):
+
+$$
+\frac{N_s}{N_r} = \left[\frac{B}{D}\,\frac{x_{F,HK}}{x_{F,LK}}
+\left(\frac{x_{B,LK}}{x_{D,HK}}\right)^{2}\right]^{0.206}
+$$
 
 ## Thermodynamics
 
-Every solver goes through one seam: `K = gamma(x, T) · Psat(T) · phi(y, T, P) / P`.
-Swapping a model means swapping what plugs into that seam — solvers never
-change.
+Every solver goes through one seam — the equilibrium ratio $K_i = y_i/x_i$:
 
-- **Vapour pressure**: Antoine (`log10 Psat = A − B/(T+C)`) or Aspen extended
-  Antoine / PLXANT (`ln Psat = C1 + C2/(C3+T) + C4·T + C5·ln(T) + C6·T^C7`,
-  dispatched automatically on coefficient-matrix width).
+$$
+K_i = \frac{\gamma_i(x,T)\,P^{\mathrm{sat}}_i(T)\,\phi_i^{\mathrm{sat}}}
+           {\phi_i^{V}(y,T,P)\,P}
+$$
+
+Swapping a model means swapping what plugs into that seam — solvers never
+change. **Full equations for every model below are in
+[`docs/thermodynamics.md`](docs/thermodynamics.md).**
+
+- **Vapour pressure**: Antoine ($\log_{10} P^{\mathrm{sat}} = A - B/(T+C)$) or
+  Aspen extended Antoine / PLXANT
+  ($\ln P^{\mathrm{sat}} = C_1 + C_2/(C_3+T) + C_4 T + C_5\ln T + C_6 T^{C_7}$),
+  dispatched automatically on coefficient-matrix width.
 - **Activity coefficients** (non-ideal liquids): **NRTL**, **Wilson**,
   **UNIQUAC**, two-suffix **Margules**, and **UNIFAC** group-contribution
   (needs no binary parameters — built from the bundled group-interaction
@@ -229,10 +268,10 @@ change.
   matches Clausius-Clapeyron within 12%). 7 curated NRTL binary pairs ship
   with it, gated against known azeotropes (ethanol/water,
   2-propanol/water, acetone/chloroform, acetone/methanol).
-- **Enthalpy**: constant liquid Cp + Watson-corrected latent heat
-  (`h_vap(T) = h_liq(T) + ΔHvap,Tb · ((Tc−T)/(Tc−Tb))^0.38`), the shared
-  seam behind the Inside-Out energy balance, enthalpy-based feed quality,
-  and condenser subcooling.
+- **Enthalpy**: constant liquid $c_p$ + Watson-corrected latent heat
+  ($h_V(T) = h_L(T) + \Delta H_{\mathrm{vap},T_b}\,[(T_c-T)/(T_c-T_b)]^{0.38}$),
+  the shared seam behind the Inside-Out energy balance, enthalpy-based feed
+  quality, and condenser subcooling.
 
 ![Thermodynamics — activity model and binary interaction table](docs/img/thermodynamics-subtab.png)
 
@@ -292,11 +331,11 @@ freeColumn/
 │   │   │   └── theme/     # Qt stylesheet
 │   │   └── tests/         # headless pytest suite (+ tests/validation/)
 │   ├── side_features/
-│   │   ├── matrix_bvm/    # Naphtali-Sandholm BVM solver (own README + tests/)
+│   │   ├── bvm/           # difference-point-chain BVM solver (own README + tests/)
 │   │   └── freeRCM/       # preserved predecessor (residue curve maps)
 │   └── native/            # C/Fortran sources (nifco.f90, column_solver.c) — not built yet
 ├── legacy/                # pre-src/ prototype scripts, reference only
-├── docs/                  # ADRs + archived audits/plans
+├── docs/                  # thermodynamics.md (equation reference), ADRs, archived audits/plans
 └── launch.py              # GUI entry point
 ```
 
@@ -306,7 +345,7 @@ The solver and state layers are Qt-free and self-checking. 97 tests, run
 headless:
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/matrix_bvm/tests/
+QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/bvm/tests/
 ```
 
 `src/python/tests/validation/` is the acceptance gate for solver changes —
@@ -347,5 +386,5 @@ running app there with matching filenames and they'll render in place:
   balance already).
 - A full 3-section extractive BVM (interior-section stage counts are
   feasibility-grade, not yet literature-exact — see the "known ceilings"
-  section of `src/side_features/matrix_bvm/README.md`).
+  section of `src/side_features/bvm/README.md`).
 - Full roadmap: `PLAN_2026-07-06_one-year-roadmap.md`.

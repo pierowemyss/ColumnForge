@@ -22,10 +22,6 @@ Arrays are stage-major: x is (N, C), T and P are (N,). Everything is a pure
 function of those arrays — no per-stage Python objects.
 """
 
-import os as _os
-import sys as _sys
-_sys.path.insert(0, _os.path.normpath(_os.path.join(_os.path.dirname(__file__), "..", "..", "python")))
-
 import numpy as np
 
 from core.thermodynamics import (

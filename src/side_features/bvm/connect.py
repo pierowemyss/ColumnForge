@@ -96,10 +96,10 @@ def connect(profA, profB, eps_stage=1e-2, efficiency=1.0):
 
 
 def _demo():
-    from thermo_adapter import FreeColumnThermo
-    from problem import build_problem, overall_balance
-    from sections import single_feed_chain
-    from march import march_section
+    from .thermo_adapter import FreeColumnThermo
+    from .problem import build_problem, overall_balance
+    from .sections import single_feed_chain
+    from .march import march_section
 
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),
