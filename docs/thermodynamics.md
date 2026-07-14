@@ -134,8 +134,8 @@ $$
 
 $$
 \ln \gamma_i =
-\frac{\sum_j \tau_{ji} G_{ji} x_j}{\sum_k G_{ki} x_k}
-+ \sum_j \frac{x_j G_{ij}}{\sum_k G_{kj} x_k}
+\frac{\sum_j \tau_{ji} G_{ji} x_j}{\sum_k G_{ki} x_k} +
+\sum_j \frac{x_j G_{ij}}{\sum_k G_{kj} x_k}
   \left( \tau_{ij} - \frac{\sum_m x_m \tau_{mj} G_{mj}}{\sum_k G_{kj} x_k} \right)
 $$
 
@@ -153,8 +153,8 @@ This is the HYSYS-modified NRTL ($\tau = a + b/T$), matching
 ### Wilson
 
 $$
-\ln \gamma_i = 1 - \ln \left( \sum_j x_j \Lambda_{ij} \right)
-              - \sum_k \frac{x_k \Lambda_{ki}}{\sum_j x_j \Lambda_{kj}},
+\ln \gamma_i = 1 - \ln \left( \sum_j x_j \Lambda_{ij} \right) -
+\sum_k \frac{x_k \Lambda_{ki}}{\sum_j x_j \Lambda_{kj}},
 \qquad
 \ln \Lambda_{ij} = a_{ij} + \frac{b_{ij}}{T_K}
 $$
@@ -174,14 +174,14 @@ l_i = \frac{z}{2}(r_i - q_i) - (r_i - 1)
 $$
 
 $$
-\ln \gamma_i^{C} = \ln \frac{\Phi_i}{x_i}
-   + \frac{z}{2} q_i \ln \frac{\theta_i}{\Phi_i}
-   + l_i - \frac{\Phi_i}{x_i} \sum_j x_j l_j
+\ln \gamma_i^{C} = \ln \frac{\Phi_i}{x_i} +
+   \frac{z}{2} q_i \ln \frac{\theta_i}{\Phi_i} +
+   l_i - \frac{\Phi_i}{x_i} \sum_j x_j l_j
 $$
 
 $$
-\ln \gamma_i^{R} = q_i \left( 1 - \ln \left( \sum_j \theta_j \tau_{ji} \right)
-   - \sum_j \frac{\theta_j \tau_{ij}}{\sum_k \theta_k \tau_{kj}} \right),
+\ln \gamma_i^{R} = q_i \left( 1 - \ln \left( \sum_j \theta_j \tau_{ji} \right) -
+   \sum_j \frac{\theta_j \tau_{ij}}{\sum_k \theta_k \tau_{kj}} \right),
 \qquad
 \tau_{ij} = \exp \left( a_{ij} + \frac{b_{ij}}{T_K} \right)
 $$
@@ -214,8 +214,8 @@ $$
 $$
 
 $$
-\ln \Gamma_k = Q_k \left[ 1 - \ln \left( \sum_m \theta_m \Psi_{mk} \right)
-   - \sum_m \frac{\theta_m \Psi_{km}}{\sum_n \theta_n \Psi_{nm}} \right],
+\ln \Gamma_k = Q_k \left[ 1 - \ln \left( \sum_m \theta_m \Psi_{mk} \right) -
+   \sum_m \frac{\theta_m \Psi_{km}}{\sum_n \theta_n \Psi_{nm}} \right],
 \qquad
 \Psi_{mn} = \exp \left( -\frac{a_{mn}}{T_K} \right)
 $$
@@ -265,8 +265,8 @@ $$
 and the fugacity coefficient of each component is
 
 $$
-\ln \phi_i = \frac{b_i}{b}(Z - 1) - \ln(Z - B)
-   - \frac{A}{B} \left( \frac{2 \sqrt{a_i}}{\sum_j y_j \sqrt{a_j}} - \frac{b_i}{b} \right)
+\ln \phi_i = \frac{b_i}{b}(Z - 1) - \ln(Z - B) -
+   \frac{A}{B} \left( \frac{2 \sqrt{a_i}}{\sum_j y_j \sqrt{a_j}} - \frac{b_i}{b} \right)
      \ln \left( 1 + \frac{B}{Z} \right)
 $$
 
