@@ -363,9 +363,6 @@ runs the full suite plus `pyflakes` on Python 3.11 and 3.12.
 - `.colx` files are versioned JSON — no pickle, so an old save stays
   readable by a newer build and vice versa.
 
-See `CLAUDE.md` for the full architecture/conventions writeup and
-`AGENTS.md` for code style.
-
 ## Screenshots
 
 Placeholders above point at `docs/img/*.png` — drop screenshots of the
@@ -385,4 +382,3 @@ running app there with matching filenames and they'll render in place:
 - A full 3-section extractive BVM (interior-section stage counts are
   feasibility-grade, not yet literature-exact — see the "known ceilings"
   section of `src/side_features/bvm/README.md`).
-- Full roadmap: `PLAN_2026-07-06_one-year-roadmap.md`.
