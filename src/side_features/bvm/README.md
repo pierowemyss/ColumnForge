@@ -141,8 +141,8 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
   equivalent to pinch tangency) rather than a direct pinch-tangency solve. The
   bisection coarse-pre-scans first so a spurious low-`R` feasibility island (from
   the local connection tolerance) is not mistaken for the minimum.
-- **`dew()` uses a γ(y) proxy**, not a self-consistent γ(x) fixed point. The
-  audit-preferred γ(x) dew was implemented and reverted: for the stiff
+- **`dew()` uses a γ(y) proxy**, not a self-consistent γ(x) fixed point. A
+  self-consistent γ(x) dew was implemented and reverted: for the stiff
   MEOH/DMC/EG multicomp reference it has a second (EG-heavy) root the rectifying
   march jumps to (T→1700 K, blow-up), breaking the reference contract. SRK
   fugacities (`phi_fn`, wired) keep the proxy march on the physical branch.

@@ -7,10 +7,12 @@ distillation columns, styled after Aspen Plus's RadFrac. Everything —
 GUI, thermodynamics, and every solver — is pure Python (NumPy/SciPy), no
 compiled dependency required to run it.
 
-![Initialization tab — species and thermodynamics setup](docs/img/initialization-tab.png)
+<!-- Screenshot: the money shot, above the fold. A full window on a converged
+     multicomponent run, with the column diagram AND a composition profile plot
+     visible at once. A viewer should register "this is a real simulator" in one
+     glance, before reading a word. -->
 
-_Screenshot placeholders throughout this README mark where a run of the
-actual app belongs — see [Screenshots](#screenshots)._
+![FreeColumn solving a multicomponent column](docs/img/hero.png)
 
 ## Why this exists
 
@@ -35,6 +37,21 @@ python launch.py                       # run the GUI (canonical entry point)
 `side_features.*`) on the path and calls `gui.main_window.main()`. To run a
 module directly, replicate those paths:
 `PYTHONPATH=src:src/python python -m gui.main_window`.
+
+### The RCM module needs a compiled library
+
+Everything above is pure Python — no compiler required. The one exception is
+the **RCM** module (residue-curve maps), which calls a Fortran/C solver through
+`ctypes`. Prebuilt libraries ship in `src/side_features/freeRCM/lib/`, but they
+are **x86_64 only**; on a different architecture (an arm64 Python on Apple
+Silicon, for instance) they won't load and the module shows
+"Compile RCM_solv.c to use this module." instead of a plot. To build them:
+
+```bash
+cd src/side_features/freeRCM/build && make    # needs gfortran + a C compiler
+```
+
+The rest of the app is unaffected either way.
 
 ## Architecture
 
@@ -271,6 +288,10 @@ change. **Full equations for every model below are in
   the shared seam behind the Inside-Out energy balance, enthalpy-based feed
   quality, and condenser subcooling.
 
+<!-- Screenshot: Thermodynamics sub-tab. Show the NRTL binary interaction
+     parameter table filled in for a real pair — clearest evidence that the
+     thermo is modelled, not hardcoded. -->
+
 ![Thermodynamics — activity model and binary interaction table](docs/img/thermodynamics-subtab.png)
 
 ## Modules tab
@@ -287,9 +308,21 @@ full column defined:
 | **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                  |
 | **Phase EQ**        | isothermal / vapour-fraction flash on the loaded species — a live test bench for whichever thermo model is selected |
 
+<!-- Screenshot: Modules tab, BVM. The differentiator — show the
+     difference-point-chain / feasibility map on a ternary diagram. It is the
+     most technically distinctive artifact here and the thing a reviewer is
+     least likely to have seen in another portfolio project. -->
+
 ![Modules tab — BVM design map](docs/img/modules-bvm.png)
 
 ## Column setup and results
+
+<!-- Screenshot: Specifications tab. Show the interactive column overview
+     diagram with a stage selected and the DoF ledger reading "fully
+     specified" — the most Aspen-like screen in the app, and the one that
+     sells the UI work. -->
+
+![Specifications tab — interactive column diagram and DoF status](docs/img/specifications-tab.png)
 
 - **Species & thermodynamics**: pick VLE/activity/EOS models, edit binary
   interaction tables, search or hand-enter component properties.
@@ -308,8 +341,13 @@ full column defined:
   component-aware data table, product-stream summary with mass-balance
   closure, and CSV export. Display units (°C/K/°F, kmol/h/kg/h, kW/MW/kJ/h)
   are chosen independently of solver-internal units.
-- **Save/Load**: the full session persists to `.colx` — versioned JSON, no
-  pickle (see `docs/adr/0001-json-colx-and-one-model-two-projections.md`).
+- **Save/Load**: the full session persists to `.colx` — versioned JSON, never
+  pickle, so an old save stays readable by a newer build and vice versa.
+
+<!-- Screenshot: Results tab. Show off the plotting depth — a McCabe-Thiele
+     diagram (or the ternary residue-curve overlay) alongside the product-stream
+     summary table with duties in kW, so the numbers read as engineering-grade
+     rather than toy output. -->
 
 ![Results tab — composition profile and stream summary](docs/img/results-tab.png)
 
@@ -331,15 +369,14 @@ freeColumn/
 │   ├── side_features/
 │   │   ├── bvm/           # difference-point-chain BVM solver (own README + tests/)
 │   │   └── freeRCM/       # preserved predecessor (residue curve maps)
-│   └── native/            # C/Fortran sources (nifco.f90, column_solver.c) — not built yet
-├── legacy/                # pre-src/ prototype scripts, reference only
-├── docs/                  # thermodynamics.md (equation reference), ADRs, archived audits/plans
+│   └── native/            # Fortran sources (nifco2.f90) — not bound to the app yet
+├── docs/                  # thermodynamics.md (equation reference), examples/, img/
 └── launch.py              # GUI entry point
 ```
 
 ## Testing
 
-The solver and state layers are Qt-free and self-checking. 97 tests, run
+The solver and state layers are Qt-free and self-checking. 113 tests, run
 headless:
 
 ```bash
@@ -366,11 +403,14 @@ runs the full suite plus `pyflakes` on Python 3.11 and 3.12.
 ## Screenshots
 
 Placeholders above point at `docs/img/*.png` — drop screenshots of the
-running app there with matching filenames and they'll render in place:
+running app there with matching filenames and they'll render in place. An
+HTML comment above each embed says what that shot should show off:
 
-- `docs/img/initialization-tab.png` / `thermodynamics-subtab.png`
-- `docs/img/modules-bvm.png`
-- `docs/img/results-tab.png`
+- `docs/img/hero.png` — converged run, diagram + profile plot together
+- `docs/img/specifications-tab.png` — column diagram + DoF ledger
+- `docs/img/modules-bvm.png` — BVM ternary feasibility map
+- `docs/img/thermodynamics-subtab.png` — NRTL interaction table
+- `docs/img/results-tab.png` — McCabe-Thiele + stream summary
 
 ## Roadmap / not yet built
 
@@ -382,3 +422,7 @@ running app there with matching filenames and they'll render in place:
 - A full 3-section extractive BVM (interior-section stage counts are
   feasibility-grade, not yet literature-exact — see the "known ceilings"
   section of `src/side_features/bvm/README.md`).
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
