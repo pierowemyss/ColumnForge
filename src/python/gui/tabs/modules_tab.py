@@ -15,6 +15,7 @@ class ModulesTab(QWidget):
         
         self.window_state = None
         self.rcm_window = None
+        self.rcm_placeholder = None
         self.bvm_widget = None
         self.fug_widget = None
         self.txy_widget = None
@@ -177,23 +178,72 @@ class ModulesTab(QWidget):
         self.content_stack.setCurrentWidget(self.bvm_container)
 
     def _launch_rcm(self):
-        """Launch the RCM interface."""
+        """Launch the RCM interface, or a build hint if its library is missing."""
         self._setup_paths()
         self.content_stack.setCurrentWidget(self.rcm_container)
-        
-        # Import RCM module - it handles its own imports internally
-        import RCM_module_window
-        NewSimulationWindow = RCM_module_window.NewSimulationWindow
-        
+
         if self.rcm_window:
             self.rcm_window.deleteLater()
-        
-        self.rcm_window = NewSimulationWindow(window_state=self.window_state)
-        
+            self.rcm_window = None
+
+        # RCM needs its compiled library (RCM_solver.so), which the repo ships
+        # prebuilt for x86_64 only — on other architectures the load fails. RCM
+        # is the *first* entry in the module combo, so it auto-launches when the
+        # tab is opened: an unguarded failure here takes down the whole app.
+        try:
+            err = self._rcm_library_error()
+            if err:
+                raise OSError(err)
+            import RCM_module_window
+            self.rcm_window = RCM_module_window.NewSimulationWindow(
+                window_state=self.window_state)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "RCM module unavailable; showing build hint")
+            self._show_rcm_unavailable()
+            return
+
+        if self.rcm_placeholder is not None:
+            self.rcm_placeholder.hide()
         self.rcm_window.setParent(self.rcm_container)
         self.rcm_window.setWindowFlags(Qt.WindowType(0))
         self.rcm_container.layout().addWidget(self.rcm_window)
         self.rcm_window.show()
+
+    def _rcm_library_error(self):
+        """Reason RCM's native library won't load, or None if it will.
+
+        freeRCM's solver.py only CDLLs when a map is actually computed, so
+        importing the module proves nothing: without this probe a bad library
+        surfaces as a traceback the first time the user hits Run. The repo
+        ships RCM_solver.so built for x86_64 only.
+        """
+        import ctypes
+        _current_dir = os.path.dirname(os.path.abspath(__file__))
+        _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(_current_dir))))
+        lib_dir = os.path.join(_repo_root, 'src', 'side_features',
+                               'freeRCM', 'lib')
+        try:
+            # dependency order matters: minpack first, then the solver
+            ctypes.CDLL(os.path.join(lib_dir, 'libminpack.so'))
+            ctypes.CDLL(os.path.join(lib_dir, 'RCM_solver.so'))
+        except OSError as exc:
+            return str(exc)
+        return None
+
+    def _show_rcm_unavailable(self):
+        """Stand in for the RCM view so the rest of the tab stays usable."""
+        if self.rcm_placeholder is None:
+            self.rcm_placeholder = QLabel(
+                "Compile RCM_solv.c to use this module.\n\n"
+                "cd src/side_features/freeRCM/build && make",
+                self.rcm_container)
+            self.rcm_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.rcm_placeholder.setWordWrap(True)
+            self.rcm_container.layout().addWidget(self.rcm_placeholder)
+        self.rcm_placeholder.show()
 
     def get_selected_module(self) -> str:
         """Get the currently selected module name."""
