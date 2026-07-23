@@ -7,6 +7,7 @@ Tabbed interface with comprehensive simulation workflow
 Author: Piero Wemyss
 """
 
+import math
 import sys
 
 from PySide6.QtWidgets import (
@@ -22,6 +23,15 @@ from .tabs.results_tab import ResultsTab
 from .tabs.modules_tab import ModulesTab
 from .state.window_state import WindowState
 from .state.persistence import save_colx, load_colx
+
+
+class _AbortedResolve(Exception):
+    """A trial solve inside the operating-point root-find was cancelled.
+    Carries that solve's (partial) profile so the run finishes as an abort."""
+
+    def __init__(self, profile):
+        super().__init__("Aborted.")
+        self.profile = profile
 
 
 class MainWindow(QMainWindow):
@@ -309,10 +319,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "_solver_thread", None) and self._solver_thread.isRunning():
             return                                     # one solve at a time
 
-        # Widget reads (solver knobs, BVM spins) and operating-point resolution
-        # happen here on the GUI thread; only the final solve runs on the worker.
-        # ponytail: purity-spec resolution still blocks the UI for its secant
-        # solves — move gather into the worker if that ever runs long.
+        # Widget reads happen here on the GUI thread; the job itself (gather,
+        # operating-point resolution, and the final solve) runs on the worker,
+        # which reports its ValueErrors back through _on_solver_failed.
         try:
             job = self._make_solver_job(method)
         except ValueError as exc:
@@ -336,9 +345,50 @@ class MainWindow(QMainWindow):
             from core.column_solvers import solve_bubble_point, solve_inside_out
             solver = (solve_bubble_point if method == "Bubble-Point"
                       else solve_inside_out)
-            si, knobs = self._gather_rigorous_inputs()
-            return lambda report, cancel: solver(si, report=report,
-                                                 cancel=cancel, **knobs)
+            cfg = self.sim_tab.get_solver_config()      # the only widget reads
+
+            def job(report, cancel):
+                # Gather (incl. the operating-point root-find, which re-solves
+                # the column for every purity/recovery spec) runs here, off the
+                # GUI thread — it used to block the UI for minutes. report/cancel
+                # go in too, so the root-find's trial solves drive the progress
+                # bar and honour Abort instead of looking hung.
+                #
+                # Progress is reported in *work units*: the resolve's trial-solve
+                # budget, then the final solve. One monotonic sweep either way —
+                # reporting the trial solves' own iteration counts made the bar
+                # loop 0-100% once per trial.
+                stats = {}
+                try:
+                    si, knobs = self._gather_rigorous_inputs(
+                        cfg=cfg, method=method, report=report, cancel=cancel,
+                        stats=stats)
+                except _AbortedResolve as ab:
+                    return ab.profile
+                base = stats.get("budget", 0)          # 0 when no column solves
+                span = int(knobs["max_iter"])
+                total = base + span
+                tol = float(knobs["tol"])
+                seen = {}
+
+                def final_report(it, res):
+                    # Iteration count alone is a bad ruler: both solvers converge
+                    # well short of max_iter, so the bar would stall at whatever
+                    # fraction they happened to need and then snap to 100. They
+                    # converge geometrically, so the *log* residual closing on tol
+                    # is the honest measure of how far along we are.
+                    r0 = seen.setdefault("r0", max(res, tol * 10.0))
+                    frac = 0.0
+                    if res > 0.0 and r0 > tol:
+                        frac = math.log(r0 / max(res, tol)) / math.log(r0 / tol)
+                    done = base + max(it, int(span * min(1.0, max(0.0, frac))))
+                    report(min(done, total), total, res)
+
+                warm = stats.get("warm", {})   # last trial's profile, if any
+                run = stats.get("solver", solver)   # side-section wrapper, if any
+                return run(si, cancel=cancel, report=final_report,
+                           x0=warm.get("x"), T0=warm.get("T"), **knobs)
+            return job
         raise ValueError(
             f"{method} is not implemented yet — choose Bubble-Point or "
             "Inside-Out (HYSIM).")
@@ -350,7 +400,7 @@ class MainWindow(QMainWindow):
 
         self._solve_t0 = time.monotonic()
         self._solver_iters = 0
-        self._max_iter_hint = max(1, self.sim_tab.max_iter_spin.value())
+        self._solver_pct = 0
         if not hasattr(self, "_elapsed_timer"):
             self._elapsed_timer = QTimer(self)
             self._elapsed_timer.setInterval(250)
@@ -378,10 +428,15 @@ class MainWindow(QMainWindow):
         self.sim_tab.set_progress(self.sim_tab.progress_bar.value(),
                                   self._solver_iters, self._elapsed())
 
-    def _on_solver_progress(self, iteration, residual):
-        self._solver_iters = iteration
-        pct = min(99, int(100 * iteration / self._max_iter_hint))
-        self.sim_tab.set_progress(pct, iteration, self._elapsed())
+    def _on_solver_progress(self, done, total, residual):
+        # (done, total) are the job's work units: for a run whose specs need an
+        # operating-point resolve they span the trial solves *and* the final
+        # solve, so the bar sweeps once, forward, over the whole run.
+        self._solver_iters = done
+        # A residual that ticks back up must not walk the bar backwards.
+        pct = max(self._solver_pct, min(99, int(100 * done / max(1, total))))
+        self._solver_pct = pct
+        self.sim_tab.set_progress(pct, done, self._elapsed())
 
     def _on_solver_finished(self, profile):
         self._elapsed_timer.stop()
@@ -459,9 +514,22 @@ class MainWindow(QMainWindow):
             "data": rows,
         }
 
-    def _gather_rigorous_inputs(self):
+    def _gather_rigorous_inputs(self, cfg=None, method=None,
+                                report=None, cancel=None, stats=None):
         """Build the canonical SolverInput for the rigorous solvers from
         window_state + the Simulation tab (Phase 0: one config path).
+
+        `cfg`/`method` are the Simulation tab's knobs; pass them in (read on the
+        GUI thread) to run this whole gather — including the operating-point
+        root-find, which can cost dozens of column solves — on a worker thread.
+        Omit them and they're read from the widgets here, for headless callers.
+        `report`/`cancel` are the worker's hooks: the root-find ticks `report`
+        once per trial solve (so a long resolve shows progress) and raises
+        _AbortedResolve when a trial is cancelled. `stats`, if given, comes back
+        carrying the resolve's progress budget so the caller can continue the
+        same monotonic sweep through the final solve — and `stats["solver"]`, the
+        solver callable the final run must use (the plain solver, or one wrapped
+        to converge the side-section tear).
 
         Every configurable value flows through here: all feed streams (stage,
         flow, composition, thermal quality from the entered temperature), side
@@ -580,17 +648,58 @@ class MainWindow(QMainWindow):
                 "(Initialization → Flow Model). Under constant molar overflow "
                 "they would be silently ignored.")
 
-        def _build_si(R, D):
-            return build_solver_input(
-                n_stages=N, comps=order, feeds=feeds, draws=draws, duties=duties,
-                R=R, D=D, pressure=pressure, antoine=antoine,
-                gamma_fn=gamma_fn, phi_fn=phi_fn, condenser=condenser,
-                subcooling=subcool)
+        # Pumparounds: (draw, return, rate, duty). Stages GUI 0-based -> solver
+        # 1-based; duty kW -> kJ/h. The cooling is an energy-balance term (folded
+        # into si.duty at build), so it needs the energy balance like interheaters.
+        pumparounds = [(_stage_internal(ds, "Pumparound draw"),
+                        _stage_internal(rs, "Pumparound return"),
+                        rate, q_kw / KJH_TO_KW)
+                       for ds, rs, rate, q_kw in ws.pumparounds()]
+        if pumparounds and flows_hook is None:
+            raise ValueError(
+                "Pumparound cooling needs the energy balance (Initialization → "
+                "Flow Model). Under constant molar overflow the duty is ignored.")
+
+        # Side strippers/rectifiers: a real draw plus a torn return feed. They
+        # work under CMO (their ratio spec sets the split), so no energy-balance
+        # guard. F_total/z_mixed below stay the *external* feed — the return is a
+        # recycle and must not enter a recovery/purity denominator.
+        from core.side_sections import SideSection, make_side_solver
+        sections = [
+            SideSection(id=mid, kind=kind,
+                        draw_stage=_stage_internal(ds, f"'{mid}' draw"),
+                        return_stage=_stage_internal(rs, f"'{mid}' return"),
+                        rate=rate, ratio=ratio, n_stages=nst)
+            for mid, kind, ds, rs, rate, ratio, nst in ws.side_sections()]
+        for s in sections:
+            # Both ends must be real trays: stage 1 is the condenser and stage N
+            # the reboiler, neither of which can host a section draw or return.
+            if not (2 <= s.draw_stage <= N - 1 and 2 <= s.return_stage <= N - 1):
+                raise ValueError(
+                    f"'{s.id}': draw and return stages must be interior trays "
+                    f"(1 to {N - 2} in Stage-0-is-distillate numbering).")
 
         F_total = sum(f[1] for f in feeds)
         z_mixed = sum(f[1] * f[2] for f in feeds) / F_total
+        # Section draw leaves the column, section return comes back in: the net
+        # removal is the side product, so B = F_external - D - W still closes.
+        W += sum(s.product_flow for s in sections)
 
-        cfg = self.sim_tab.get_solver_config()   # honor the Simulation tab knobs
+        def _build_si(R, D):
+            si_feeds = list(feeds) + [
+                (s.return_stage, s.return_flow, s.return_comp, s.return_q)
+                for s in sections if s.return_comp is not None]
+            si_draws = list(draws) + [(s.draw_stage, *s.draw_rates())
+                                      for s in sections]
+            return build_solver_input(
+                n_stages=N, comps=order, feeds=si_feeds, draws=si_draws,
+                duties=duties,
+                pumparounds=pumparounds, R=R, D=D, pressure=pressure,
+                antoine=antoine, gamma_fn=gamma_fn, phi_fn=phi_fn,
+                condenser=condenser, subcooling=subcool)
+
+        if cfg is None:
+            cfg = self.sim_tab.get_solver_config()   # honor the Simulation tab knobs
         knobs = dict(
             max_iter=int(cfg["max_iterations"]), tol=float(cfg["tolerance"]),
             efficiency=float(getattr(ws, "stage_efficiency", 1.0)))
@@ -598,7 +707,8 @@ class MainWindow(QMainWindow):
         # Resolve implicit specs with the SAME efficiency and solver as the
         # final run — an operating point found for an E=1 column misses purity
         # targets when the real column runs at E<1.
-        method = self.sim_tab.solver_combo.currentText()
+        if method is None:
+            method = self.sim_tab.solver_combo.currentText()
         is_inside_out = "Inside-Out" in method or method.startswith("HYSIM")
         rigorous = solve_inside_out if is_inside_out else solve_bubble_point
         # The energy balance is an Inside-Out feature (its flows_hook seam); the
@@ -608,9 +718,52 @@ class MainWindow(QMainWindow):
         if is_inside_out and flows_hook is not None:
             knobs["flows_hook"] = flows_hook
 
+        # Side sections: converge the return tear inside every solve, so the
+        # operating-point root-find sees the real column instead of one whose
+        # sections do nothing. The sections keep their torn composition between
+        # calls, so only the first trial pays the full tear.
+        if sections:
+            rigorous = make_side_solver(
+                rigorous, sections, lambda si: _build_si(si.R, si.D))
+        if stats is not None:
+            stats["solver"] = rigorous       # the final run must use this one
+
+        # Each trial solve of the root-find is a full column solve. Report one tick
+        # per trial (not per inner iteration — that swept the bar 0-100% once per
+        # trial and queued thousands of cross-thread signals), and turn a cancelled
+        # trial into a real abort: least_squares would otherwise happily keep
+        # root-finding on the half-solved profiles an aborted solve returns.
+        # ponytail: RESOLVE_BUDGET is a nominal work unit (least_squares' 60-eval
+        # cap plus its finite differences), not a promise; the bar clamps, so a
+        # long resolve parks near the hand-off instead of overrunning.
+        RESOLVE_BUDGET = 120
+        n_solves = [0]
+        warm = {}                # previous trial's profile; neighbouring (R, D)
+                                 # differ by a finite-difference step, so it skips
+                                 # the slow front-placement phase of a cold start
+        if stats is not None:
+            stats["warm"] = warm     # the final solve warm-starts from it too
+
+        def _trial_solve(R, D):
+            n_solves[0] += 1
+            if stats is not None:
+                stats["budget"] = RESOLVE_BUDGET
+            prof = rigorous(_build_si(R, D), cancel=cancel,
+                            x0=warm.get("x"), T0=warm.get("T"), **knobs)
+            if prof.get("message") == "Aborted.":
+                raise _AbortedResolve(prof)
+            if float(prof.get("residual", math.inf)) < 1e-2:
+                # only a (near-)converged profile is a good seed — warm-starting
+                # from a chaotic max-iter trial poisons every trial after it
+                warm["x"], warm["T"] = prof["x"], prof["T"]
+            if report is not None:
+                report(min(n_solves[0], RESOLVE_BUDGET),
+                       RESOLVE_BUDGET + int(knobs["max_iter"]),
+                       float(prof.get("residual", 0.0)))
+            return prof
+
         R, D = resolve_operating_point(
-            ops, F_total, z_mixed,
-            solve_fn=lambda R, D: rigorous(_build_si(R, D), **knobs),
+            ops, F_total, z_mixed, solve_fn=_trial_solve,
             lk=ws.light_key_index, hk=ws.heavy_key_index,
             side_draw_total=W, fixed_R=fixed_R)
 
@@ -619,16 +772,20 @@ class MainWindow(QMainWindow):
     def _solve_bubble_point(self) -> dict:
         """Run the rigorous bubble-point (Wang-Henke) solver."""
         from core.column_solvers import solve_bubble_point
-        si, knobs = self._gather_rigorous_inputs()
-        return solve_bubble_point(si, **knobs)
+        stats = {}
+        si, knobs = self._gather_rigorous_inputs(method="Bubble-Point",
+                                                 stats=stats)
+        return stats.get("solver", solve_bubble_point)(si, **knobs)
 
     def _solve_inside_out(self) -> dict:
         """Run the Inside-Out (HYSIM) solver, with the Abort flag as cancel hook."""
         from core.column_solvers import solve_inside_out
-        si, knobs = self._gather_rigorous_inputs()
+        stats = {}
+        si, knobs = self._gather_rigorous_inputs(method="Inside-Out (HYSIM)",
+                                                 stats=stats)
         self._abort_flag = False
-        return solve_inside_out(si, **knobs,
-                                cancel=lambda: getattr(self, "_abort_flag", False))
+        return stats.get("solver", solve_inside_out)(
+            si, **knobs, cancel=lambda: getattr(self, "_abort_flag", False))
 
     def abort_simulation(self):
         """Abort a running simulation: flips the worker's cancel flag, which the
@@ -673,6 +830,17 @@ class MainWindow(QMainWindow):
             "Author: Piero Wemyss"
         )
 
+    def _stop_solver_thread(self):
+        """Cancel and join a running solve. Qt deletes the worker with the window;
+        if the thread is still in run() at that point its next emit hits a dead
+        C++ object and takes the process down with it."""
+        thread = getattr(self, "_solver_thread", None)
+        if thread is None or not thread.isRunning():
+            return
+        self.abort_simulation()
+        thread.quit()
+        thread.wait(10000)
+
     def closeEvent(self, event):
         """Handle close event with unsaved changes check"""
         if self.window_state.is_modified:
@@ -681,16 +849,13 @@ class MainWindow(QMainWindow):
                 "You have unsaved changes. Do you want to save before exiting?",
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
             )
-
             if reply == QMessageBox.Save:
                 self.save_config()
-                event.accept()
-            elif reply == QMessageBox.Discard:
-                event.accept()
-            else:
+            elif reply != QMessageBox.Discard:
                 event.ignore()
-        else:
-            event.accept()
+                return
+        self._stop_solver_thread()      # never leave a solve running into teardown
+        event.accept()
 
 
 def _setup_logging():
@@ -712,8 +877,40 @@ def _setup_logging():
     logging.getLogger(__name__).info("FreeColumn started")
 
 
+def _install_excepthook():
+    """Keep an unhandled exception in a Qt slot from aborting the process.
+
+    Qt calls slots from C++, so an exception escaping one doesn't unwind into
+    main() — the default hook prints and the app dies with no dialog. Log it
+    and stay alive instead; the run handler already does this for solver
+    failures, this is the same treatment for everything else.
+    """
+    import logging
+    import traceback
+
+    def hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        logging.getLogger(__name__).error("Unhandled exception\n%s", text)
+        try:
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle("Unexpected error")
+            box.setText("Something went wrong, but FreeColumn is still running.\n"
+                        "Details are in ~/.freecolumn/freecolumn.log.")
+            box.setDetailedText(text)
+            box.exec()
+        except Exception:
+            pass          # a failed dialog must not re-enter the hook
+
+    sys.excepthook = hook
+
+
 def main():
     _setup_logging()
+    _install_excepthook()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     from .theme import load_theme

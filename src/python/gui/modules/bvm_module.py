@@ -46,6 +46,7 @@ class BVMModuleWidget(QWidget):
         self._order_warning = ""
         self._entrainer_prefilled = False
         self._restored = False
+        self._thread = self._worker = None
         self._setup_ui()
 
     # ------------------------------------------------------------------ UI
@@ -344,15 +345,54 @@ class BVMModuleWidget(QWidget):
         if "extractive" in params:
             self.extractive.setChecked(bool(params["extractive"]))
 
+    # --------------------------------------------------------- threaded runs
+    def _run_bg(self, label, job, on_done):
+        """Run `job` on a QThread, same worker the main sim uses. Everything
+        that touches widgets must be read on the GUI thread and closed over
+        before the job is handed off."""
+        from PySide6.QtCore import QThread
+        from ..solver_worker import SolverWorker
+
+        if getattr(self, "_thread", None) is not None:
+            return                       # ponytail: one BVM run at a time
+        self.status.setText(f"{label} ...")
+        buttons = (self.size_btn, self.limits_btn, self.map_btn, self.send_btn)
+        for b in buttons:
+            b.setEnabled(False)
+
+        self._worker = SolverWorker(lambda report, cancel: job())
+        self._thread = QThread(self)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(on_done)
+        self._worker.failed.connect(
+            lambda msg, tb, _user: self.status.setText(f"{label} failed: {msg}"))
+        for sig in (self._worker.finished, self._worker.failed):
+            sig.connect(self._thread.quit)
+        # No deleteLater here: dropping the Python refs in _run_done is enough,
+        # and a pending deleteLater on an already-freed worker segfaults.
+        self._thread.finished.connect(lambda: self._run_done(buttons))
+        self._thread.start()
+
+    def _run_done(self, buttons):
+        self._thread = self._worker = None
+        for b in buttons:
+            b.setEnabled(True)
+
     def _on_size(self, with_limits=False):
         try:
             prob, provider = self._gather()
-            EF = self.ef_spin.value() if self.extractive.isChecked() else None
-            design = _mbvm_api.size_column(prob, provider, R=self.r_spin.value(),
-                                           EF=EF, with_limits=with_limits)
         except Exception as exc:
             self.status.setText(f"Sizing failed: {exc}")
             return
+        R = self.r_spin.value()
+        EF = self.ef_spin.value() if self.extractive.isChecked() else None
+        self._run_bg("Sizing",
+                     lambda: _mbvm_api.size_column(prob, provider, R=R, EF=EF,
+                                                   with_limits=with_limits),
+                     self._on_size_done)
+
+    def _on_size_done(self, design):
         self._design = design
         if design["feasible"]:
             self.status.setText(self._feasible_status(design))
@@ -385,12 +425,7 @@ class BVMModuleWidget(QWidget):
 
     def _on_limits(self):
         """G11: run the R_min / min-E/F bisection on demand, not on every size."""
-        self.status.setText("Computing R_min / min E/F ...")
-        self.limits_btn.setEnabled(False)
-        try:
-            self._on_size(with_limits=True)
-        finally:
-            self.limits_btn.setEnabled(True)
+        self._on_size(with_limits=True)
 
     def _on_view_changed(self, *_):
         if self._design is not None:
@@ -399,15 +434,19 @@ class BVMModuleWidget(QWidget):
     def _on_map(self):
         try:
             prob, provider = self._gather()
-            R_grid = np.linspace(0.2, self.rmax_spin.value(), int(self.map_pts.value()))
-            fm = _mbvm_api.feasibility_map(prob, provider, R_grid=R_grid)
         except Exception as exc:
             self.status.setText(f"Design map failed: {exc}")
             return
+        R_grid = np.linspace(0.2, self.rmax_spin.value(), int(self.map_pts.value()))
+        self._run_bg("Design map",
+                     lambda: _mbvm_api.feasibility_map(prob, provider, R_grid=R_grid),
+                     self._on_map_done)
+
+    def _on_map_done(self, fm):
         self._map = fm
         self._plot_map(fm)
         n_feas = int(np.count_nonzero(fm["feasible"]))
-        self.status.setText(f"Design map: {n_feas}/{len(R_grid)} R values feasible. "
+        self.status.setText(f"Design map: {n_feas}/{len(fm['feasible'])} R values feasible. "
                             "Click a point to size that column.")
 
     def _on_send(self):
@@ -417,20 +456,26 @@ class BVMModuleWidget(QWidget):
         try:
             init = _mbvm_api.to_solver(self._design)
             from core.column_solvers import solve_bubble_point
-            sol = solve_bubble_point(
-                np.array([self._feed_stream().composition.get(n, 0.0)
-                          for n in self._species_order()]),
-                float(self._feed_stream().flow),
-                self.window_state.thermodynamics_config.psat_params(self._species_order()),
-                self._species_order(), N=init["n_stages"],
-                feed_stage=init["feed_stage"], R=init["R"], D=init["D"],
-                P=init["pressure"], gamma_fn=self.window_state.build_gamma_fn(
-                    self._species_order()),
-                efficiency=float(self.eff_spin.value()),
-                x0=init["x0"], T0=init["T0"])
+            comps = self._species_order()
+            feed = self._feed_stream()
+            z = np.array([feed.composition.get(n, 0.0) for n in comps])
+            F = float(feed.flow)
+            psat = self.window_state.thermodynamics_config.psat_params(comps)
+            gamma_fn = self.window_state.build_gamma_fn(comps)
+            eff = float(self.eff_spin.value())
         except Exception as exc:
             self.status.setText(f"Handoff failed: {exc}")
             return
+        self._run_bg(
+            "Warm start -> rigorous solver",
+            lambda: solve_bubble_point(
+                z, F, psat, comps, N=init["n_stages"],
+                feed_stage=init["feed_stage"], R=init["R"], D=init["D"],
+                P=init["pressure"], gamma_fn=gamma_fn, efficiency=eff,
+                x0=init["x0"], T0=init["T0"]),
+            self._on_send_done)
+
+    def _on_send_done(self, sol):
         ok = sol.get("found")
         self._push_results(sol)              # G5: feed the Results tab, not just a label
         self.status.setText(
@@ -625,7 +670,16 @@ def _demo():
     from PySide6.QtWidgets import QApplication
     from gui.state.window_state import WindowState, Species, Stream, StreamType
 
-    QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
+
+    def wait(w, timeout=120.0):
+        """Sizing now runs on a QThread; pump the loop until it lands."""
+        import time
+        t0 = time.monotonic()
+        while w._thread is not None and time.monotonic() - t0 < timeout:
+            app.processEvents()
+        assert w._thread is None, "BVM run did not finish"
+
     ws = WindowState()
     ws.pressure = 1.01325
     ws.light_key_index = 0
@@ -647,7 +701,7 @@ def _demo():
     prob, provider = w._gather()
     assert prob.C == 3 and prob.lk == 0 and prob.hk == 1
 
-    w._on_size()
+    w._on_size(); wait(w)
     assert w._design is not None and w._design["feasible"], w.status.text()
     assert "Feasible:" in w.status.text() and "stages" in w.status.text(), w.status.text()
     assert w.data_table.rowCount() == w._design["N_total"]
@@ -668,17 +722,17 @@ def _demo():
 
     # below R_min: still plots the marched profiles + the closest-approach gap
     w.r_spin.setValue(0.3)
-    w._on_size()
+    w._on_size(); wait(w)
     assert not w._design["feasible"], "R=0.3 should be below R_min"
     assert w._design["profiles"] and w._design["connection"] is not None
     assert "closest approach" in w.status.text(), w.status.text()
     w.view_combo.setCurrentIndex(1); w.view_combo.setCurrentIndex(0)  # both render
-    w.r_spin.setValue(4.0); w._on_size()       # restore a feasible design
+    w.r_spin.setValue(4.0); w._on_size(); wait(w)   # restore a feasible design
 
-    w._on_map()
+    w._on_map(); wait(w)
     assert w._map is not None and np.count_nonzero(w._map["feasible"]) > 0
 
-    w._on_send()
+    w._on_send(); wait(w)
     assert "rigorous solver" in w.status.text(), w.status.text()
 
     # second FEED stream -> auto-detected entrainer, extractive prefilled from flows

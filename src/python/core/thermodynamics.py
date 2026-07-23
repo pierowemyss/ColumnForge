@@ -110,18 +110,53 @@ def k_values(T, P, antoine, gamma_fn=None, x=None, phi_fn=None):
         s = y.sum()
         y = y / s if s > 0.0 else np.full_like(K, 1.0 / len(K))
         n = len(K)
-        phi_sat = np.array([phi_fn(np.eye(n)[i], T, psat[i])[i]
-                            for i in range(n)])
+        if hasattr(phi_fn, "pure"):          # vectorised fast path (srk_phi_fn)
+            phi_sat = phi_fn.pure(T, psat)
+        else:                                # generic phi_fn seam: one-hot loop
+            phi_sat = np.array([phi_fn(np.eye(n)[i], T, psat[i])[i]
+                                for i in range(n)])
         K = K * phi_sat / phi_fn(y, T, P)
     return K
 
 
-def _solve_T(f, lo, hi):
+def _solve_T(f, lo, hi, guess=None, walk_lo=False):
     """brentq, but widen the upper bound until the bracket straddles a root.
     High boilers (e.g. glycols/carbonates) saturate above the nominal 500 unit
     range, which otherwise trips 'f(a) and f(b) must have different signs'.
-    ponytail: only hi widens; lo=-100 keeps T+273 > 0 so PLXANT stays finite."""
+    ponytail: only hi widens; lo=-100 keeps T+273 > 0 so PLXANT stays finite.
+
+    `guess`: a nearby temperature (the column solvers hold last iteration's T,
+    which is a stage away from this one). Secant from there lands in 2-4 f-evals;
+    brentq on the raw 600-degree bracket needs ~17, and it was the single biggest
+    cost in a column solve. Falls back to the bracket if secant misbehaves, so
+    the answer is brentq's either way.
+    """
+    if guess is not None and lo < guess < hi:
+        T0 = float(guess)
+        f0 = f(T0)
+        if abs(f0) < _T_FTOL:
+            return T0
+        T1 = T0 + 0.5
+        f1 = f(T1)
+        for _ in range(12):
+            if f1 == f0:
+                break
+            T2 = T1 - f1 * (T1 - T0) / (f1 - f0)
+            if not (lo < T2 < hi):
+                break
+            T0, f0, T1 = T1, f1, T2
+            f1 = f(T1)
+            if abs(f1) < _T_FTOL:
+                return T1
     flo = f(lo)
+    while walk_lo and flo > 0.0 and lo + 50.0 < hi:
+        # Spurious positive at the floor: activity models extrapolated far below
+        # their fit range return gamma ~ 1e12, faking a boiling point at -100.
+        # Walk the floor up onto the physical branch (f < 0 below the real root).
+        # Only valid for bubble-type f (negative below the root); dew_T's f has
+        # the opposite sign at the floor, so it opts out.
+        lo += 50.0
+        flo = f(lo)
     for _ in range(10):
         if flo * f(hi) <= 0.0:
             return brentq(f, lo, hi)
@@ -130,20 +165,32 @@ def _solve_T(f, lo, hi):
                      "vapour-pressure coefficients and that P is in the Psat unit")
 
 
-def bubble_T(x, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None, phi_fn=None):
+# |sum K x - 1| below this is a converged saturation temperature: K is O(1), so
+# this is ~1e-10 degC of temperature error — far tighter than any solver tol.
+_T_FTOL = 1e-11
+
+
+def bubble_T(x, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None, phi_fn=None,
+             T_guess=None):
     """Bubble-point temperature: T such that sum_i K_i(T) x_i = 1.
 
     lo/hi bracket the root (in the Antoine fit's temperature unit); hi auto-widens
     via _solve_T for very high boilers. gamma_fn/phi_fn (optional) make the
     K-values non-ideal (activity model / vapour-phase EOS, see k_values).
+    T_guess (optional): a nearby temperature to secant from — same root, far fewer
+    K-value evaluations (see _solve_T).
     """
     x = np.asarray(x, float)
 
     def f(T):
-        return float(np.sum(k_values(T, P, antoine, gamma_fn, x, phi_fn) * x)
-                     - 1.0)
+        v = float(np.sum(k_values(T, P, antoine, gamma_fn, x, phi_fn) * x)
+                  - 1.0)
+        # psat overflows to inf far above saturation (PLXANT exp), turning f
+        # into nan and silently breaking _solve_T's bracket test; sum(K x) - 1
+        # is hugely positive out there, so say so instead.
+        return v if math.isfinite(v) else 1e12
 
-    return _solve_T(f, lo, hi)
+    return _solve_T(f, lo, hi, guess=T_guess, walk_lo=True)
 
 
 def dew_T(y, P, antoine, lo=-100.0, hi=500.0, gamma_fn=None, phi_fn=None):
@@ -388,6 +435,49 @@ def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15):
     return gamma_fn
 
 
+def _srk_z(A, B):
+    """Vapour compressibility from Z^3 - Z^2 + (A-B-B^2) Z - A B = 0,
+    elementwise over arrays.
+
+    Analytic (Cardano/trigonometric) with a two-step Newton polish — np.roots'
+    companion-matrix *eigensolve* here was 70%% of a whole column solve.
+    Returns (Z, ok); ok False marks "no vapour-like root", reproducing the
+    np.roots-based selection exactly: real roots only, filtered to > B, the
+    single-root-below-0.5 case rejected (see srk_phi for the physics).
+    """
+    A = np.asarray(A, float)
+    B = np.asarray(B, float)
+    c1 = A - B - B * B
+    c0 = -A * B
+    p = c1 - 1.0 / 3.0                       # depressed cubic: Z = t + 1/3
+    q = c1 / 3.0 + c0 - 2.0 / 27.0
+    disc = 0.25 * q * q + p ** 3 / 27.0
+    one = disc > 0.0                         # one real root vs three
+    s = np.sqrt(np.where(one, disc, 0.0))
+    t1 = np.cbrt(-0.5 * q + s) + np.cbrt(-0.5 * q - s)
+    pm = np.where(one, -1.0, np.minimum(p, -1e-30))      # p <= 0 when disc <= 0
+    m = 2.0 * np.sqrt(-pm / 3.0)
+    th = np.arccos(np.clip(3.0 * q / (pm * m), -1.0, 1.0))
+    t3 = m[..., None] * np.cos((th[..., None]
+                                - 2.0 * np.pi * np.array([0.0, 1.0, 2.0])) / 3.0)
+    pad = np.full(np.shape(t1) + (2,), -np.inf)
+    cand = np.where(one[..., None],
+                    np.concatenate([t1[..., None], pad], axis=-1),
+                    t3) + 1.0 / 3.0
+    with np.errstate(invalid="ignore"):      # the -inf pad rows produce nan steps,
+        for _ in range(2):                   # which the where() discards
+            f = ((cand - 1.0) * cand + c1[..., None]) * cand + c0[..., None]
+            fp = (3.0 * cand - 2.0) * cand + c1[..., None]
+            step = np.where(np.isfinite(cand) & (fp != 0.0),
+                            f / np.where(fp != 0.0, fp, 1.0), 0.0)
+            cand = cand - step
+    valid = cand > B[..., None]
+    nsel = valid.sum(axis=-1)
+    Z = np.where(valid, cand, -np.inf).max(axis=-1)
+    ok = ~((nsel == 0) | ((nsel == 1) & (Z < 0.5)))
+    return Z, ok
+
+
 def srk_phi(y, T_K, P_Pa, tc, pc, omega):
     """Soave-Redlich-Kwong vapour-mixture fugacity coefficients.
 
@@ -414,9 +504,6 @@ def srk_phi(y, T_K, P_Pa, tc, pc, omega):
     bmix = float(y @ bi)
     A = ysa ** 2 * P_Pa / (R_GAS * T_K) ** 2
     B = bmix * P_Pa / (R_GAS * T_K)
-    roots = np.roots([1.0, -1.0, A - B - B * B, -A * B])
-    real = roots[np.abs(roots.imag) < 1e-9].real
-    real = real[real > B]
     # No vapour-like root means no vapour exists at (T, P) — e.g. a bubble-T
     # root-search probing far below the true bubble point, where the lone real
     # root is liquid-like (Z ~ B). Using it would return phi ~ 1e-3 and forge a
@@ -424,9 +511,10 @@ def srk_phi(y, T_K, P_Pa, tc, pc, omega):
     # meaningless where there is no vapour. ponytail: Z<0.5 vapour test is fine
     # for the sub-10-bar gamma-phi scope; Mathias pseudo-root extrapolation is
     # the upgrade if high-pressure columns ever land.
-    if len(real) == 0 or (len(real) == 1 and real[0] < 0.5):
+    Zr, ok = _srk_z(A, B)
+    if not ok:
         return np.ones_like(y)
-    Z = float(real.max())
+    Z = float(Zr)
     lnphi = ((bi / bmix) * (Z - 1.0) - math.log(Z - B)
              - (A / B) * (2.0 * sa / ysa - bi / bmix) * math.log(1.0 + B / Z))
     return np.exp(lnphi)
@@ -443,6 +531,25 @@ def srk_phi_fn(tc, pc, omega, t_to_K=lambda T: T + 273.15, p_to_Pa=133.322):
     def phi_fn(y, T, P):
         return srk_phi(y, t_to_K(T), P * p_to_Pa, tc, pc_Pa, omega)
 
+    def pure(T, psat):
+        """All pure-component phi^sat in one vectorised call — the k_values
+        fast path (it otherwise loops n one-hot srk_phi calls per K-value).
+        Pure i: a_mix = a_i, b_mix = b_i, each at its own pressure psat[i]."""
+        T_K = t_to_K(T)
+        P = np.asarray(psat, float) * p_to_Pa
+        m = 0.480 + 1.574 * omega - 0.176 * omega * omega
+        alpha = (1.0 + m * (1.0 - np.sqrt(T_K / tc))) ** 2
+        ai = 0.42748 * (R_GAS * tc) ** 2 / pc_Pa * alpha
+        bi = 0.08664 * R_GAS * tc / pc_Pa
+        A = ai * P / (R_GAS * T_K) ** 2
+        B = bi * P / (R_GAS * T_K)
+        Z, ok = _srk_z(A, B)
+        Zs = np.where(ok, Z, 2.0)            # dummies where the ideal-gas
+        Bs = np.where(ok, B, 1.0)            # fallback applies (discarded)
+        lnphi = (Zs - 1.0) - np.log(Zs - Bs) - (A / Bs) * np.log(1.0 + Bs / Zs)
+        return np.where(ok, np.exp(lnphi), 1.0)
+
+    phi_fn.pure = pure
     return phi_fn
 
 
@@ -561,6 +668,11 @@ def _demo():
     assert np.all(phi4 < 1.0) and np.all(phi4 > 0.7), phi4
     # heavier component departs more from ideality
     assert phi4[1] < phi4[0], phi4
+    # the vectorised pure-component fast path equals the one-hot loop
+    psat_s = antoine_psat(20.0, c3c4)
+    loop_s = np.array([pfn(np.eye(2)[i], 20.0, psat_s[i])[i] for i in range(2)])
+    assert np.allclose(pfn.pure(20.0, psat_s), loop_s, atol=1e-9), \
+        (pfn.pure(20.0, psat_s), loop_s)
     # pure-component saturation: phi_sat and phi_V cancel exactly in k_values,
     # so the pure bubble point is unchanged by the phi correction
     Tp_id = bubble_T(np.array([1.0, 0.0]), 760.0, c3c4)

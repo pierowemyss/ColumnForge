@@ -1,32 +1,75 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QGroupBox, QGridLayout, QSpinBox
+    QComboBox, QGridLayout, QSpinBox
 )
 from PySide6.QtCore import Signal
 
 from .sci_spin_box import SciDoubleSpinBox
 
 
+# Per module type: which rows are shown, how they're labelled, and the one-line
+# hint under the form. Everything listed here is consumed by a solver — a row the
+# solver ignores is not shown at all (no greyed-out dead fields).
+_TYPES = {
+    "Interreboiler": {
+        "rows": ("stage", "duty"),
+        "labels": {"stage": "Stage (0 = top):",
+                   "duty": "Duty (kW, + heat / − cool):"},
+        "hint": "A signed heat term on one stage. Needs the energy balance "
+                "(Initialization → Flow Model); under CMO it would be ignored.",
+    },
+    "Pumparound": {
+        "rows": ("stage", "return_stage", "rate", "duty"),
+        "labels": {"stage": "Draw stage (0 = top):",
+                   "return_stage": "Return stage (above draw):",
+                   "rate": "Circulation rate (kmol/h):",
+                   "duty": "Cooler duty (kW removed):"},
+        "hint": "Liquid drawn, cooled, and returned higher up — no product "
+                "leaves. Needs the energy balance.",
+    },
+    "Side Stripper": {
+        "rows": ("stage", "return_stage", "rate", "num_stages", "ratio"),
+        "labels": {"stage": "Draw stage (0 = top):",
+                   "return_stage": "Vapour return stage (above draw):",
+                   "rate": "Liquid draw rate (kmol/h):",
+                   "num_stages": "Stripper stages:",
+                   "ratio": "Boilup ratio (V/B):"},
+        "hint": "Liquid drawn to a reboiled side column: its bottoms is a side "
+                "product, its overhead vapour returns above the draw.",
+    },
+    "Side Rectifier": {
+        "rows": ("stage", "return_stage", "rate", "num_stages", "ratio"),
+        "labels": {"stage": "Draw stage (0 = top):",
+                   "return_stage": "Liquid return stage (below draw):",
+                   "rate": "Vapour draw rate (kmol/h):",
+                   "num_stages": "Rectifier stages:",
+                   "ratio": "Reflux ratio (L/D):"},
+        "hint": "Vapour drawn to a condensed side column: its distillate is a "
+                "side product, its liquid returns below the draw.",
+    },
+}
+
 
 class ModuleConfigPanel(QWidget):
-    """Panel for configuring side module (Interreboiler, Side Stripper, Side Rectifier) settings."""
+    """Configure one side module. The form is type-driven: only the fields the
+    chosen module type actually feeds into the solver are shown."""
 
     configChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.module_types = ["Interreboiler", "Side Stripper", "Side Rectifier"]
+        self.module_types = list(_TYPES)
+        self._loading = False
 
         self._setup_ui()
-        self._setup_styles()
         self._connect_signals()
+        self._on_type_changed(self.type_combo.currentText())
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(10)
 
-        # Module type
         type_layout = QHBoxLayout()
         type_layout.addWidget(QLabel("Module Type:"))
         self.type_combo = QComboBox(self)
@@ -35,175 +78,136 @@ class ModuleConfigPanel(QWidget):
         type_layout.addStretch()
         main_layout.addLayout(type_layout)
 
-        # Stage number (0-based from the top; 0 = distillate — matches feeds/draws)
-        stage_layout = QHBoxLayout()
-        stage_layout.addWidget(QLabel("Stage (0 = top):"))
+        # One grid of (label, widget) rows, shown/hidden per type.
+        grid = QGridLayout()
+        grid.setColumnStretch(2, 1)
+        self.rows = {}
+
+        def add_row(key, widget):
+            row = len(self.rows)
+            label = QLabel("", self)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(widget, row, 1)
+            self.rows[key] = (label, widget)
+
+        # Stages are 0-based from the top; 0 = distillate, matching feeds/draws.
         self.stage_spin = QSpinBox(self)
         self.stage_spin.setRange(0, 199)
-        stage_layout.addWidget(self.stage_spin)
-        stage_layout.addStretch()
-        main_layout.addLayout(stage_layout)
+        add_row("stage", self.stage_spin)
 
-        # Number of stages
-        num_stages_layout = QHBoxLayout()
-        num_stages_layout.addWidget(QLabel("Number of Stages:"))
+        self.return_stage_spin = QSpinBox(self)
+        self.return_stage_spin.setRange(0, 199)
+        add_row("return_stage", self.return_stage_spin)
+
+        self.rate_spin = SciDoubleSpinBox(self)
+        self.rate_spin.setRange(0, 1e9)
+        self.rate_spin.setDecimals(3)
+        add_row("rate", self.rate_spin)
+
         self.num_stages_spin = QSpinBox(self)
         self.num_stages_spin.setRange(1, 50)
-        num_stages_layout.addWidget(self.num_stages_spin)
-        num_stages_layout.addStretch()
-        main_layout.addLayout(num_stages_layout)
+        add_row("num_stages", self.num_stages_spin)
 
-        # Boilup/Reflux ratio
-        ratio_layout = QHBoxLayout()
-        ratio_layout.addWidget(QLabel("Boilup Ratio (V/B):"))
-        self.boilup_spin = SciDoubleSpinBox(self)
-        self.boilup_spin.setRange(0, 1000)
-        self.boilup_spin.setDecimals(4)
-        ratio_layout.addWidget(self.boilup_spin)
-        ratio_layout.addStretch()
-        main_layout.addLayout(ratio_layout)
+        # Boilup (V/B) for a stripper, reflux (L/D) for a rectifier — one spin,
+        # relabelled; get_config maps it back onto the right stored field.
+        self.ratio_spin = SciDoubleSpinBox(self)
+        self.ratio_spin.setRange(0, 1000)
+        self.ratio_spin.setDecimals(4)
+        add_row("ratio", self.ratio_spin)
 
-        reflux_layout = QHBoxLayout()
-        reflux_layout.addWidget(QLabel("Reflux Ratio (L/D):"))
-        self.reflux_spin = SciDoubleSpinBox(self)
-        self.reflux_spin.setRange(0, 1000)
-        self.reflux_spin.setDecimals(4)
-        reflux_layout.addWidget(self.reflux_spin)
-        reflux_layout.addStretch()
-        main_layout.addLayout(reflux_layout)
-
-        # Internal heat duty (kW): + adds heat (interreboiler), - removes it
-        # (intercooler). This is the knob the energy balance actually consumes.
-        duty_layout = QHBoxLayout()
-        duty_layout.addWidget(QLabel("Duty (kW, +heat/-cool):"))
         self.duty_spin = SciDoubleSpinBox(self)
         self.duty_spin.setRange(-1e9, 1e9)
         self.duty_spin.setDecimals(3)
-        duty_layout.addWidget(self.duty_spin)
-        duty_layout.addStretch()
-        main_layout.addLayout(duty_layout)
+        add_row("duty", self.duty_spin)
 
-        # Associated Streams
-        streams_group = QGroupBox("Associated Streams")
-        streams_layout = QGridLayout(streams_group)
+        main_layout.addLayout(grid)
 
-        # Distillate
-        streams_layout.addWidget(QLabel("Distillate:"), 0, 0)
-        self.distillate_out_edit = QComboBox(self)
-        self.distillate_out_edit.addItems(["out", "to tray"])
-        streams_layout.addWidget(self.distillate_out_edit, 0, 1)
-
-        streams_layout.addWidget(QLabel("To Tray #:"), 0, 2)
-        self.distillate_tray_spin = QSpinBox(self)
-        self.distillate_tray_spin.setRange(1, 200)
-        streams_layout.addWidget(self.distillate_tray_spin, 0, 3)
-
-        # Bottoms
-        streams_layout.addWidget(QLabel("Bottoms:"), 1, 0)
-        self.bottoms_out_edit = QComboBox(self)
-        self.bottoms_out_edit.addItems(["out", "to tray"])
-        streams_layout.addWidget(self.bottoms_out_edit, 1, 1)
-
-        streams_layout.addWidget(QLabel("To Tray #:"), 1, 2)
-        self.bottoms_tray_spin = QSpinBox(self)
-        self.bottoms_tray_spin.setRange(1, 200)
-        streams_layout.addWidget(self.bottoms_tray_spin, 1, 3)
-
-        main_layout.addWidget(streams_group)
+        self.hint_label = QLabel("", self)
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setProperty("hint", True)
+        main_layout.addWidget(self.hint_label)
 
         main_layout.addStretch()
 
-    def _setup_styles(self):
-        # Styling comes from the central theme (gui/theme/app.qss).
-        pass
-
     def _connect_signals(self):
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
-        self.stage_spin.valueChanged.connect(self._on_value_changed)
-        self.num_stages_spin.valueChanged.connect(self._on_value_changed)
-        self.boilup_spin.valueChanged.connect(self._on_value_changed)
-        self.reflux_spin.valueChanged.connect(self._on_value_changed)
-        self.duty_spin.valueChanged.connect(self._on_value_changed)
-        self.distillate_out_edit.currentTextChanged.connect(self._on_value_changed)
-        self.distillate_tray_spin.valueChanged.connect(self._on_value_changed)
-        self.bottoms_out_edit.currentTextChanged.connect(self._on_value_changed)
-        self.bottoms_tray_spin.valueChanged.connect(self._on_value_changed)
+        for _, widget in self.rows.values():
+            widget.valueChanged.connect(self._on_value_changed)
 
     def _on_type_changed(self, module_type: str):
-        """Handle module type change."""
-        # Show/hide boilup/reflux based on module type
-        if module_type == "Interreboiler":
-            self.boilup_spin.setEnabled(True)
-            self.reflux_spin.setEnabled(False)
-            self.duty_spin.setEnabled(True)          # heat-duty module → solved
-        elif module_type in ["Side Stripper", "Side Rectifier"]:
-            self.boilup_spin.setEnabled(False)
-            self.reflux_spin.setEnabled(True)
-            self.duty_spin.setEnabled(False)         # not yet solved (Path B)
-        else:
-            self.boilup_spin.setEnabled(True)
-            self.reflux_spin.setEnabled(True)
-            self.duty_spin.setEnabled(True)
-
+        spec = _TYPES.get(module_type, _TYPES["Interreboiler"])
+        for key, (label, widget) in self.rows.items():
+            shown = key in spec["rows"]
+            label.setText(spec["labels"].get(key, ""))
+            label.setVisible(shown)
+            widget.setVisible(shown)
+        self.hint_label.setText(spec["hint"])
         self._on_value_changed()
 
     def _on_value_changed(self):
-        self.configChanged.emit()
+        if not self._loading:
+            self.configChanged.emit()
+
+    def _is(self, *types) -> bool:
+        return self.type_combo.currentText() in types
 
     def set_config(self, config: dict):
         """Set module configuration from a dictionary."""
-        module_type = config.get("type", "Interreboiler")
-        index = self.type_combo.findText(module_type)
-        if index >= 0:
-            self.type_combo.setCurrentIndex(index)
+        self._loading = True                 # one configChanged, not one per field
+        try:
+            module_type = config.get("type", "Interreboiler")
+            index = self.type_combo.findText(module_type)
+            if index >= 0:
+                self.type_combo.setCurrentIndex(index)
 
-        self.stage_spin.setValue(config.get("stage", 1))
-        self.num_stages_spin.setValue(config.get("num_stages", 1))
-        self.boilup_spin.setValue(config.get("boilup_ratio") or 0)
-        self.reflux_spin.setValue(config.get("reflux_ratio") or 0)
-        self.duty_spin.setValue(config.get("duty") or 0)
+            self.stage_spin.setValue(config.get("stage", 1))
+            self.num_stages_spin.setValue(config.get("num_stages") or 4)
+            self.duty_spin.setValue(config.get("duty") or 0)
+            self.return_stage_spin.setValue(config.get("return_stage") or 0)
+            self.rate_spin.setValue(config.get("rate") or 0)
+            ratio = (config.get("reflux_ratio") if self._is("Side Rectifier")
+                     else config.get("boilup_ratio"))
+            self.ratio_spin.setValue(ratio or 0)
+            # inside the guard: loading a config re-labels the form but must not
+            # echo a configChanged back at whoever is loading it
+            self._on_type_changed(self.type_combo.currentText())
+        finally:
+            self._loading = False
 
-        # Associated streams
-        streams = config.get("associated_streams", {})
-        if "distillate" in streams:
-            out_type, tray = streams["distillate"]
-            self.distillate_out_edit.setCurrentText(out_type)
-            self.distillate_tray_spin.setValue(tray)
-        if "bottoms" in streams:
-            out_type, tray = streams["bottoms"]
-            self.bottoms_out_edit.setCurrentText(out_type)
-            self.bottoms_tray_spin.setValue(tray)
+    def _visible(self, key, widget):
+        """Value of a row, or None when this module type doesn't have it.
+        Keyed off the type table, not Qt visibility — a panel sitting on a hidden
+        stack page is invisible but its values are still real."""
+        spec = _TYPES.get(self.type_combo.currentText(), _TYPES["Interreboiler"])
+        return widget.value() if key in spec["rows"] else None
 
     def get_config(self) -> dict:
-        """Get module configuration as a dictionary."""
-        module_type = self.type_combo.currentText()
-
-        config = {
-            "type": module_type,
+        """Get module configuration as a dictionary. Fields the current type does
+        not show come back None, so nothing invisible reaches the solver."""
+        ratio = self._visible("ratio", self.ratio_spin)
+        return {
+            "type": self.type_combo.currentText(),
             "stage": self.stage_spin.value(),
-            "num_stages": self.num_stages_spin.value(),
-            "boilup_ratio": self.boilup_spin.value() if self.boilup_spin.isEnabled() else None,
-            "reflux_ratio": self.reflux_spin.value() if self.reflux_spin.isEnabled() else None,
-            "duty": self.duty_spin.value() if self.duty_spin.isEnabled() and self.duty_spin.value() else None,
-            "associated_streams": {
-                "distillate": (self.distillate_out_edit.currentText(), self.distillate_tray_spin.value()),
-                "bottoms": (self.bottoms_out_edit.currentText(), self.bottoms_tray_spin.value())
-            }
+            "num_stages": self._visible("num_stages", self.num_stages_spin),
+            "boilup_ratio": ratio if self._is("Side Stripper") else None,
+            "reflux_ratio": ratio if self._is("Side Rectifier") else None,
+            "duty": self._visible("duty", self.duty_spin) or None,
+            "return_stage": self._visible("return_stage", self.return_stage_spin),
+            "rate": self._visible("rate", self.rate_spin) or None,
         }
-
-        return config
 
     def get_specs(self) -> list:
         """Return list of active specifications for DoF tracking."""
-        specs = []
-        specs.append(f"Stage: {self.stage_spin.value()}")
-        specs.append(f"Stages: {self.num_stages_spin.value()}")
-
-        if self.boilup_spin.isEnabled() and self.boilup_spin.value() > 0:
-            specs.append(f"Boilup ratio: {self.boilup_spin.value():.4f}")
-        if self.reflux_spin.isEnabled() and self.reflux_spin.value() > 0:
-            specs.append(f"Reflux ratio: {self.reflux_spin.value():.4f}")
-        if self.duty_spin.isEnabled() and self.duty_spin.value():
-            specs.append(f"Duty: {self.duty_spin.value():.3f} kW")
-
+        cfg = self.get_config()
+        specs = [f"Stage: {cfg['stage']}"]
+        if cfg["num_stages"]:
+            specs.append(f"Stages: {cfg['num_stages']}")
+        if cfg["boilup_ratio"]:
+            specs.append(f"Boilup ratio: {cfg['boilup_ratio']:.4f}")
+        if cfg["reflux_ratio"]:
+            specs.append(f"Reflux ratio: {cfg['reflux_ratio']:.4f}")
+        if cfg["rate"]:
+            specs.append(f"Rate: {cfg['rate']:.3f} kmol/h")
+        if cfg["duty"]:
+            specs.append(f"Duty: {cfg['duty']:.3f} kW")
         return specs

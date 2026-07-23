@@ -67,6 +67,17 @@ def stream_summary(profile: dict) -> dict:
                                  "flow": float(flow), "T": float(T[j]), "comp": comp})
                 out = out + flow * comp
 
+    # Side stripper/rectifier products. The section's draw and return are internal
+    # (already netted out of side_draws/feed_totals by core.side_sections), so only
+    # the product it exports shows up here.
+    for ss in profile.get("side_sections", []):
+        comp = np.asarray(ss["comp"])
+        products.append({                     # stripper bottoms / condensed
+            "name": f"{ss['id']} product",    # rectifier distillate: both liquid
+            "phase": "liquid",
+            "flow": float(ss["flow"]), "T": float(ss["T"]), "comp": comp})
+        out = out + float(ss["flow"]) * comp
+
     feed = np.asarray(profile.get("feed_totals", np.full(C, np.nan)))
     closure = feed - out
     Qc, Qr = profile.get("condenser_duty"), profile.get("reboiler_duty")
@@ -629,7 +640,10 @@ class ResultsTab(QWidget):
         stages = {}
         ws = self.window_state
         if ws:
-            for s in ws.streams.values():
+            # getattr: the state may be a partial/duck-typed view without
+            # streams, which is exactly the "fall back to prof[feed_stage]"
+            # case below rather than an error.
+            for s in getattr(ws, "streams", {}).values():
                 if s.stream_type == StreamType.FEED and s.flow and s.composition:
                     stages.setdefault(int(s.stage), []).append(s.id)
         if not stages and "feed_stage" in prof:

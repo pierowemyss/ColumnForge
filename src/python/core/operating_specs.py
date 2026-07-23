@@ -68,10 +68,14 @@ def _residual(spec: Spec, R, D, F, zF, lk, hk, profile, W=0.0):
         return D - v * F
     if k == SpecKind.BF_RATIO:
         return B - v * F
+    # Recoveries are compared as *fractions*, not flows: a kmol/h residual would
+    # sit orders of magnitude above the purity residuals and never clear the
+    # shared 1e-6 gate, sending the root-find on a long hunt for precision the
+    # column solve doesn't have.
     if k == SpecKind.LK_RECOVERY:
-        return D * profile["xD"][lk] - v * F * zF[lk]   # rec = D xD_lk / (F z_lk)
+        return profile["xD"][lk] * D / (F * zF[lk]) - v   # rec = D xD_lk /(F z_lk)
     if k == SpecKind.HK_RECOVERY:
-        return D * profile["xD"][hk] - v * F * zF[hk]
+        return profile["xD"][hk] * D / (F * zF[hk]) - v
     if k == SpecKind.DIST_PURITY:
         return profile["xD"][spec.component] - v
     if k == SpecKind.BOTTOMS_PURITY:
@@ -119,6 +123,26 @@ def resolve_operating_point(
     needs_solve = any(s.kind in _IMPLICIT for s in ops)
     if needs_solve and solve_fn is None:
         raise ValueError("Purity/recovery specs require a solve_fn.")
+    # A reflux-ratio spec IS R — no need to hunt for it. Pin it and drop into the
+    # 1-D branch below: halves the finite-difference cost of an implicit resolve
+    # and stops the exact R residual from being mixed into a least-squares whose
+    # other residual is only accurate to the column solve's noise floor.
+    if fixed_R is None:
+        for s in ops:
+            if s.kind == SpecKind.REFLUX_RATIO:
+                fixed_R = float(s.value)
+                ops = [t for t in ops if t is not s]
+                break
+    for s in ops:
+        i = lk if s.kind == SpecKind.LK_RECOVERY else hk
+        if s.kind in (SpecKind.LK_RECOVERY, SpecKind.HK_RECOVERY):
+            if not 0 <= i < len(zF):
+                raise ValueError(
+                    f"{s.kind.value}: key component index {i} is not in the feed.")
+            if zF[i] <= 0:
+                raise ValueError(
+                    f"{s.kind.value}: the key component has no feed — its "
+                    "recovery is undefined. Pick a different key.")
 
     # Cache the column solve so two implicit specs share one solve per (R, D).
     cache: dict = {}
@@ -136,19 +160,49 @@ def resolve_operating_point(
 
     if D0 is None:
         # A light-key-ish guess keeps the implicit root-find in a sane basin.
-        D0 = float(np.clip(F * zF[:max(lk + 1, 1)].sum(), 1e-3 * F,
-                           0.999 * (F - W)))
+        D0 = F * zF[:max(lk + 1, 1)].sum()
+        # A recovery spec says how much of its key goes overhead — fold that in
+        # so the first trials already sit near the answer (a cold start 10% off
+        # can wander through operating points that cost a full solver budget).
+        for s in ops:
+            if s.kind == SpecKind.LK_RECOVERY:
+                D0 = F * (zF[:lk].sum() + float(s.value) * zF[lk])
+                break
+            if s.kind == SpecKind.HK_RECOVERY:
+                D0 = F * (zF[:max(lk + 1, 1)].sum() + float(s.value) * zF[hk])
+                break
+        D0 = float(np.clip(D0, 1e-3 * F, 0.999 * (F - W)))
     Dmax = (F - W) * (1 - 1e-9)
+    # Implicit specs cost a full column solve per residual evaluation, so give
+    # the root-find a hard budget and stop chasing precision the solve can't
+    # deliver: an unreachable target used to walk R off to infinity, one slow
+    # solve at a time, hanging the caller for minutes.
+    # ponytail: R_MAX=100 is well past any real column; a target that needs more
+    # reflux than that is reported infeasible rather than chased. Raise it if a
+    # legitimate design ever bumps into it.
+    R_MAX = 100.0
+    tol = 1e-6 if needs_solve else 1e-12
+    kw = dict(xtol=tol, ftol=tol, max_nfev=60 if needs_solve else None)
+    if needs_solve:
+        # The implicit residuals are only as smooth as the column solve under
+        # them: a converged solve's duty still jitters ~1% between neighbouring
+        # D's near a pinch. least_squares' default relative FD step (~1e-8) then
+        # differentiates pure noise — the Jacobian comes back with the wrong
+        # *sign* and the trust region walks away from the answer until its budget
+        # runs out (that is the "recovery spec never solves" bug). 5e-2 relative
+        # (~2.5 kmol/h on a 50 kmol/h distillate) sits well above the jitter and
+        # still resolves the near-linear trend. Below ~3e-2 the duty spec fails.
+        kw["diff_step"] = 5e-2
     if fixed_R is not None:
-        sol = least_squares(residuals, x0=[D0], bounds=([1e-9], [Dmax]),
-                            xtol=1e-12, ftol=1e-12)
+        sol = least_squares(residuals, x0=[D0], bounds=([1e-9], [Dmax]), **kw)
         R, D = float(fixed_R), float(sol.x[0])
     else:
-        sol = least_squares(residuals, x0=[R0, D0],
-                            bounds=([1e-9, 1e-9], [np.inf, Dmax]),
-                            xtol=1e-12, ftol=1e-12)
+        sol = least_squares(residuals, x0=[min(R0, R_MAX), D0],
+                            bounds=([1e-9, 1e-9], [R_MAX, Dmax]), **kw)
         R, D = float(sol.x[0]), float(sol.x[1])
-    if np.max(np.abs(sol.fun)) > 1e-6:
+    # Implicit residuals are fractions (purity/recovery/relative duty) and are
+    # only as accurate as the column solve underneath — 1e-4 is the honest gate.
+    if np.max(np.abs(sol.fun)) > (1e-4 if needs_solve else 1e-6):
         raise ValueError(
             "Could not satisfy the operating specs — they may be infeasible for "
             f"this column (residual {np.max(np.abs(sol.fun)):.3g}).")
@@ -205,14 +259,25 @@ def _demo():
     assert abs(prof["xD"][0] - target) < 2e-3, prof["xD"][0]
     assert abs(R - 3.0) < 1e-6
 
-    # Light-key recovery target, reflux fixed.
+    # Light-key recovery target, reflux fixed. A reflux spec pins R, so this is a
+    # 1-D root-find: it must land on the target in a handful of column solves, not
+    # burn the whole max_nfev budget (a too-small FD step on a noisy residual did
+    # exactly that, and never converged).
+    n_solves = [0]
+
+    def counted(R, D):
+        n_solves[0] += 1
+        return solve_fn(R, D)
+
     R, D = resolve_operating_point(
         [Spec(SpecKind.REFLUX_RATIO, 3.0),
          Spec(SpecKind.LK_RECOVERY, 0.9)],
-        F, zF, solve_fn=solve_fn, lk=0)
+        F, zF, solve_fn=counted, lk=0)
     prof = solve_fn(R, D)
     rec = D * prof["xD"][0] / (F * zF[0])
     assert abs(rec - 0.9) < 2e-3, rec
+    assert abs(R - 3.0) < 1e-12, R          # the reflux spec is R, exactly
+    assert n_solves[0] < 40, n_solves[0]
 
     # Duty spec: fix reflux, solve for the D that hits a target reboiler duty.
     # Feasible-by-construction — read the duty at a known D, then recover it.

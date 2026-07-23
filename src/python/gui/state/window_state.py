@@ -30,6 +30,7 @@ class ModuleType(Enum):
     INTERREBOILER = "Interreboiler"
     SIDE_STRIPPER = "Side Stripper"
     SIDE_RECTIFIER = "Side Rectifier"
+    PUMPAROUND = "Pumparound"
 
 
 @dataclass
@@ -269,8 +270,14 @@ class ModuleConfig:
     boilup_ratio: Optional[float] = None
     reflux_ratio: Optional[float] = None
     duty: Optional[float] = None          # internal heat duty (kW); + heat in
-                                          # (interreboiler), - heat out (intercooler)
-    associated_streams: Dict[str, tuple] = field(default_factory=dict)  # name -> (out, to_tray)
+                                          # (interreboiler), - heat out (intercooler).
+                                          # For a pumparound: heat removed by the
+                                          # cooler (enter as a positive kW).
+    return_stage: Optional[int] = None    # pumparound: stage the cooled liquid is
+                                          # returned to (0-based from top; above the
+                                          # draw stage)
+    rate: Optional[float] = None          # circulating (pumparound) or drawn
+                                          # (side stripper/rectifier) rate, kmol/h
 
 
 class WindowState:
@@ -745,9 +752,6 @@ class WindowState:
         self.streams = {(new_id if k == old_id else k): v
                         for k, v in self.streams.items()}
         self.streams[new_id].id = new_id
-        for m in self.modules.values():
-            if old_id in m.associated_streams:
-                m.associated_streams[new_id] = m.associated_streams.pop(old_id)
         self.is_modified = True
         return True
 
@@ -767,13 +771,88 @@ class WindowState:
         (interreboiler +kW / intercooler -kW). Consumed by the energy balance as
         si.duty[]; ignored under CMO. gui_stage is 0-based from the top (0 =
         distillate), like feeds/draws.
-
-        ponytail: side strippers/rectifiers are drawn but not yet solved (they
-        need interlinked N-S sections — roadmap Path B); only heat-duty modules
-        are wired here.
         """
+        # A pumparound's duty is its cooler — claimed by pumparounds() below and
+        # folded into si.duty at build; counting it here too would double it.
         return [(m.stage, float(m.duty))
-                for m in self.modules.values() if m.duty]
+                for m in self.modules.values()
+                if m.duty and m.module_type == ModuleType.INTERREBOILER]
+
+    def pumparounds(self):
+        """[(draw_stage, return_stage, rate, duty_kW)] for pumparound modules.
+
+        Draw liquid `rate` at draw_stage, cool it (removing `duty` kW), return it
+        to return_stage (above the draw). gui_stage is 0-based from the top, like
+        feeds/draws; the cooling Q is consumed by the energy balance (same guard
+        as interheater duties). Only fully-specified pumparounds are returned.
+        """
+        out = []
+        for m in self.modules.values():
+            if (m.module_type == ModuleType.PUMPAROUND and m.rate
+                    and m.return_stage is not None):
+                out.append((m.stage, m.return_stage, float(m.rate),
+                            float(m.duty or 0.0)))
+        return out
+
+    # Side stripper / rectifier: the section's ratio spec lives on the type's own
+    # field (boilup for a stripper, reflux for a rectifier).
+    _SECTION_KIND = {ModuleType.SIDE_STRIPPER: "stripper",
+                     ModuleType.SIDE_RECTIFIER: "rectifier"}
+
+    @staticmethod
+    def _section_ratio(m) -> Optional[float]:
+        return (m.boilup_ratio if m.module_type == ModuleType.SIDE_STRIPPER
+                else m.reflux_ratio)
+
+    def side_sections(self):
+        """[(id, kind, draw_stage, return_stage, rate, ratio, n_stages)] for
+        fully-specified side strippers/rectifiers (see core.side_sections).
+
+        A stripper draws liquid and returns vapour above the draw; a rectifier
+        draws vapour and returns liquid below it. Stages are 0-based from the top
+        like feeds/draws. Unlike duties these work under CMO — the ratio spec, not
+        a heat term, sets the split.
+        """
+        out = []
+        for mid, m in self.modules.items():
+            kind = self._SECTION_KIND.get(m.module_type)
+            ratio = self._section_ratio(m)
+            if kind and m.rate and ratio and m.return_stage is not None:
+                out.append((mid, kind, m.stage, m.return_stage, float(m.rate),
+                            float(ratio), int(m.num_stages or 1)))
+        return out
+
+    def module_spec_counts(self) -> List[int]:
+        """Design specs each module adds, in modules order.
+
+        MESH ledger: one spec per duty unit the module adds plus one per extra
+        product. Interheater = its duty (1). Pumparound = rate + cooler duty (2).
+        Side stripper/rectifier = draw rate + its boilup/reflux ratio (2: a duty
+        unit and an extra product).
+        """
+        return [1 if m.module_type == ModuleType.INTERREBOILER else 2
+                for m in self.modules.values()]
+
+    def module_specs(self) -> List[Spec]:
+        """One Spec per module value the user has actually set, keyed by module id
+        so the DoF ledger balances against module_spec_counts()."""
+        specs: List[Spec] = []
+        for mid, m in self.modules.items():
+            if m.module_type == ModuleType.INTERREBOILER:
+                if m.duty:
+                    specs.append(Spec(SpecKind.MODULE_DUTY, float(m.duty), mid))
+            elif m.module_type == ModuleType.PUMPAROUND:
+                if m.rate:
+                    specs.append(Spec(SpecKind.MODULE_RATE, float(m.rate), mid))
+                if m.duty:
+                    specs.append(Spec(SpecKind.MODULE_DUTY, float(m.duty), mid))
+            else:
+                ratio = self._section_ratio(m)
+                if m.rate:
+                    specs.append(Spec(SpecKind.MODULE_RATE, float(m.rate), mid))
+                if ratio:
+                    specs.append(Spec(SpecKind.MODULE_RATIO, float(ratio), mid))
+        return specs
 
     # --- Unified DoF + auto material balance (single source of truth) ---
 
@@ -834,6 +913,7 @@ class WindowState:
         for s in self.streams.values():
             if s.stream_type == StreamType.SIDESTREAM and s.flow:
                 specs.append(Spec(SpecKind.SIDEDRAW_RATE, s.flow, s.id))
+        specs.extend(self.module_specs())      # module knobs, keyed by module id
         return specs
 
     def build_dof_analyzer(self) -> DoFAnalyzer:
@@ -846,8 +926,7 @@ class WindowState:
             reboiler=rc.reboiler_type != ReboilerType.NONE,
             partial_condenser=cc.condenser_type == CondenserType.PARTIAL,
             n_side_draws=n_side,
-            # ponytail: 1 required spec per module; refine when module DoF matters
-            module_spec_counts=[1] * len(self.modules),
+            module_spec_counts=self.module_spec_counts(),
             energy_balance=self.energy_balance,
         )
 

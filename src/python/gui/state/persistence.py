@@ -87,8 +87,7 @@ def _enc_module(m: ModuleConfig) -> dict:
     return {"module_type": m.module_type.value, "stage": m.stage,
             "num_stages": m.num_stages, "boilup_ratio": m.boilup_ratio,
             "reflux_ratio": m.reflux_ratio, "duty": m.duty,
-            "associated_streams": {k: list(v)
-                                   for k, v in m.associated_streams.items()}}
+            "return_stage": m.return_stage, "rate": m.rate}
 
 
 def _enc_spec(sp: Spec) -> dict:
@@ -173,8 +172,9 @@ def _dec_module(d: dict) -> ModuleConfig:
         stage=d.get("stage", 1), num_stages=d.get("num_stages", 1),
         boilup_ratio=d.get("boilup_ratio"), reflux_ratio=d.get("reflux_ratio"),
         duty=d.get("duty"),
-        associated_streams={k: tuple(v)
-                            for k, v in d.get("associated_streams", {}).items()})
+        # older files may carry "associated_streams"; it was never consumed by a
+        # solver and the panel no longer offers it, so it is dropped on load
+        return_stage=d.get("return_stage"), rate=d.get("rate"))
 
 
 def _dec_spec(d: dict) -> Spec:

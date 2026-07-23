@@ -32,15 +32,20 @@ from core.solver_input import SolverInput, build_solver_input
 
 
 def _thomas(a, b, c, d):
-    """Solve a tridiagonal system (a=sub, b=diag, c=super, d=rhs). Length n."""
+    """Solve a tridiagonal system (a=sub, b=diag, c=super, d=rhs).
+
+    Arrays are (N,) or (N, n): the stage sweep is inherently sequential, but
+    everything per-row is elementwise, so n independent systems (one per
+    component) solve in a single vectorised pass.
+    """
     n = len(b)
-    cp = np.zeros(n); dp = np.zeros(n)
+    cp = np.zeros_like(b, dtype=float); dp = np.zeros_like(b, dtype=float)
     cp[0] = c[0] / b[0]; dp[0] = d[0] / b[0]
     for i in range(1, n):
         m = b[i] - a[i] * cp[i - 1]
         cp[i] = c[i] / m
         dp[i] = (d[i] - a[i] * dp[i - 1]) / m
-    x = np.zeros(n)
+    x = np.zeros_like(b, dtype=float)
     x[-1] = dp[-1]
     for i in range(n - 2, -1, -1):
         x[i] = dp[i] - cp[i] * x[i + 1]
@@ -56,27 +61,48 @@ def _stage_compositions(K, L, V, Fz, W, U, B, D, N, n):
     Stage 0 is the top (condenser boundary: net vapour product D at y[0], reflux
     already netted out), stage N-1 the reboiler (liquid product B).
     """
-    xnew = np.zeros((N, n))
-    for i in range(n):
-        a = np.zeros(N); b = np.zeros(N); c = np.zeros(N); d = np.zeros(N)
-        for j in range(N):
-            if j == 0:                          # top stage / condenser boundary
-                b[j] = -(L[0] + W[0] + (D + U[0]) * K[0, i])
-                c[j] = V[1] * K[1, i] if N > 1 else 0.0
-                d[j] = -Fz[0, i]
-            elif j == N - 1:                    # reboiler
-                a[j] = L[j - 1]
-                b[j] = -(B + W[j] + (V[j] + U[j]) * K[j, i])
-                d[j] = -Fz[j, i]
-            else:                               # interior
-                a[j] = L[j - 1]
-                b[j] = -(L[j] + W[j] + (V[j] + U[j]) * K[j, i])
-                c[j] = V[j + 1] * K[j + 1, i]
-                d[j] = -Fz[j, i]
-        xnew[:, i] = _thomas(a, b, c, d)
+    # All n component systems share one tridiagonal structure; build the bands
+    # as (N, n) arrays and let _thomas sweep them together (the per-stage
+    # Python loop here was the second-biggest cost of a whole column solve).
+    a = np.zeros((N, n)); b = np.empty((N, n)); c = np.zeros((N, n))
+    d = -np.asarray(Fz, float)
+    b[0] = -(L[0] + W[0] + (D + U[0]) * K[0])   # top stage / condenser boundary
+    if N > 1:
+        a[1:] = L[:-1, None]
+        c[:-1] = V[1:, None] * K[1:]
+        mid = slice(1, N - 1)                   # interior stages
+        b[mid] = -(L[mid, None] + W[mid, None] + (V[mid, None] + U[mid, None]) * K[mid])
+        b[-1] = -(B + W[-1] + (V[-1] + U[-1]) * K[-1])   # reboiler
+    xnew = _thomas(a, b, c, d)
     xnew = np.clip(xnew, 0.0, None)
     xnew /= xnew.sum(axis=1, keepdims=True)
     return xnew
+
+
+def _pumparound_terms(si: SolverInput, x_src):
+    """Effective per-stage terms for si.pumparounds (rows [i, j, P, Q]).
+
+    Wp:   (N,) internal liquid draw added at each draw stage i. It rides the same
+          diagonal as a side draw but is passed as an *effective* W so it never
+          enters the bottoms rate B (a pumparound recycles, it is not a product).
+    Rz:   (N, C) return source = P * x_src at the draw-stage composition, injected
+          at the return stage j as a known-composition feed. x_src is the (torn)
+          liquid profile the return carries; pass None when only the flow terms
+          are needed (Rz comes back zero).
+    Pret/Pdrw: (N,) liquid P returned at j / drawn at i, for the CMO L cascade.
+    The heat Q is not here -- it is folded into si.duty[j-1] at build time.
+    """
+    N, n = si.n_stages, si.n_comps
+    Wp = np.zeros(N); Pret = np.zeros(N); Pdrw = np.zeros(N)
+    Rz = np.zeros((N, n))
+    for i, j, Pf, _Q in si.pumparounds:
+        i, j = int(i), int(j)
+        Wp[i - 1] += Pf
+        Pret[j - 1] += Pf
+        Pdrw[i - 1] += Pf
+        if x_src is not None:
+            Rz[j - 1] += Pf * np.asarray(x_src)[i - 1]
+    return Wp, Rz, Pret, Pdrw
 
 
 def _cmo_flows(si: SolverInput):
@@ -97,14 +123,18 @@ def _cmo_flows(si: SolverInput):
             f"bottoms rate B={B:.4g} must be positive: distillate + side draws "
             "exceed the total feed")
 
+    # Pumparound liquid recirculates internally (returned at j, drawn at i>j), so
+    # it raises the liquid traffic on stages [j, i) without touching B or D.
+    _, _, Pret, Pdrw = _pumparound_terms(si, None)
+
     V = np.empty(N); L = np.empty(N)
     V[0] = (R + 1.0) * D
     for j in range(1, N):
         # stage balance: V[j] enters stage j-1 from below
         V[j] = V[j - 1] + U[j - 1] - (1.0 - q[j - 1]) * Fj[j - 1]
-    L[0] = R * D + q[0] * Fj[0] - W[0]
+    L[0] = R * D + q[0] * Fj[0] - W[0] + Pret[0] - Pdrw[0]
     for j in range(1, N - 1):
-        L[j] = L[j - 1] + q[j] * Fj[j] - W[j]
+        L[j] = L[j - 1] + q[j] * Fj[j] - W[j] + Pret[j] - Pdrw[j]
     if N > 1:
         L[N - 1] = B
     if np.any(V[1:] <= 0.0) or np.any(L[:-1] < 0.0):
@@ -157,6 +187,18 @@ def make_energy_balance(cp_liq, hvap_Tb, tb, tc, relax=0.5,
             W, U, Qd = si.liquid_draw, si.vapor_draw, si.duty
             R, D = si.R, si.D
 
+            # Pumparound mass + enthalpy: P liquid drawn at i (carrying local hLj[i])
+            # returns at j carrying that same hLj[i]. The cooling Q is already in
+            # Qd[j] (folded at build), so removing Q from the saturated return ==
+            # returning cooled liquid. In/out mass and enthalpy cancel over the
+            # column, so the Qr closure below is unchanged; only the internal L/V
+            # profile between j and i shifts.
+            _, _, Pret, Pdrw = _pumparound_terms(si, None)
+            hPret = np.zeros(N)
+            for pi, pj, pP, _pQ in si.pumparounds:
+                hPret[int(pj) - 1] += pP * hLj[int(pi) - 1]
+            hPdrw = Pdrw * hLj
+
             # Top boundary: reflux comes down as saturated liquid at stage 0;
             # V0 leaves stage 0 upward to the condenser.
             reflux_in = R * D
@@ -184,8 +226,9 @@ def make_energy_balance(cp_liq, hvap_Tb, tb, tc, relax=0.5,
                     liq_in, h_liq_in, Vj_up = reflux_in, h_ref0, V0
                 else:
                     liq_in, h_liq_in, Vj_up = Ln[j - 1], hLj[j - 1], Vn[j]
-                A = liq_in + F[j] - Vj_up - W[j] - U[j]     # L[j] - V[j+1]
+                A = liq_in + F[j] + Pret[j] - Pdrw[j] - Vj_up - W[j] - U[j]  # L[j]-V[j+1]
                 Ben = (liq_in * h_liq_in + F[j] * hFj[j] + Qd[j]
+                       + hPret[j] - hPdrw[j]
                        - Vj_up * hVj[j] - W[j] * hLj[j] - U[j] * hVj[j])
                 denom = hLj[j] - hVj[j + 1]                 # ~ -lambda, safely != 0
                 Vn[j + 1] = (Ben - A * hLj[j]) / denom
@@ -226,7 +269,12 @@ def _murphree_keff(K, x, efficiency):
     y_eq = K * x
     y_below = np.vstack([y_eq[1:], y_eq[-1:]])         # stage below; last row unused
     xs = np.where(x > 1e-30, x, 1e-30)
-    return eff[:, None] * K + (1.0 - eff[:, None]) * (y_below / xs)
+    # For a trace component (x -> 0 at a column end) the lagged ratio y_below/x
+    # is 0/0 noise and can reach ~1e9, wrecking the tridiagonal solve. When the
+    # profile is resolved the ratio is O(K), so cap it there; the cap only ever
+    # binds on trace compositions where the Murphree correction is meaningless.
+    ratio = np.minimum(y_below / xs, 100.0 * K)
+    return eff[:, None] * K + (1.0 - eff[:, None]) * ratio
 
 
 def _coerce_input(si_or_zF, F, antoine, comps, *, N, feed_stage, R, D, P,
@@ -332,6 +380,7 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     iterations = 0
     aborted = False
     dT = float("inf")
+    dx_prev = r_prev = None
     for iterations in range(1, max_iter + 1):
         if cancel is not None and cancel():
             aborted = True
@@ -339,17 +388,52 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         K = np.array([k_values(T[j], si.pressure[j], si.antoine, si.gamma_fn, x[j],
                                si.phi_fn) for j in range(Nst)])
         Keff = _murphree_keff(K, x, efficiency)
-        xnew = _stage_compositions(Keff, L, V, si.feed, si.liquid_draw,
+        # Pumparound: inject the recycle as an effective feed (return, carrying the
+        # current draw-stage composition) and an effective liquid draw (kept out of
+        # B). The recycle tear closes as x converges.
+        Wp, Rz, _, _ = _pumparound_terms(si, x)
+        xnew = _stage_compositions(Keff, L, V, si.feed + Rz,
+                                   si.liquid_draw + Wp,
                                    si.vapor_draw, B, si.D, Nst, n)
+        # T[j] is last iteration's stage temperature — a secant seed a fraction of
+        # a degree from the answer, instead of brentq re-bracketing 600 degrees.
         Tnew = np.array([bubble_T(xnew[j], si.pressure[j], si.antoine,
-                                  gamma_fn=si.gamma_fn, phi_fn=si.phi_fn)
+                                  gamma_fn=si.gamma_fn, phi_fn=si.phi_fn,
+                                  T_guess=T[j])
                          for j in range(Nst)])
         dT = np.max(np.abs(Tnew - T))
-        x, T = xnew, Tnew
+        dx, x, T = xnew - x, xnew, Tnew
         if report is not None:
             report(iterations, float(dT))
         if dT < tol:
             break
+
+        # Direct substitution crawls: for a column near a pinch the change per
+        # iteration decays geometrically with a near-constant ratio r (~0.99 for
+        # a plain BTX split), so the last decade of residual costs hundreds of
+        # iterations — 1248 to reach tol=1e-6 on the demo column, i.e. the 500
+        # default silently returned an unconverged profile. Once that ratio holds
+        # steady, sum the remaining geometric series (Aitken) and jump straight to
+        # the limit: same fixed point, 38 iterations instead of 1248.
+        if dx_prev is not None:
+            den = float(np.sum(dx_prev * dx_prev))
+            r = float(np.sum(dx * dx_prev)) / den if den > 0.0 else 0.0
+            if (0.5 < r < 0.999 and r_prev is not None
+                    and abs(r - r_prev) < 0.01):
+                x = x + dx * (r / (1.0 - r))
+                np.clip(x, 1e-12, 1.0, out=x)      # extrapolation must stay a
+                x /= x.sum(axis=1, keepdims=True)  # composition
+                T = np.array([bubble_T(x[j], si.pressure[j], si.antoine,
+                                       gamma_fn=si.gamma_fn, phi_fn=si.phi_fn,
+                                       T_guess=T[j])
+                              for j in range(Nst)])
+                # The jump invalidates the ratio estimate; re-learn it. (A bad
+                # extrapolation is safe, just wasted: the loop still only exits
+                # on a real dT < tol, so it re-converges from wherever it lands.)
+                dx_prev = r_prev = None
+                continue
+            r_prev = r
+        dx_prev = dx
 
     if aborted:
         message = "Aborted."
@@ -370,7 +454,8 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
 def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                      feed_stage=None, R=None, D=None, P=None,
                      max_iter=50, tol=1e-6, gamma_fn=None, efficiency=1.0,
-                     cancel=None, flows_hook=None, report=None):
+                     cancel=None, flows_hook=None, report=None,
+                     x0=None, T0=None):
     """Inside-Out (HYSIM-style) column solve.
 
     The defining two-tier structure: an OUTER loop refreshes rigorous K-values
@@ -381,6 +466,9 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
 
     cancel: optional callable -> bool; checked each outer pass for real Abort.
     report: optional callable (outer_iteration, dT_residual) for progress display.
+    x0/T0: optional (N,C)/(N,) warm-start profiles (stage 0 = top), same contract
+    as solve_bubble_point — a nearby converged column (e.g. the previous trial of
+    an operating-spec root-find) skips the slow front-placement phase entirely.
     flows_hook: optional callable (si, K, x, T, L, V) -> (L, V) — the energy-
     balance seam. Called once per outer pass after the rigorous K refresh; a
     stage-enthalpy balance plugs in here to free L/V from CMO and yield
@@ -396,11 +484,22 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     V, L, B = _cmo_flows(si)
 
     zmix = si.feed.sum(axis=0) / si.feed.sum()
-    T = np.full(Nst, bubble_T(zmix, float(np.mean(si.pressure)), si.antoine,
-                              gamma_fn=si.gamma_fn, phi_fn=si.phi_fn))
-    x = np.tile(zmix, (Nst, 1))
+    if T0 is not None and np.shape(T0) == (Nst,):
+        T = np.asarray(T0, float).copy()
+    else:
+        T = np.full(Nst, bubble_T(zmix, float(np.mean(si.pressure)), si.antoine,
+                                  gamma_fn=si.gamma_fn, phi_fn=si.phi_fn))
+    if x0 is not None and np.shape(x0) == (Nst, n):
+        x = np.asarray(x0, float).copy()
+        x = x / x.sum(axis=1, keepdims=True)
+    else:
+        x = np.tile(zmix, (Nst, 1))
     aborted = False
     outer = 0
+    dT = float("inf")
+    dx_prev = r_prev = jump = None
+    relax = 1.0
+    n_osc = 0
     # Inner loop converges base-K to the user `tol`; the outer temperature loop
     # uses a physical floor (1e-4 K) — tighter is meaningless and only chases a
     # negligible geometric tail from the base-K linearisation.
@@ -412,7 +511,8 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
             break
 
         # OUTER: rigorous K, base K_b (geometric mean), frozen relative volatilities
-        Kfull = np.array([k_values(T[j], si.pressure[j], si.antoine, si.gamma_fn,
+        x_outer_prev = x                         # inner loop rebinds x; keep the
+        Kfull = np.array([k_values(T[j], si.pressure[j], si.antoine, si.gamma_fn,  # pass-start iterate for Aitken
                                    x[j], si.phi_fn) for j in range(Nst)])
         Kfull = _murphree_keff(Kfull, x, efficiency)    # fold in stage efficiency
         Kb = np.exp(np.mean(np.log(Kfull), axis=1))     # (N,)
@@ -421,27 +521,101 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         if flows_hook is not None:                      # energy-balance seam
             L, V = flows_hook(si, Kfull, x, T, L, V)
 
+        # Pumparound recycle terms: torn on the outer-pass composition (like the
+        # frozen alpha) and reused through the inner loop -- the return carries the
+        # draw-stage liquid from the same iterate the hook enthalpies use.
+        Wp_pa, Rz_pa, _, _ = _pumparound_terms(si, x_outer_prev)
+        feed_eff = si.feed + Rz_pa
+        W_eff = si.liquid_draw + Wp_pa
         # INNER: hold alpha, iterate base K_b + compositions (cheap, no thermo)
         for _ in range(50):
             K = alpha * Kb[:, None]
-            xin = _stage_compositions(K, L, V, si.feed, si.liquid_draw,
+            xin = _stage_compositions(K, L, V, feed_eff, W_eff,
                                       si.vapor_draw, B, si.D, Nst, n)
             Kb_new = 1.0 / np.sum(alpha * xin, axis=1)  # bubble constraint per stage
             done = np.max(np.abs(Kb_new - Kb) / Kb) < tol
             Kb, x = Kb_new, xin
             if done:
                 break
+        if relax < 1.0:
+            # Oscillation damping engaged (see below): blend toward the previous
+            # outer iterate instead of full replacement.
+            x = x_outer_prev + relax * (x - x_outer_prev)
+            np.clip(x, 1e-12, 1.0, out=x)
+            x /= x.sum(axis=1, keepdims=True)
 
         # Refresh temperatures from rigorous thermo for the next outer alpha
         Tnew = np.array([bubble_T(x[j], si.pressure[j], si.antoine,
-                                  gamma_fn=si.gamma_fn, phi_fn=si.phi_fn)
+                                  gamma_fn=si.gamma_fn, phi_fn=si.phi_fn,
+                                  T_guess=T[j])          # secant seed, see _solve_T
                          for j in range(Nst)])
+        # Trust region: a chaotic transient can fling a stage temperature far
+        # enough to leave the vapour-pressure fit's sane range; cap the per-pass
+        # move (converging steps are << this, so the cap never binds late).
+        np.clip(Tnew, T - 30.0, T + 30.0, out=Tnew)
         dT = np.max(np.abs(Tnew - T))
-        T = Tnew
+        dx, T = x - x_outer_prev, Tnew
+        if jump is not None:
+            # Last pass ended in an Aitken jump. Unlike bubble-point, this outer
+            # map is only a contraction near the fixed point (the inner loop runs
+            # on alpha frozen at the jumped-to x), so a long jump can land outside
+            # the basin and start a limit cycle. Verify it actually helped; if
+            # not, roll back and resume plain iteration from the pre-jump state.
+            x_pre, T_pre, dT_pre = jump
+            jump = None
+            # A good long jump still shows one sizeable dT (it measures the move
+            # to the new neighbourhood), so only a clear blow-up gets rolled back.
+            if dT > 10.0 * dT_pre:
+                x, T = x_pre, T_pre
+                dx_prev = r_prev = None
+                continue
         if report is not None:
             report(outer, float(dT))
         if dT < outer_tol:
             break
+
+        # With composition-sensitive K (activity model + Murphree lag) the frozen
+        # alpha makes this outer loop plain direct substitution — ratio ~0.99+ on
+        # a real non-ideal column, i.e. hundreds of outer passes. Same cure as
+        # solve_bubble_point above: once the geometric ratio holds steady, sum the
+        # remaining series (Aitken) and jump to the limit; the guard above reverts
+        # any jump that fails to contract, so the loop still only exits on a
+        # genuine dT < outer_tol.
+        if dx_prev is not None:
+            den = float(np.sum(dx_prev * dx_prev))
+            r = float(np.sum(dx * dx_prev)) / den if den > 0.0 else 0.0
+            # Sign-flipping steps two passes running = genuine oscillation (the
+            # composition front bouncing between stages, not marching): halve the
+            # relaxation. Rescues operating points where full-replacement
+            # substitution is a limit cycle; never triggers on healthy columns.
+            n_osc = n_osc + 1 if r < -0.3 else 0
+            if n_osc >= 2 and relax > 0.3:
+                relax *= 0.5
+                n_osc = 0
+            steady = r_prev is not None and abs(r - r_prev) < 0.01
+            if steady and (0.5 < r < 0.999 or 0.999 <= r < 1.02):
+                # r < 0.999: geometric tail -> sum the series (Aitken), capped:
+                # at r ~ 0.998 the raw factor is ~500, which overshoots the
+                # linear regime, trips the revert guard every time, and leaves
+                # plain substitution (a depropanizer sat at ratio 0.998 for 1800
+                # passes that way). Capped jumps survive the guard and compound.
+                # r ~ 1: a composition front *translating* down the column at
+                # ~1 stage per ~10 passes (a near-neutral mode; measured on a
+                # 45-stage azeotropic column, which spent 200 of 280 passes just
+                # marching the MEOH front into place) -> take 10 steps at once.
+                factor = min(r / (1.0 - r), 30.0) if r < 0.999 else 10.0
+                jump = (x, T, dT)
+                x = x + dx * factor
+                np.clip(x, 1e-12, 1.0, out=x)      # extrapolation must stay a
+                x /= x.sum(axis=1, keepdims=True)  # composition
+                T = np.array([bubble_T(x[j], si.pressure[j], si.antoine,
+                                       gamma_fn=si.gamma_fn, phi_fn=si.phi_fn,
+                                       T_guess=T[j])
+                              for j in range(Nst)])
+                dx_prev = r_prev = None
+                continue
+            r_prev = r
+        dx_prev = dx
 
     # Terminal duties. With an energy-balance hook they are real outputs of the
     # stage-enthalpy balance; otherwise fall back to the latent-heat estimate
@@ -454,11 +628,20 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         Qc = -V[0] * lam_top if si.condenser == "total" else -si.R * si.D * lam_top
         Qr = V[-1] * lam_bot
 
+    if aborted:
+        message = "Aborted."
+    elif dT < outer_tol:
+        message = "Converged (Inside-Out)."
+    else:
+        # same honesty as bubble-point: the profile is usable, but say the
+        # outer temperature loop ran out of budget instead of claiming tol
+        message = (f"Inside-Out: max iterations ({max_iter}) reached, "
+                   f"dT residual {dT:.1e} degC.")
     return _finish_profile(si, x, T, L, V, B, efficiency=efficiency, extra={
-        "iterations": outer,
+        "iterations": outer, "residual": float(dT),
         "condenser_duty": Qc, "reboiler_duty": Qr,
         "found": not aborted,
-        "message": "Aborted." if aborted else "Converged (Inside-Out).",
+        "message": message,
     })
 
 
@@ -552,6 +735,12 @@ def _demo():
     assert 20e3 < np.mean(io["enthalpy"]) < 60e3, np.mean(io["enthalpy"])
     assert io["condenser_duty"] < 0.0 < io["reboiler_duty"]
     assert io["iterations"] >= 1
+    # Inside-Out reports its residual and admits running out of budget (it used
+    # to claim "Converged" unconditionally).
+    assert io["residual"] < 1e-4, io["residual"]
+    assert "max iterations" in solve_inside_out(zF, F, abc, comps, N=20,
+                                                feed_stage=10, R=3.0, D=40.0,
+                                                P=760.0, max_iter=1)["message"]
     assert solve_inside_out(zF, F, abc, comps, N=20, feed_stage=10, R=3.0,
                             D=40.0, P=760.0, cancel=lambda: True)["message"] == "Aborted."
 
@@ -562,12 +751,20 @@ def _demo():
     ticks = []
     pr = solve_bubble_point(si, report=lambda i, r: ticks.append((i, r)))
     assert ticks and ticks[0][0] == 1 and ticks[-1][1] == pr["residual"]
-    assert ticks[-1][1] < 1e-3          # tight-tol runs end in the slow tail...
-    assert "max iterations" in pr["message"], pr["message"]   # ...and say so
+    # Aitken retires the geometric tail: a tight tol now converges inside the
+    # default budget (it used to run out of iterations and say so).
+    assert pr["residual"] < 1e-6 and "Converged" in pr["message"], pr["message"]
+    assert pr["iterations"] < 100, pr["iterations"]
     assert "Converged" in solve_bubble_point(si, tol=1e-3)["message"]
+    # ...and a budget too small to converge in still reports the shortfall.
+    assert "max iterations" in solve_bubble_point(si, max_iter=3)["message"]
+    # The accelerated fixed point is the one plain substitution crawls to.
+    slow = solve_bubble_point(si, max_iter=20000, tol=1e-9)
+    assert np.allclose(pr["xD"], slow["xD"], atol=1e-4), (pr["xD"], slow["xD"])
     ticks = []
     solve_inside_out(si, report=lambda i, r: ticks.append((i, r)))
     assert ticks and ticks[-1][1] < 1e-3
+
 
     # flows_hook is the energy-balance seam: it is called and its L/V are used.
     calls = []
@@ -614,6 +811,25 @@ def _demo():
         (io_sub["condenser_duty"], Qc)                 # more heat removed (more negative)
     L_base = np.asarray(io_eb["liquid_flow"]); L_sub = np.asarray(io_sub["liquid_flow"])
     assert L_sub[0] > L_base[0], (L_sub[0], L_base[0])  # colder reflux -> more internal L
+
+    # Pumparound: an internal cooled recycle. Products are unchanged (not a
+    # product draw); the removed heat Q loads the reboiler; and under CMO the
+    # recirculated P raises the liquid flow by exactly P over [j-1, i-1).
+    Qpa = 2.0e5
+    si_pa = build_solver_input(
+        n_stages=20, comps=comps, feeds=[(10, F, zF)], R=3.0, D=40.0,
+        pressure=760.0, antoine=abc, pumparounds=[(14, 6, 25.0, Qpa)])
+    io_pa = solve_inside_out(si_pa, flows_hook=make_energy_balance(
+        cp_l, hv_tb, tb_k, tc_k), max_iter=120)
+    assert io_pa["found"], io_pa["message"]
+    assert abs(io_pa["D"] - 40.0) < 1e-9 and abs(io_pa["B"] - (F - 40.0)) < 1e-9
+    assert np.allclose(F * zF, io_pa["D"] * io_pa["xD"] + io_pa["B"] * io_pa["xB"],
+                       atol=1e-2), "pumparound broke the mass balance"
+    assert io_pa["reboiler_duty"] > io_eb["reboiler_duty"], "Q not loading the reboiler"
+    Lp = np.asarray(solve_inside_out(si_pa)["liquid_flow"])   # CMO flows
+    Lb = np.asarray(solve_inside_out(si)["liquid_flow"])
+    dL = np.zeros(20); dL[5:13] = 25.0                        # i=14, j=6 -> idx 5..12
+    assert np.allclose(Lp - Lb, dL, atol=1e-6), np.round(Lp - Lb, 3)
 
     # Inside-Out with a side draw agrees with bubble-point's closure too
     io_sd = solve_inside_out(si_sd)

@@ -15,6 +15,11 @@ from PySide6.QtWidgets import QLineEdit, QWidget
 from ..theme.palette import canvas as _canvas
 
 
+def _is_section(module: dict) -> bool:
+    """Side stripper / side rectifier — a little column, not a heat exchanger."""
+    return module["type"] in ("Side Stripper", "Side Rectifier")
+
+
 class DraggableItem:
     """Base class for draggable items on the column diagram."""
 
@@ -79,6 +84,7 @@ class ColumnOverviewCanvas(QWidget):
         self.module_data = []
 
         self.stream_hits = {}  # stream id -> chip QRectF (rebuilt per paint)
+        self._product_module = {}  # side-product chip label -> module element_type
         self.selected_stream = None
         self.hover_stream = None
 
@@ -123,16 +129,26 @@ class ColumnOverviewCanvas(QWidget):
         self.update()
 
     def set_streams(self, feeds: list, products: list, modules: list):
+        """modules: dicts {id, type, stage, return_stage, rate, duty} — the canvas
+        needs the return stage and type to draw a module where it really sits."""
         self.feed_data = feeds
         self.product_data = products
         self.module_data = modules
 
-        for _, name, mtype in modules:
-            m_id = f"module_{name}"
+        live = set()
+        for m in modules:
+            m_id = f"module_{m['id']}"
+            live.add(m_id)
             if m_id not in self.items:
-                self.items[m_id] = DraggableItem(m_id, name, 0.2, 0.5)
-                self.items[m_id].width = 50
-                self.items[m_id].height = 40
+                # x/y are re-anchored to the draw stage every paint; the item
+                # keeps its own drag offset on top of that.
+                item = DraggableItem(m_id, m["id"], 0.2, 0.5)
+                item.width, item.height = (
+                    (46, 60) if _is_section(m) else (50, 40))
+                self.items[m_id] = item
+        for stale in [k for k in self.items
+                      if k.startswith("module_") and k not in live]:
+            del self.items[stale]
 
         self.update()
 
@@ -143,11 +159,13 @@ class ColumnOverviewCanvas(QWidget):
 
         w, h = self.width(), self.height()
         self.stream_hits = {}
+        self._product_module = {}
 
         for item in self.items.values():
             item.update_rect(w, h)
 
         col = self.items["column"]
+        self._anchor_modules(col.rect, w, h)
         self._draw_column_shell(painter, col)
 
         input_pos = col.rect.center()
@@ -164,9 +182,9 @@ class ColumnOverviewCanvas(QWidget):
         rebo = self.items["reboiler"]
         self._draw_reboiler(painter, rebo)
 
-        for item_id, item in self.items.items():
-            if item_id.startswith("module_"):
-                self._draw_module(painter, item)
+        for m in self.module_data:
+            self._draw_module(painter, self.items[f"module_{m['id']}"], m,
+                              col.rect)
 
         self._draw_all_streams(painter)
 
@@ -234,20 +252,100 @@ class ColumnOverviewCanvas(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
 
-    def _draw_equip_label(self, painter, rect, text):
+    def _draw_equip_label(self, painter, rect, text, above=False):
         painter.setPen(QPen(QColor(_canvas.LABEL)))
         painter.setFont(QFont("Arial", 8, QFont.Bold))
-        label_rect = QRectF(rect.left() - 20, rect.bottom() + 2, rect.width() + 40, 14)
+        y = rect.top() - 16 if above else rect.bottom() + 2
+        label_rect = QRectF(rect.left() - 20, y, rect.width() + 40, 14)
         painter.drawText(label_rect, Qt.AlignCenter, text)
 
-    def _draw_module(self, painter, item):
+    def _anchor_modules(self, col_rect, w, h):
+        """Park every module beside the tray it hangs off (left corridor, clear of
+        the feed chips). The user's drag offset rides on top of the anchor, so a
+        module that is moved stays moved but still follows its stage."""
+        if not (w and h):
+            return
+        x = (col_rect.left() - 100) / w
+        last = None
+        for m in sorted(self.module_data, key=lambda m: m["stage"]):
+            item = self.items.get(f"module_{m['id']}")
+            if item is None:
+                continue
+            y = self._stage_to_y(col_rect, m["stage"])
+            # modules on nearby trays would sit on top of each other; slide the
+            # crowded one down the corridor. Its draw/return lines still point at
+            # the real tray, so the picture stays truthful.
+            if last is not None:
+                y = max(y, last + item.height + 52)   # room for label + product arrow
+            last = y
+            item.x = x
+            item.y = min(y, h - item.height / 2) / h
+            item.update_rect(w, h)
+
+    def _draw_module(self, painter, item, module, col_rect):
+        """Symbol + the lines that say what the module does to the column."""
         rect = item.rect
+        mtype = module["type"]
+        green = self.INTERNAL_COLOR
+        draw_y = self._stage_to_y(col_rect, module["stage"])
+        ret_y = (draw_y if module.get("return_stage") is None
+                 else self._stage_to_y(col_rect, module["return_stage"]))
+        right = QPointF(rect.right(), rect.center().y())
+
         painter.setPen(QPen(QColor(_canvas.SHELL_STROKE), 2))
         painter.setBrush(QBrush(QColor(_canvas.MODULE_FILL)))
-        painter.drawRect(rect)
+        if _is_section(module):
+            painter.drawRoundedRect(rect, 6, 6)
+            painter.setPen(QPen(QColor(_canvas.TRAY), 1, Qt.DashLine))
+            for f in (0.3, 0.5, 0.7):
+                y = rect.top() + rect.height() * f
+                painter.drawLine(rect.left() + 4, y, rect.right() - 4, y)
+        else:
+            painter.drawRect(rect)
+            self._draw_hx_coil(painter, rect, bumps=1.5)
+        # a section's product arrow leaves the end its product comes off, so the
+        # name goes on the other end
+        self._draw_equip_label(painter, rect, module["id"],
+                               above=mtype == "Side Stripper")
 
-        painter.setFont(QFont("Arial", 8))
-        painter.drawText(rect, Qt.AlignCenter, item.display_name)
+        if mtype == "Interreboiler":
+            # a heat term on one tray: arrow points into the column when heating
+            heating = (module.get("duty") or 0.0) >= 0.0
+            path = [right, QPointF(col_rect.left(), draw_y)]
+            self._draw_orthogonal_path(
+                painter, path if heating else list(reversed(path)),
+                "+Q" if heating else "−Q", green, arrow_at_end=True)
+            return
+
+        # Draw side (liquid or vapour out of the column) and return side.
+        self._draw_orthogonal_path(
+            painter, [QPointF(col_rect.left(), draw_y),
+                      QPointF(rect.right() + 12, draw_y),
+                      QPointF(rect.right() + 12, rect.center().y()), right],
+            "draw", green, arrow_at_end=True)
+        self._draw_orthogonal_path(
+            painter, [QPointF(rect.left(), rect.center().y()),
+                      QPointF(rect.left() - 14, rect.center().y()),
+                      QPointF(rect.left() - 14, ret_y),
+                      QPointF(col_rect.left(), ret_y)],
+            "return", green, arrow_at_end=True)
+
+        if _is_section(module):
+            # the side product leaves the section (stripper bottoms / rectifier
+            # distillate) — a real product stream, so it gets a clickable chip
+            # just like the distillate/bottoms chips; clicking it opens the
+            # module editor (the module config is what defines the product).
+            from_bottom = mtype == "Side Stripper"
+            start = QPointF(rect.center().x(),
+                            rect.bottom() if from_bottom else rect.top())
+            end = QPointF(start.x(), start.y() + (24 if from_bottom else -24))
+            self._draw_orthogonal_path(painter, [start, end], "",
+                                       self.PRODUCT_COLOR, arrow_at_end=True)
+            label = f"{module['id']} product"
+            self._draw_stream_chip(
+                painter, QPointF(end.x(), end.y() + (10 if from_bottom else -10)),
+                label, self.PRODUCT_COLOR, center=True)
+            self._product_module[label] = item.element_type
 
     def _stage_to_y(self, col_rect, stage):
         # Stages are 0-based from the top: 0 = distillate, num_stages-1 = bottoms.
@@ -400,14 +498,20 @@ class ColumnOverviewCanvas(QWidget):
                     self.PRODUCT_COLOR,
                 )
 
-    def _draw_stream_chip(self, painter, anchor, label, color_hex, align_right=False):
+    def _draw_stream_chip(self, painter, anchor, label, color_hex,
+                          align_right=False, center=False):
         """Clickable stream label: a rounded chip anchored at the arrow end.
         Hover tints it, selection fills it; its rect is the click hit-zone."""
         painter.setFont(QFont("Arial", 8, QFont.Bold))
         fm = painter.fontMetrics()
         w = fm.horizontalAdvance(label) + 14
         h = fm.height() + 6
-        x = anchor.x() - w if align_right else anchor.x()
+        if center:
+            x = anchor.x() - w / 2
+        elif align_right:
+            x = anchor.x() - w
+        else:
+            x = anchor.x()
         rect = QRectF(x, anchor.y() - h / 2, w, h)
 
         selected = label == self.selected_stream
@@ -516,11 +620,16 @@ class ColumnOverviewCanvas(QWidget):
         for sid, rect in self.stream_hits.items():
             if rect.contains(pos):
                 self.selected_stream = sid
-                self.streamClicked.emit(sid)
+                target = self._product_module.get(sid)
+                if target:                       # side-product chip -> its module
+                    self.elementClicked.emit(target)
+                else:
+                    self.streamClicked.emit(sid)
                 return
         for item in reversed(list(self.items.values())):
             if item.contains(pos):
-                if item.element_type in ("condenser", "reboiler"):
+                if (item.element_type in ("condenser", "reboiler")
+                        or item.element_type.startswith("module_")):
                     self.selected_stream = None
                     self.elementClicked.emit(item.element_type)
                 return

@@ -51,12 +51,20 @@ class SolverInput:
     subcooling: float = 0.0     # reflux/distillate ΔT below the bubble point at
                                 # the condenser (total condenser only); 0 = sat.
                                 # liquid. Consumed by the energy-balance hook.
+    pumparounds: Optional[np.ndarray] = None   # (M, 4) rows [i, j, P, Q]: draw
+                                # liquid rate P at stage i (1-based), return it to
+                                # a higher stage j (j < i) cooled by duty Q. Draw
+                                # is internal (not a product); the -Q cooling is
+                                # already folded into duty[] at build time (the Q
+                                # column here is retained only for reporting).
     # ponytail: gamma_fn is a closure now; stage 2 swaps it for (model_id, params)
     # so the entire input marshals to C/FORTRAN. The arrays above already do.
 
     def __post_init__(self):
         if self.q is None:
             self.q = np.ones(self.n_stages)
+        if self.pumparounds is None:
+            self.pumparounds = np.zeros((0, 4))
         if self.condenser == "none" and abs(self.R) > 1e-12:
             raise ValueError("a column without a condenser has no reflux; R must be 0")
 
@@ -90,6 +98,7 @@ def build_solver_input(
     antoine,
     draws: Sequence[Tuple[int, float, float]] = (),
     duties: Sequence[Tuple[int, float]] = (),
+    pumparounds: Sequence[Tuple[int, int, float, float]] = (),
     gamma_fn: Optional[Callable] = None,
     phi_fn: Optional[Callable] = None,
     condenser: str = "total",
@@ -102,6 +111,12 @@ def build_solver_input(
               (1 = saturated liquid, the default; 0 = saturated vapour)
     draws:    (stage, liquid_rate, vapor_rate)
     duties:   (stage, heat)
+    pumparounds: (draw_stage i, return_stage j, rate P, duty Q) -- draw liquid
+              rate P at interior stage i, return it (cooled by removing heat Q)
+              to a higher interior stage j (j < i). The draw is internal, so it
+              never reduces the bottoms product; the -Q cooling is scattered onto
+              duty[j-1] here (so it needs the energy balance to take effect, same
+              as an interheater/intercooler).
     pressure: scalar (uniform) or length-N sequence.
 
     A single-element `feeds` reproduces the legacy single-feed column; more than
@@ -139,6 +154,27 @@ def build_solver_input(
         _check_stage(stage, N)
         duty[stage - 1] += float(q)
 
+    # Pumparounds: draw at i, cooled return to a higher stage j (j < i). Both
+    # stages must be interior (the condenser stage 1 has a special reflux branch;
+    # the reboiler stage N is never swept by the energy-balance envelope). The
+    # cooling Q is folded into duty[j-1] now so the energy hook applies it exactly
+    # like an intercooler; the solvers read i, j, P from the stored array.
+    pa_rows = []
+    for i, j, Pflow, Q in pumparounds:
+        i, j = int(i), int(j)
+        if not (2 <= i <= N - 1):
+            raise ValueError(
+                f"pumparound draw stage {i} must be interior (2..{N - 1})")
+        if not (2 <= j < i):
+            raise ValueError(
+                f"pumparound return stage {j} must be interior and above the "
+                f"draw stage (2..{i - 1})")
+        if float(Pflow) <= 0.0:
+            raise ValueError(f"pumparound rate {Pflow} must be positive")
+        duty[j - 1] += -float(Q)
+        pa_rows.append((float(i), float(j), float(Pflow), float(Q)))
+    pa_arr = np.asarray(pa_rows, float).reshape(-1, 4)
+
     P = np.asarray(pressure, float)
     if P.ndim == 0:
         P = np.full(N, float(P))
@@ -154,6 +190,7 @@ def build_solver_input(
         pressure=P, antoine=np.asarray(antoine, float),
         R=float(R), D=float(D), gamma_fn=gamma_fn, phi_fn=phi_fn, q=q,
         condenser=str(condenser).lower(), subcooling=float(subcooling),
+        pumparounds=pa_arr,
     )
 
 

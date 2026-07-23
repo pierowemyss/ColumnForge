@@ -18,6 +18,14 @@ from gui.state.window_state import (
 )
 
 
+def _module_to_config(m: ModuleConfig) -> dict:
+    """ModuleConfig -> the dict ModuleConfigPanel.set_config takes."""
+    return {"type": m.module_type.value, "stage": m.stage,
+            "num_stages": m.num_stages, "boilup_ratio": m.boilup_ratio,
+            "reflux_ratio": m.reflux_ratio, "duty": m.duty,
+            "return_stage": m.return_stage, "rate": m.rate}
+
+
 class SpecificationsTab(QWidget):
     """Specifications tab with static side labels and direct content display."""
 
@@ -260,6 +268,12 @@ class SpecificationsTab(QWidget):
         self.ov_stream_panel.streamChanged.connect(self._on_ov_stream_changed)
         self.ov_editor_stack.addWidget(self.ov_stream_panel)
 
+        # Page 4: the same module editor the Advanced Modules subtab uses, so a
+        # module clicked on the diagram is configured without leaving the canvas.
+        self.ov_module_panel = ModuleConfigPanel(self)
+        self.ov_module_panel.configChanged.connect(self._on_ov_module_changed)
+        self.ov_editor_stack.addWidget(self.ov_module_panel)
+
         ov_config_layout.addWidget(self.ov_editor_stack)
         layout.addWidget(self.ov_config_group, 1)
 
@@ -275,13 +289,13 @@ class SpecificationsTab(QWidget):
         list_group = QGroupBox("Module List")
         list_layout = QVBoxLayout(list_group)
 
-        # Honest UI (same policy as the greyed-out thermo models): a module
-        # raises the DoF spec count but no solver consumes it and the run
-        # path requires exactly 2 operating specs — a column with a module can
-        # never run. Block adding instead of leaving that dead end open.
-        note = QLabel("Modules are not yet solvable — adding is disabled "
-                      "until complex-column support lands. Modules in a "
-                      "loaded file can still be deleted.")
+        # Every type here is solved. Interreboiler/pumparound are heat terms and
+        # need the energy balance; side strippers/rectifiers work under CMO too.
+        # Each module also adds its own DoF specs — see the status above.
+        note = QLabel("Interreboiler/intercooler and pumparound need the energy "
+                      "balance (Initialization → Flow Model). Side strippers and "
+                      "rectifiers are solved as torn side columns and export a "
+                      "side product.")
         note.setWordWrap(True)
         note.setProperty("hint", True)
         list_layout.addWidget(note)
@@ -296,14 +310,10 @@ class SpecificationsTab(QWidget):
 
         self.add_module_btn = QPushButton("Add")
         self.add_module_btn.clicked.connect(self._add_module)
-        self.add_module_btn.setEnabled(False)
-        self.add_module_btn.setToolTip(
-            "Modules are not yet solvable — coming with complex-column "
-            "support.")
+        self.add_module_btn.setToolTip("Add a module of the type chosen alongside.")
 
         self.module_type_combo = QComboBox(self)
-        self.module_type_combo.addItems(["Interreboiler", "Side Stripper", "Side Rectifier"])
-        self.module_type_combo.setEnabled(False)
+        self.module_type_combo.addItems([t.value for t in ModuleType])
 
         self.remove_module_btn = QPushButton("Delete")
         self.remove_module_btn.clicked.connect(self._remove_module)
@@ -347,6 +357,16 @@ class SpecificationsTab(QWidget):
             self._load_reboiler_into(self.ov_reboiler_panel)
             self.ov_editor_stack.setCurrentWidget(self.ov_reboiler_panel)
             self.ov_config_group.setTitle("Reboiler Configuration")
+        elif element_type.startswith("module_"):
+            mid = element_type[len("module_"):]
+            m = self.window_state.modules.get(mid) if self.window_state else None
+            if m is None:
+                self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
+                return
+            self.current_module_id = mid            # what the editor writes back to
+            self.ov_module_panel.set_config(_module_to_config(m))
+            self.ov_editor_stack.setCurrentWidget(self.ov_module_panel)
+            self.ov_config_group.setTitle(f"{mid} Configuration")
         else:
             # column body / trays / modules: no dedicated editor yet
             self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
@@ -435,11 +455,7 @@ class SpecificationsTab(QWidget):
                 if m is not None:
                     # restore the stored config (previously reset to defaults,
                     # losing stage/duty/num_stages on every reselect)
-                    self.module_config.set_config({
-                        "type": m.module_type.value, "stage": m.stage,
-                        "num_stages": m.num_stages, "boilup_ratio": m.boilup_ratio,
-                        "reflux_ratio": m.reflux_ratio, "duty": m.duty,
-                        "associated_streams": m.associated_streams})
+                    self.module_config.set_config(_module_to_config(m))
                 else:
                     self.module_config.set_config({
                         "type": self.current_module_id.split(" - ")[0]
@@ -593,25 +609,43 @@ class SpecificationsTab(QWidget):
         self._update_dof_status()
         self.specsChanged.emit()
 
-    def _sync_module_to_state(self):
-        """Persist the current module panel config into window_state.modules so it
+    def _on_ov_module_changed(self):
+        """Same, for the module editor inline on the Column Overview page. Keeps
+        the Advanced Modules panel in step so the two never show different
+        numbers for one module."""
+        self._sync_module_to_state(self.ov_module_panel)
+        m = (self.window_state.modules.get(self.current_module_id)
+             if self.window_state else None)
+        if m is not None and self.module_list.currentRow() >= 0:
+            item = self.module_list.item(self.module_list.currentRow(), 0)
+            if item and item.text() == self.current_module_id:
+                self.module_config.set_config(_module_to_config(m))
+        self._update_column_canvas()
+        self._update_dof_status()
+        self.specsChanged.emit()
+
+    def _sync_module_to_state(self, panel=None):
+        """Persist a module panel's config into window_state.modules so it
         survives Save/Load and feeds DoF. No-op without a selected module."""
         if not self.window_state or not self.current_module_id:
             return
-        cfg = self.module_config.get_config()
+        cfg = (panel or self.module_config).get_config()
         try:
             mtype = ModuleType(cfg.get("type", "Interreboiler"))
         except ValueError:
             mtype = ModuleType.INTERREBOILER  # unknown label -> safe default
+        rs = cfg.get("return_stage")
         self.window_state.modules[self.current_module_id] = ModuleConfig(
             module_type=mtype,
             stage=int(cfg.get("stage", 1)),
-            num_stages=int(cfg.get("num_stages", 1)),
+            num_stages=int(cfg.get("num_stages") or 1),
             boilup_ratio=cfg.get("boilup_ratio"),
             reflux_ratio=cfg.get("reflux_ratio"),
             duty=cfg.get("duty"),
-            associated_streams=cfg.get("associated_streams", {}),
+            return_stage=int(rs) if rs is not None else None,
+            rate=cfg.get("rate"),
         )
+        self.window_state.mark_modified()
 
     def _add_stream(self):
         """Add a new stream."""
@@ -663,7 +697,15 @@ class SpecificationsTab(QWidget):
         self.module_list.setItem(row, 0, QTableWidgetItem(module_id))
         self.current_module_id = module_id
         self.module_list.setCurrentCell(row, 0)
-        self.module_config.set_config({"type": module_type})
+        # Sensible starting geometry: draw mid-column, return one tray away in the
+        # direction that type requires (up for a stripper/pumparound, down for a
+        # rectifier) — an invalid pair would refuse to solve.
+        n = self.window_state.num_stages if self.window_state else 20
+        draw = max(2, min(n - 2, n // 2))
+        down = module_type == ModuleType.SIDE_RECTIFIER.value
+        self.module_config.set_config({
+            "type": module_type, "stage": draw,
+            "return_stage": draw + 1 if down else draw - 1, "num_stages": 4})
         self._sync_module_to_state()
         self._update_column_canvas()
         self.specsChanged.emit()
@@ -707,7 +749,13 @@ class SpecificationsTab(QWidget):
                 products.append((_stage(stream, 10), stream_id, "sidestream"))
 
         for module_id, module in self.window_state.modules.items():
-            modules.append((module.stage, module_id, module.module_type.value.lower()))
+            modules.append({
+                "id": module_id, "type": module.module_type.value,
+                "stage": max(0, min(num_stages - 1, module.stage)),
+                "return_stage": (None if module.return_stage is None else
+                                 max(0, min(num_stages - 1, module.return_stage))),
+                "rate": module.rate, "duty": module.duty,
+            })
 
         # Feed stage on the canvas comes from the actual feed streams, not a
         # hardcoded default (plan Phase 2).

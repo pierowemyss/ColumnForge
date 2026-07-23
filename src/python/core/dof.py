@@ -40,6 +40,12 @@ class SpecKind(Enum):
     SIDEDRAW_RATE = "Side-draw rate"
     CONDENSER_DUTY = "Condenser duty"   # requires energy balance
     REBOILER_DUTY = "Reboiler duty"     # requires energy balance
+    # Side-module knobs (unit_ref = the module id). Deliberately outside
+    # OPERATING_KINDS: they are given values on their own unit, never free knobs
+    # of the main column, so the operating-point resolver never sees them.
+    MODULE_DUTY = "Module duty"         # requires energy balance
+    MODULE_RATE = "Module rate"         # circulation / draw rate
+    MODULE_RATIO = "Module boilup or reflux ratio"
 
 
 # Operating specs that pin a simple column's two free knobs (reflux R, distillate
@@ -56,7 +62,8 @@ OPERATING_KINDS = frozenset({
 
 
 # Spec kinds that are only meaningful once the energy balance is active.
-ENERGY_ONLY = frozenset({SpecKind.CONDENSER_DUTY, SpecKind.REBOILER_DUTY})
+ENERGY_ONLY = frozenset({SpecKind.CONDENSER_DUTY, SpecKind.REBOILER_DUTY,
+                         SpecKind.MODULE_DUTY})
 
 
 @dataclass(frozen=True)
@@ -160,6 +167,18 @@ def _demo():
             Spec(SpecKind.BOILUP_RATIO, 1.5, "reboiler")]
     assert simple.analyze(duty).status == "invalid"
     assert DoFAnalyzer(n_components=3, energy_balance=True).analyze(duty).status == "exact"
+
+    # A side stripper adds a duty unit + an extra product (2 specs): its draw rate
+    # and boilup ratio. Both are CMO-valid, unlike a module *duty*.
+    stripped = DoFAnalyzer(n_components=3, module_spec_counts=[2])
+    side = [Spec(SpecKind.REFLUX_RATIO, 2.0, "condenser"),
+            Spec(SpecKind.BOILUP_RATIO, 1.5, "reboiler"),
+            Spec(SpecKind.MODULE_RATE, 30.0, "Side Stripper 1"),
+            Spec(SpecKind.MODULE_RATIO, 1.2, "Side Stripper 1")]
+    assert stripped.analyze(side).status == "exact", stripped.analyze(side)
+    assert stripped.analyze(side[:3]).status == "under"
+    assert stripped.analyze(side[:2] + [Spec(SpecKind.MODULE_DUTY, 5.0, "M1")]
+                            ).status == "invalid"        # duty needs the energy balance
 
     assert simple.analyze([Spec(SpecKind.REFLUX_RATIO, 2.0, "condenser")]).status == "under"
     assert simple.analyze([Spec(SpecKind.REFLUX_RATIO, 2.0, "condenser"),
