@@ -17,7 +17,7 @@ ifeq ($(UNAME), Darwin)
     endif
 endif
 
-CFLAGS = -Wall -fPIC -I$(GSL_PREFIX)/include
+CFLAGS = -Wall -fPIC -arch x86_64 -I$(GSL_PREFIX)/include
 FFLAGS = -fPIC -I$(MINPACK_MOD_DIR)
 LDFLAGS = -L$(GSL_PREFIX)/lib -L$(MINPACK_DIR) -Wl,-rpath,@loader_path/../lib
 
@@ -25,7 +25,8 @@ LDLIBS = -lgsl -lgslcblas -lgfortran -lminpack
 
 # Source files
 C_SOURCES = ../src/native/RCM_solv.c
-FORTRAN_SOURCES = ../src/native/nifco.f90
+FORTRAN_SOURCES = ../../../native/nifco2.f90
+# FORTRAN_SOURCES = ../src/native/nifco.f90
 
 # Object files
 C_OBJS = $(C_SOURCES:.c=.o)
@@ -39,7 +40,7 @@ all: $(TARGET)
 
 # Build shared library
 $(TARGET): $(C_OBJS) $(FORTRAN_OBJS)
-	$(CC) -shared -o $@ $^ $(LDFLAGS) $(LDLIBS)
+	$(FC) -shared -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 # Compile C source files
 %.o: %.c

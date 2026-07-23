@@ -98,7 +98,7 @@ subroutine SRK(x,T,P,TcCel,Pc,omega,NComps,phi)
     real(8) :: Z(n), fvec(n), wa(lwa)
     real(8) :: tol
 
-    real(4), parameter :: R = 8.14
+    real(8), parameter :: R = 8.314472
     
     Tc = TcCel + 273.15
     Tr = (T+273.15)/Tc
