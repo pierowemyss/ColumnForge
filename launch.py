@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-FreeColumn - Column Solver GUI Launcher
+ColumnForge - Column Solver GUI Launcher
 
-Launch script for the FreeColumn column solver application.
+Launch script for the ColumnForge column solver application.
 Provides a clean entry point to the PySide6-based GUI.
 """
 
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath('src'))
 sys.path.insert(0, os.path.abspath('src/python'))
 
 def main():
-    """Launch the FreeColumn GUI application."""
+    """Launch the ColumnForge GUI application."""
     try:
         from gui.main_window import MainWindow, main
         main()
@@ -24,7 +24,7 @@ def main():
         print("Make sure PySide6 is installed: pip install PySide6")
         sys.exit(1)
     except Exception as e:
-        print(f"Error launching FreeColumn: {e}")
+        print(f"Error launching ColumnForge: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

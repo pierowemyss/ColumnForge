@@ -1,4 +1,4 @@
-"""ThermoProvider interface (blueprint Section 6) + a FreeColumn wrapper.
+"""ThermoProvider interface (blueprint Section 6) + a ColumnForge wrapper.
 
 The residual/Jacobian kernels see thermodynamics only through this interface:
 
@@ -12,7 +12,7 @@ The residual/Jacobian kernels see thermodynamics only through this interface:
     dhL_dT, dhV_dT    -> (N,)
     bubble_T, dew_T, Psat         scalar helpers for the initializer
 
-The solver never assumes where a derivative came from: `FreeColumnThermo`
+The solver never assumes where a derivative came from: `ColumnForgeThermo`
 returns them by central finite differences of the underlying `core` maps (the
 NRTL closure casts its argument to real, so complex-step can't thread through
 it — FD is the robust choice, and the goal sanctions analytic/complex-step/FD
@@ -89,8 +89,8 @@ class ThermoProvider:
     def Psat(self, T): raise NotImplementedError
 
 
-class FreeColumnThermo(ThermoProvider):
-    """Wrap FreeColumn `core.thermodynamics` as a ThermoProvider.
+class ColumnForgeThermo(ThermoProvider):
+    """Wrap ColumnForge `core.thermodynamics` as a ThermoProvider.
 
     K_ij = gamma_i(x,T) Psat_i(T) / P_i (ideal gamma=1). Enthalpies use a
     constant-Cp sensible term plus a Clausius-Clapeyron latent heat for the
@@ -247,7 +247,7 @@ def _demo():
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),
                     (6.99052, 1453.43, 215.31)])
-    tp = FreeColumnThermo(abc)
+    tp = ColumnForgeThermo(abc)
     N, C = 2, 3
     x = np.array([[0.5, 0.3, 0.2], [0.2, 0.3, 0.5]])
     T = np.array([90.0, 110.0])
@@ -276,7 +276,7 @@ def _demo():
     a = 0.4
     gfn = nrtl_gamma_fn([[0, a, a], [a, 0, a], [a, a, 0]],
                         [[0.0] * 3] * 3, [[0, .3, .3], [.3, 0, .3], [.3, .3, 0]])
-    tp2 = FreeColumnThermo(abc, gamma_fn=gfn)
+    tp2 = ColumnForgeThermo(abc, gamma_fn=gfn)
     assert np.abs(tp2.dK_dx(x, T, P)).max() > 1e-4, "NRTL K depends on x"
 
     # enthalpy: vapour above liquid by ~latent heat; derivatives finite

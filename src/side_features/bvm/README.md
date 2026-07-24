@@ -1,6 +1,6 @@
 # Matrix BVM
 
-A **boundary-value column sizing & feasibility** side module for FreeColumn,
+A **boundary-value column sizing & feasibility** side module for ColumnForge,
 implementing the difference-point-chain method of `MatBVM_blueprint.md` (v4).
 
 Given a separation and an operating point `(R, S, E/F)`, Matrix BVM answers:
@@ -12,7 +12,7 @@ in full composition space, and iterating over reflux / boilup / entrainer ratio.
 
 Matrix BVM is a **conceptual-design / sizing** method. It does **not** converge
 the rigorous MESH system — its output (stages per section + full profiles) is the
-**warm start** handed to FreeColumn's existing rigorous solver
+**warm start** handed to ColumnForge's existing rigorous solver
 (`core.column_solvers.solve_bubble_point`), sharply cutting that solver's burden.
 
 ## What it is (and isn't)
@@ -36,7 +36,7 @@ the big block matrix of the rigorous MESH solve.
 | module | role |
 |---|---|
 | `problem.py` | feeds/draws/entrainer/spec → overall balance `(x_D, x_B, D, B)` |
-| `thermo_adapter.py` | the `ThermoProvider` interface + `FreeColumnThermo` wrapper |
+| `thermo_adapter.py` | the `ThermoProvider` interface + `ColumnForgeThermo` wrapper |
 | `sections.py` | the difference-point chain `(Δ_k, δ_k)` + operating-line coeffs |
 | `march.py` | equilibrium + operating-line stepping, stable-direction selection, Murphree efficiency |
 | `anchor.py` | product ends, continuation, saddle-pinch manifold launch |
@@ -55,11 +55,11 @@ live in the marching hot loop.
 ## API
 
 ```python
-from thermo_adapter import FreeColumnThermo
+from thermo_adapter import ColumnForgeThermo
 from problem import build_problem
 import api
 
-tp = FreeColumnThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)   # §17 provider (SRK optional)
+tp = ColumnForgeThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)   # §17 provider (SRK optional)
 prob = build_problem(comps, feeds=[(z, F, q)], pressure=P,
                      lk=0, hk=1, rec_lk=0.98, rec_hk=0.02)
 
@@ -83,14 +83,14 @@ fmap = api.feasibility_map(prob, tp, R_grid=[1, 2, 4, 8])  # feasibility + stage
   feasibility (bool grid) + stage count (int grid, `-1` where infeasible).
 - **`to_solver(design) → init_state`** — plain warm-start dict (§12).
 
-**Conventions.** Stage 0 = distillate (top), matching the FreeColumn GUI.
+**Conventions.** Stage 0 = distillate (top), matching the ColumnForge GUI.
 Components are listed light → heavy; `lk < hk` index into that list. Strictly
 non-distributing components are kept at a `1e-4` trace in each product so profiles
 can leave a simplex face (heavies amplify downward in the rectifying section).
 
 ## ThermoProvider contract (§17)
 
-The module consumes FreeColumn thermo through a narrow adapter — it never
+The module consumes ColumnForge thermo through a narrow adapter — it never
 reimplements VLE/enthalpy. A provider supplies:
 
 ```
@@ -102,8 +102,8 @@ Psat(T) / K       -> vapour pressure / K-values
 h_L, h_V          -> molar enthalpies (only for energy-corrected flows)
 ```
 
-`FreeColumnThermo` wraps `core.thermodynamics` (Antoine/PLXANT `Psat`, γ via any
-FreeColumn activity model, optional γ–φ). Default flow model is **constant molar
+`ColumnForgeThermo` wraps `core.thermodynamics` (Antoine/PLXANT `Psat`, γ via any
+ColumnForge activity model, optional γ–φ). Default flow model is **constant molar
 overflow**; an energy-corrected variant can update section flows from the shared
 enthalpy functions.
 

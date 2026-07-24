@@ -1,6 +1,6 @@
-# FreeColumn — Distillation Column Solver
+# ColumnForge — Distillation Column Solver
 
-[![CI](https://github.com/pierowemyss/FreeColumn/actions/workflows/ci.yml/badge.svg)](https://github.com/pierowemyss/FreeColumn/actions/workflows/ci.yml)
+[![CI](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml/badge.svg)](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml)
 
 A PySide6 (Qt6) desktop app for designing and rating chemical-engineering
 distillation columns, styled after Aspen Plus's RadFrac. Everything —
@@ -12,12 +12,12 @@ compiled dependency required to run it.
      visible at once. A viewer should register "this is a real simulator" in one
      glance, before reading a word. -->
 
-![FreeColumn solving a multicomponent column](docs/img/hero.png)
+![ColumnForge solving a multicomponent column](docs/img/hero.png)
 
 ## Why this exists
 
 Commercial column simulators (Aspen Plus, HYSYS, ChemCAD) are black boxes:
-you get an answer, not the Newton iteration that produced it. FreeColumn is
+you get an answer, not the Newton iteration that produced it. ColumnForge is
 the opposite bet — every solver is legible, self-testing Python you can step
 through, from the Antoine fit to the final tridiagonal solve. It was built to
 answer a specific question honestly: _what does it actually take to converge
@@ -55,7 +55,7 @@ The rest of the app is unaffected either way.
 
 ## Architecture
 
-FreeColumn is three layers. The GUI never does numerical work; it builds a
+ColumnForge is three layers. The GUI never does numerical work; it builds a
 plain-data description of the column and hands it to a solver.
 
 ```
@@ -103,7 +103,7 @@ itself.
 
 The textbook rigorous solve: **M**aterial balance, **E**quilibrium,
 **S**ummation, **H**eat balance, solved stage-by-stage until temperatures
-stop moving. FreeColumn assembles the per-component material balance as a
+stop moving. ColumnForge assembles the per-component material balance as a
 tridiagonal system in liquid composition and solves it with the Thomas
 algorithm — one linear solve per component, per outer iteration:
 
@@ -342,12 +342,12 @@ full column defined:
 <!-- Screenshot: Modules tab, Pure Components. The searchable species database
      with a component selected and its Psat(T) curve plotted. -->
 
-![Modules tab — Pure Components database and Psat(T)](docs/img/modules-pure.png)
+<!-- ![Modules tab — Pure Components database and Psat(T)](docs/img/modules-pure.png) -->
 
 <!-- Screenshot: Modules tab, Phase EQ. An isothermal/vapour-fraction flash
      result on the loaded species — the live thermo test bench. -->
 
-![Modules tab — Phase EQ flash bench](docs/img/modules-phaseeq.png)
+<!-- ![Modules tab — Phase EQ flash bench](docs/img/modules-phaseeq.png) -->
 
 ## Column setup and results
 
@@ -388,7 +388,7 @@ full column defined:
 ## Project Structure
 
 ```
-freeColumn/
+columnForge/
 ├── src/
 │   ├── python/
 │   │   ├── core/          # thermodynamics, solvers, dof, material/energy balance

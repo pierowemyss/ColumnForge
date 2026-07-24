@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FreeRCM - Integrated into FreeColumn
+FreeRCM - Integrated into ColumnForge
 Containerized module - handles its own imports internally.
 """
 
@@ -44,7 +44,7 @@ RCMplot = plot_widget_mod.RCMplot
 
 
 def init_from_window_state(window_state):
-    """Initialize global state from FreeColumn's window_state."""
+    """Initialize global state from ColumnForge's window_state."""
     global P, comps, selected_comps, antoine_params, PLXANT_params
     global NRTL_aij, NRTL_bij, NRTL_cij, TcCel, Pc, omega, allProps
     
@@ -71,7 +71,7 @@ def init_from_window_state(window_state):
     
     for i, name in enumerate(species_names):
         comp_params = thermo.get_component_params(name)
-        # freeColumn stores tc in Kelvin; freeRCM's SRK expects Celsius (it adds 273.15).
+        # columnForge stores tc in Kelvin; freeRCM's SRK expects Celsius (it adds 273.15).
         TcCel[i] = (comp_params.tc - 273.15) if comp_params.tc else 0
         Pc[i] = comp_params.pc if comp_params.pc else 0
         omega[i] = comp_params.omega if comp_params.omega else 0
@@ -150,7 +150,7 @@ allProps = dict2struct(allProps_dict)
 
 
 class NewSimulationWindow(QMainWindow):
-    """Component selection window - loads species from FreeColumn."""
+    """Component selection window - loads species from ColumnForge."""
     
     def __init__(self, window_state=None):
         super().__init__()
@@ -158,7 +158,7 @@ class NewSimulationWindow(QMainWindow):
         self.setWindowTitle("RCM - Select Components")
         self.setGeometry(100, 100, 800, 600)
         
-        # Initialize global state from FreeColumn if window_state provided
+        # Initialize global state from ColumnForge if window_state provided
         if window_state:
             init_from_window_state(window_state)
         
@@ -176,7 +176,7 @@ class NewSimulationWindow(QMainWindow):
 
         # Left: All Components
         left_column = QVBoxLayout()
-        self.components_list_label = QLabel("All Components (from FreeColumn)", self)
+        self.components_list_label = QLabel("All Components (from ColumnForge)", self)
         self.components_list_label.setFixedHeight(20)
         left_column.addWidget(self.components_list_label)
 
@@ -250,7 +250,7 @@ class NewSimulationWindow(QMainWindow):
         self.update_selected_components_list()
 
     def load_from_window_state(self):
-        """Load species and parameters from FreeColumn's window_state."""
+        """Load species and parameters from ColumnForge's window_state."""
         global comps, antoine_params, PLXANT_params, NRTL_aij, NRTL_bij, NRTL_cij, TcCel, Pc, omega
         
         if not self.window_state:
@@ -275,7 +275,7 @@ class NewSimulationWindow(QMainWindow):
         
         for i, name in enumerate(species_names):
             comp_params = thermo.get_component_params(name)
-            # freeColumn stores tc in Kelvin; freeRCM's SRK expects Celsius (it adds 273.15).
+            # columnForge stores tc in Kelvin; freeRCM's SRK expects Celsius (it adds 273.15).
             TcCel[i] = (comp_params.tc - 273.15) if comp_params.tc else 0
             Pc[i] = comp_params.pc if comp_params.pc else 0
             omega[i] = comp_params.omega if comp_params.omega else 0

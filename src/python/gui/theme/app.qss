@@ -1,4 +1,4 @@
-/* FreeColumn theme — one dark surface hierarchy. Bracketed tokens are
+/* ColumnForge theme — one dark surface hierarchy. Bracketed tokens are
    substituted from gui/theme/palette.py at load; after substitution this is QSS a
    C++ build can consume as-is. Structured by widget class + objectName so a
    light palette is a constants swap, not a rewrite. */

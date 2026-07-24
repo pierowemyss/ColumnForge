@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Data Structures Module
-Provides utility classes for FreeColumn
+Provides utility classes for ColumnForge
 
 Author: Piero Wemyss
 Created: Based on freeRCM data_structures.py

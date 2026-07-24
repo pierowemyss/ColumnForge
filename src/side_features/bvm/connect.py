@@ -96,7 +96,7 @@ def connect(profA, profB, eps_stage=1e-2, efficiency=1.0):
 
 
 def _demo():
-    from .thermo_adapter import FreeColumnThermo
+    from .thermo_adapter import ColumnForgeThermo
     from .problem import build_problem, overall_balance
     from .sections import single_feed_chain
     from .march import march_section
@@ -104,7 +104,7 @@ def _demo():
     abc = np.array([(6.90565, 1211.033, 220.79),
                     (6.95464, 1344.8, 219.48),
                     (6.99052, 1453.43, 215.31)])
-    tp = FreeColumnThermo(abc)
+    tp = ColumnForgeThermo(abc)
     z = np.array([0.4, 0.35, 0.25])
     prob = build_problem(["b", "t", "x"], [(z, 100.0, 1.0)], 760.0,
                          rec_lk=0.98, rec_hk=0.02)

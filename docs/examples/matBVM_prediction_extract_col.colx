@@ -1,9 +1,9 @@
 {
   "schema_version": 2,
-  "app": "FreeColumn",
+  "app": "ColumnForge",
   "cases": [
     {
-      "name": "FreeColumn Configuration",
+      "name": "ColumnForge Configuration",
       "state": {
         "num_stages": 35,
         "pressure": 1.0,

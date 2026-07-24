@@ -104,14 +104,14 @@ def launch_from_saddle(sec, xstar, eigvec, tp, P, eps=1e-3, n=200):
 
 
 def _demo():
-    from .thermo_adapter import FreeColumnThermo
+    from .thermo_adapter import ColumnForgeThermo
     from .problem import build_problem, overall_balance
     from .sections import extractive_chain
 
     abc = np.array([(7.11714, 1210.595, 229.664),   # acetone
                     (7.20211, 1582.271, 239.726),   # methanol
                     (8.07131, 1730.63, 233.426)])   # water (entrainer)
-    tp = FreeColumnThermo(abc)
+    tp = ColumnForgeThermo(abc)
     z = np.array([0.5, 0.5, 0.0])
     prob = build_problem(["acetone", "methanol", "water"], [(z, 100.0, 1.0)], 760.0,
                          lk=0, hk=1, x_E=np.array([0.0, 0.0, 1.0]), extractive=True)

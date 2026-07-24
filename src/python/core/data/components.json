@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "FreeColumn pure-component database. Antoine is log10(Psat[mmHg]) = A - B/(C + T[degC]) — the app's bundled-fit convention. tb/tc in K, pc in bar, mw g/mol, liquid_density kg/m3 (~25 C, cryogens at Tb), cp_liq J/mol.K (~25 C), hvap_tb kJ/mol at the normal boiling point. null = not curated yet. Every record is gated by test_component_db.py: Antoine must reproduce tb at 760 mmHg within 1 K, and hvap_tb must match the Clausius-Clapeyron slope of the fit within 12%.",
+  "note": "ColumnForge pure-component database. Antoine is log10(Psat[mmHg]) = A - B/(C + T[degC]) — the app's bundled-fit convention. tb/tc in K, pc in bar, mw g/mol, liquid_density kg/m3 (~25 C, cryogens at Tb), cp_liq J/mol.K (~25 C), hvap_tb kJ/mol at the normal boiling point. null = not curated yet. Every record is gated by test_component_db.py: Antoine must reproduce tb at 760 mmHg within 1 K, and hvap_tb must match the Clausius-Clapeyron slope of the fit within 12%.",
   "default_source": "Antoine: Lange's/Yaws classic fits (log10 mmHg, degC); tb/tc/pc/omega/hvap: Poling 5e & NIST WebBook (curated from standard tables)",
   "components": [
     {"name": "methane", "cas": "74-82-8", "formula": "CH4", "mw": 16.043, "tb": 111.66, "tc": 190.56, "pc": 45.99, "omega": 0.011, "liquid_density": 422.0, "cp_liq": null, "hvap_tb": 8.17, "antoine": [6.61184, 389.93, 266.0], "antoine_trange": null},

@@ -1,4 +1,4 @@
-"""JSON persistence for FreeColumn Cases (ADR-0001).
+"""JSON persistence for ColumnForge Cases (ADR-0001).
 
 `.colx` is JSON: ``{schema_version, app, cases: [{name, state}]}``. ``state`` is
 the *primitive projection* of ``WindowState.to_dict()`` — dataclasses flattened
@@ -205,7 +205,7 @@ def decode_state(e: dict) -> dict:
 
 def save_colx(path: str, state: dict, *, name: str = "Case 1") -> None:
     """Write a one-Case `.colx` (JSON). The cases list leaves room for more."""
-    doc = {"schema_version": SCHEMA_VERSION, "app": "FreeColumn",
+    doc = {"schema_version": SCHEMA_VERSION, "app": "ColumnForge",
            "cases": [{"name": name, "state": encode_state(state)}]}
     if not path.endswith(".colx"):
         path += ".colx"
@@ -222,7 +222,7 @@ def load_colx(path: str) -> dict:
         raise ValueError("This .colx isn't JSON — it may be from an older "
                          "pickle-based build, which this version can't read.")
     if not isinstance(doc, dict) or not doc.get("cases"):
-        raise ValueError("Not a FreeColumn .colx file (no cases).")
+        raise ValueError("Not a ColumnForge .colx file (no cases).")
     ver = doc.get("schema_version")
     state = doc["cases"][0]["state"]
     if ver == 1:

@@ -1,6 +1,6 @@
 # Thermodynamic methods
 
-Every phase-equilibrium and energy calculation in FreeColumn is implemented in
+Every phase-equilibrium and energy calculation in ColumnForge is implemented in
 [`core/thermodynamics.py`](../src/python/core/thermodynamics.py) (VLE, activity
 models, EOS) and [`core/enthalpy.py`](../src/python/core/enthalpy.py). This
 document is the equation reference; each equation below is the exact form the

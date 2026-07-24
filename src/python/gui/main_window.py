@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Main Window - FreeColumn Column Solver GUI
+Main Window - ColumnForge Column Solver GUI
 Tabbed interface with comprehensive simulation workflow
 
 Author: Piero Wemyss
@@ -39,7 +39,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FreeColumn - Column Solver")
+        self.setWindowTitle("ColumnForge - Column Solver")
         self.setGeometry(100, 100, 1400, 900)
         self.setMinimumSize(1000, 700)
 
@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         # ponytail: no Edit/View menus — Undo/Redo lands with the Month-11 UX
         # pass; text widgets already handle cut/copy/paste natively.
         help_menu = menubar.addMenu("Help")
-        about_act = QAction("About FreeColumn", self)
+        about_act = QAction("About ColumnForge", self)
         about_act.triggered.connect(self.show_about)
         help_menu.addAction(about_act)
 
@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
         """Load column configuration from *.colx file"""
         filename, _ = QFileDialog.getOpenFileName(
             self, "Load Column Configuration", "",
-            "FreeColumn Files (*.colx);;All Files (*)"
+            "ColumnForge Files (*.colx);;All Files (*)"
         )
 
         if filename:
@@ -247,7 +247,7 @@ class MainWindow(QMainWindow):
         """Save column configuration to a new file"""
         filename, _ = QFileDialog.getSaveFileName(
             self, "Save Column Configuration", "",
-            "FreeColumn Files (*.colx);;All Files (*)"
+            "ColumnForge Files (*.colx);;All Files (*)"
         )
 
         if filename:
@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         """Perform the actual save operation."""
         try:
             save_colx(filepath, self.window_state.to_dict(),
-                      name="FreeColumn Configuration")
+                      name="ColumnForge Configuration")
             self.window_state.set_file_path(filepath)
             self.statusBar().showMessage(f"Saved to {filepath}")
         except Exception as e:
@@ -822,8 +822,8 @@ class MainWindow(QMainWindow):
     def show_about(self):
         """Show about dialog"""
         QMessageBox.about(
-            self, "About FreeColumn",
-            "FreeColumn - Column Solver\n\n"
+            self, "About ColumnForge",
+            "ColumnForge - Column Solver\n\n"
             "A comprehensive GUI-based column solver for chemical "
             "engineering applications.\n\n"
             "Version 1.0.0\n"
@@ -859,22 +859,22 @@ class MainWindow(QMainWindow):
 
 
 def _setup_logging():
-    """Log to ~/.freecolumn/freecolumn.log (roadmap Month 3): solver failures
+    """Log to ~/.columnforge/columnforge.log (roadmap Month 3): solver failures
     from the Run handler land here with tracebacks."""
     import logging
     import logging.handlers
     import os
-    log_dir = os.path.join(os.path.expanduser("~"), ".freecolumn")
+    log_dir = os.path.join(os.path.expanduser("~"), ".columnforge")
     os.makedirs(log_dir, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
-        os.path.join(log_dir, "freecolumn.log"),
+        os.path.join(log_dir, "columnforge.log"),
         maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(handler)
-    logging.getLogger(__name__).info("FreeColumn started")
+    logging.getLogger(__name__).info("ColumnForge started")
 
 
 def _install_excepthook():
@@ -898,8 +898,8 @@ def _install_excepthook():
             box = QMessageBox()
             box.setIcon(QMessageBox.Critical)
             box.setWindowTitle("Unexpected error")
-            box.setText("Something went wrong, but FreeColumn is still running.\n"
-                        "Details are in ~/.freecolumn/freecolumn.log.")
+            box.setText("Something went wrong, but ColumnForge is still running.\n"
+                        "Details are in ~/.columnforge/columnforge.log.")
             box.setDetailedText(text)
             box.exec()
         except Exception:

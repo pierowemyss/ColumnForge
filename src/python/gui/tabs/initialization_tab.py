@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Initialization Tab - FreeColumn Column Solver GUI
+Initialization Tab - ColumnForge Column Solver GUI
 Contains Thermodynamics and Chemical Species sub-tabs
 
 Author: Piero Wemyss

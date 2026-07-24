@@ -1,1 +1,1 @@
-# FreeColumn - Column Solver Package
+# ColumnForge - Column Solver Package

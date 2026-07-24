@@ -32,7 +32,7 @@ from ..plotting import CompactNavigationToolbar, TEMP_C as _TEMP_C
 
 from side_features.bvm import api as _mbvm_api
 from side_features.bvm.problem import build_problem
-from side_features.bvm.thermo_adapter import FreeColumnThermo
+from side_features.bvm.thermo_adapter import ColumnForgeThermo
 
 
 class BVMModuleWidget(QWidget):
@@ -262,7 +262,7 @@ class BVMModuleWidget(QWidget):
             self.window_state.pressure)
         gamma_fn = self.window_state.build_gamma_fn(order)
         phi_fn = self.window_state.build_phi_fn(order)   # SRK EOS or None (ideal gas)
-        provider = FreeColumnThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
+        provider = ColumnForgeThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
         self._order_warning = self._volatility_warning(order, antoine, P, provider)
 
         extractive = self.extractive.isChecked()
