@@ -31,23 +31,25 @@ python launch.py                       # run the GUI (canonical entry point)
 module directly, replicate those paths:
 `PYTHONPATH=src:src/python python -m gui.main_window`.
 
-**Solver backend.** Python is the backend that ships today, and it needs no
-compiler. A compiled C/Fortran backend selectable from the UI is in progress;
-the sources live in `src/native/`.
+> [!NOTE]
+> **Solver backend.** Python is the backend that ships today, and it needs no
+> compiler. A compiled C/Fortran backend selectable from the UI is in progress;
+> the sources live in `src/native/`.
 
 ### The RCM module needs a compiled library
 
-**RCM** (residue-curve maps) calls a Fortran/C solver through `ctypes`.
-Prebuilt libraries ship in `src/side_features/freeRCM/lib/`, but they are
-x86_64 only. On a different architecture (an arm64 Python on Apple Silicon,
-say) they will not load and the module shows "Compile RCM_solv.c to use this
-module." instead of a plot. To build them:
-
-```bash
-cd src/side_features/freeRCM/build && make    # needs gfortran + a C compiler
-```
-
-The rest of the app is unaffected either way.
+> [!IMPORTANT]
+> **RCM** (residue-curve maps) calls a Fortran/C solver through `ctypes`.
+> Prebuilt libraries ship in `src/side_features/freeRCM/lib/`, but they are
+> x86_64 only. On a different architecture (an arm64 Python on Apple Silicon,
+> say) they will not load and the module shows "Compile RCM_solv.c to use this
+> module." instead of a plot. To build them:
+>
+> ```bash
+> cd src/side_features/freeRCM/build && make    # needs gfortran + a C compiler
+> ```
+>
+> The rest of the app is unaffected either way.
 
 ## Architecture
 
@@ -90,10 +92,11 @@ flowchart TD
     style RCM fill:#8957e5,stroke:#8957e5,color:#fff
 ```
 
-`core` never imports `gui`; it is a standalone library you can drive from a
-script or notebook with no Qt installed. Every `core` module carries a runnable
-self-check (`python -m core.column_solvers` and friends), so each file vouches
-for itself independently of the pytest suite.
+> [!TIP]
+> `core` never imports `gui`; it is a standalone library you can drive from a
+> script or notebook with no Qt installed. Every `core` module carries a runnable
+> self-check (`python -m core.column_solvers` and friends), so each file vouches
+> for itself independently of the pytest suite.
 
 ## The solvers
 
@@ -131,9 +134,10 @@ Outer loop:
 3. bubble-point each stage for a new `T`
 4. repeat until `max|ΔT| < tol`
 
-Constant molar overflow (CMO) by default. An optional `flows_hook` seam lets an
-energy balance replace the CMO flow assumption without touching the assembly
-code.
+> [!NOTE]
+> Constant molar overflow (CMO) by default. An optional `flows_hook` seam lets an
+> energy balance replace the CMO flow assumption without touching the assembly
+> code.
 
 ### Inside-Out (HYSIM), two-tier solve
 
@@ -215,9 +219,10 @@ handoff.py    → package stages + profiles as a rigorous-solver warm start
 api.py        → size_column / feasibility_map / to_solver (public entry points)
 ```
 
-A sized BVM column goes straight to Bubble-Point as a **warm start**
-(`api.to_solver`), converging in a fraction of the cold-start iterations. Full
-module-by-module writeup: `src/side_features/bvm/README.md`.
+> [!TIP]
+> A sized BVM column goes straight to Bubble-Point as a **warm start**
+> (`api.to_solver`), converging in a fraction of the cold-start iterations. Full
+> module-by-module writeup: `src/side_features/bvm/README.md`.
 
 ### Shortcut (FUG)
 
@@ -262,7 +267,8 @@ $$
 K_i = \frac{\gamma_i(x,T) \phi_i^{\mathrm{sat}} P^{\mathrm{sat}}_i(T)}{\phi_i^{V}(y,T,P) P}
 $$
 
-Swapping a model means swapping what plugs into that seam. Solvers never change.
+> [!TIP]
+> Swapping a model means swapping what plugs into that seam. Solvers never change.
 
 | layer                 | models                                                                                                                                                                                                    |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -279,10 +285,12 @@ Full equations for every model: [`docs/thermodynamics.md`](docs/thermodynamics.m
   matches Clausius-Clapeyron within 12%.
 - **7 NRTL binary pairs** ship with it, gated against known azeotropes
   (ethanol/water, 2-propanol/water, acetone/chloroform, acetone/methanol).
-- **No silent fallback.** A model with missing parameters raises a user-facing
-  error instead of quietly reverting to ideal.
 - The enthalpy seam is shared by the Inside-Out energy balance, enthalpy-based
   feed quality, and condenser subcooling.
+
+> [!WARNING]
+> **No silent fallback.** A model with missing parameters raises a user-facing
+> error instead of quietly reverting to ideal.
 
 ![Thermodynamics, activity model and binary interaction table](docs/img/thermodynamics-subtab.png)
 
@@ -398,12 +406,13 @@ plus `pyflakes` on Python 3.11 and 3.12.
 
 ## Conventions worth knowing
 
-- **Stage 0 = distillate (top)** everywhere in the GUI and result profiles.
-  Solvers may use a different internal ordering, converted at the boundary.
-- **Nothing is silently ignored.** Every value you can enter is either consumed
-  by the active solver or visibly greyed out with a "not consumed yet" tooltip.
-- **`.colx` is versioned JSON**, never pickle, so an old save stays readable by
-  a newer build and vice versa.
+> [!IMPORTANT]
+> - **Stage 0 = distillate (top)** everywhere in the GUI and result profiles.
+>   Solvers may use a different internal ordering, converted at the boundary.
+> - **Nothing is silently ignored.** Every value you can enter is either consumed
+>   by the active solver or visibly greyed out with a "not consumed yet" tooltip.
+> - **`.colx` is versioned JSON**, never pickle, so an old save stays readable by
+>   a newer build and vice versa.
 
 ## Roadmap
 
