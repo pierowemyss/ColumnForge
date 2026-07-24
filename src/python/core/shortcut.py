@@ -26,7 +26,7 @@ def _key_split(z, lk, hk, rec_lk, rec_hk):
     (d, b, xD, xB) with d+b=z."""
     z = np.asarray(z, float)
     # keys: recovery = fraction of that component leaving in the distillate.
-    d = np.empty_like(z)
+    d = np.zeros_like(z)
     d[lk] = rec_lk * z[lk]
     d[hk] = rec_hk * z[hk]
     return d, z - d
@@ -62,13 +62,16 @@ def fenske_distribution(alpha, d_keys, b_keys, z, lk, hk):
     return d, z - d
 
 
-def underwood_theta(alpha, z, q, lk, hk):
-    """Underwood root θ in (alpha_HK, alpha_LK) of
+def underwood_roots(alpha, z, q, lk, hk):
+    """All Underwood roots θ in (alpha_HK, alpha_LK) of
 
         sum_i  alpha_i * z_i / (alpha_i - θ)  =  1 - q
 
-    (α referenced to HK so α_HK = 1). The relevant root for a sharp LK/HK split
-    lies strictly between the two keys' volatilities."""
+    (α referenced to HK so α_HK = 1). Every component's α is a pole of the sum, so
+    a component volatility sitting between the two keys (a distributing non-key)
+    splits the interval — brentq over the whole span would straddle that pole and
+    converge onto it instead of a root. Bracket each open sub-interval between
+    consecutive α values instead and collect a root from each."""
     alpha = np.asarray(alpha, float)
     z = np.asarray(z, float)
 
@@ -76,8 +79,29 @@ def underwood_theta(alpha, z, q, lk, hk):
         return float(np.sum(alpha * z / (alpha - theta)) - (1.0 - q))
 
     lo, hi = alpha[hk], alpha[lk]
-    eps = 1e-6 * (hi - lo)
-    return brentq(f, lo + eps, hi - eps)
+    # poles that fall strictly inside (lo, hi) chop the interval into sub-brackets
+    interior = sorted(a for a in set(alpha.tolist()) if lo < a < hi)
+    edges = [lo] + interior + [hi]
+    roots = []
+    for a, b in zip(edges, edges[1:]):
+        span = b - a
+        if span <= 0.0:
+            continue
+        eps = 1e-6 * span
+        aa, bb = a + eps, b - eps
+        if aa >= bb or f(aa) * f(bb) > 0.0:      # no sign change -> no root here
+            continue
+        roots.append(brentq(f, aa, bb))
+    return roots
+
+
+def underwood_theta(alpha, z, q, lk, hk):
+    """First Underwood root between the keys (thin wrapper over underwood_roots)."""
+    roots = underwood_roots(alpha, z, q, lk, hk)
+    if not roots:
+        raise ValueError("No Underwood root between the keys — check the feed and "
+                         "key selection.")
+    return roots[0]
 
 
 def underwood_min_reflux(alpha, xD, theta):
@@ -145,14 +169,24 @@ def fug_design(alpha, z, lk, hk, rec_lk, rec_hk, q=1.0, reflux_factor=1.3,
     xD = d / D; xB = b / B
 
     Nmin = fenske_min_stages(alpha, xD, xB, lk, hk)
-    theta = underwood_theta(alpha, z, q, lk, hk)
-    Rmin = underwood_min_reflux(alpha, xD, theta)
+    # ponytail: max over the roots, not the simultaneous C-1 system; upgrade if a
+    # distributing non-key's split needs to be solved, not just bounded.
+    roots = underwood_roots(alpha, z, q, lk, hk)
+    if not roots:
+        raise ValueError("No Underwood root between the keys — check the feed and "
+                         "key selection.")
+    Rmin, theta = max((underwood_min_reflux(alpha, xD, th), th) for th in roots)
     R = float(R_op) if R_op is not None else reflux_factor * Rmin
+    if R <= Rmin:
+        raise ValueError(
+            f"Operating reflux R = {R:.3f} must exceed the minimum reflux "
+            f"Rmin = {Rmin:.3f}; the stage count is infinite otherwise.")
     N = gilliland_stages(Nmin, Rmin, R)
     feed_stage = kirkbride_feed_stage(N, z, xD, xB, D, B, lk, hk)
 
-    # N-vs-R curve for the design plot: from just above Rmin out to 3*Rmin.
-    Rs = np.linspace(1.02 * Rmin, 3.0 * Rmin, 30)
+    # N-vs-R curve for the design plot: from just above Rmin out to 3*Rmin. The
+    # view clamps the residual N->inf asymptote; the data stays honest.
+    Rs = np.linspace(1.05 * Rmin, 3.0 * Rmin, 60)
     Ns = np.array([gilliland_stages(Nmin, Rmin, r) for r in Rs])
 
     return dict(Nmin=Nmin, Rmin=Rmin, R=R, N=N, feed_stage=feed_stage,
@@ -207,6 +241,24 @@ def _demo():
                       R_op=2.0 * rep["Rmin"])
     assert abs(rep2["R"] - 2.0 * rep["Rmin"]) < 1e-9
     assert rep2["N"] < rep["N"]                      # more reflux -> fewer stages
+
+    # --- Distributing non-key sandwiched between the keys: brentq must not
+    #     converge onto that component's pole. ---
+    alpha4 = np.array([5.0, 2.0, 1.5, 1.0])   # index 2 sits between LK(1) and HK(3)
+    z4 = np.array([0.25, 0.25, 0.25, 0.25])
+    rep4 = fug_design(alpha4, z4, lk=1, hk=3, rec_lk=0.98, rec_hk=0.02)
+    assert 0.0 < rep4["Rmin"] < np.inf, rep4["Rmin"]
+    # theta landing on a pole would give a blown-up Rmin and sit on some alpha[i]
+    assert all(abs(rep4["theta"] - a) > 1e-6 for a in alpha4), rep4["theta"]
+
+    # --- R_op at/below Rmin is a clean ValueError, not an OverflowError ---
+    try:
+        fug_design(alpha4, z4, lk=1, hk=3, rec_lk=0.98, rec_hk=0.02,
+                   R_op=rep4["Rmin"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("R_op == Rmin should raise ValueError")
 
     print(f"shortcut FUG self-check OK: ternary Nmin={rep['Nmin']:.1f} "
           f"Rmin={rep['Rmin']:.2f} N={rep['N']:.1f} feed@{rep['feed_stage']}")

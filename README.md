@@ -308,12 +308,46 @@ full column defined:
 | **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                  |
 | **Phase EQ**        | isothermal / vapour-fraction flash on the loaded species — a live test bench for whichever thermo model is selected |
 
+<!-- Screenshot: Modules tab, RCM. Residue-curve map on a ternary — the
+     preserved predecessor app, and the only module with a compiled dependency.
+     Show the RCM window with a full annotated residue-curve map. -->
+
+![Modules tab — RCM residue-curve map](docs/img/rcm-module.png)
+
 <!-- Screenshot: Modules tab, BVM. The differentiator — show the
      difference-point-chain / feasibility map on a ternary diagram. It is the
      most technically distinctive artifact here and the thing a reviewer is
      least likely to have seen in another portfolio project. -->
 
 ![Modules tab — BVM design map](docs/img/modules-bvm.png)
+
+<!-- Screenshot: the same BVM session in the profile view — full liquid-x and
+     temperature profiles plus the per-stage table, showing BVM produces a
+     complete warm start, not just a feasibility yes/no. -->
+
+![Modules tab — BVM stage/temperature profile](docs/img/bvm-profile-prediction.png)
+
+<!-- Screenshot: Modules tab, Shortcut (FUG). Params on the left (keys,
+     recoveries, reflux factor), and on the right the Gilliland stages-vs-reflux
+     curve with the Nmin/Rmin asymptotes and the operating point marked, plus
+     the per-component xD/xB table. -->
+
+![Modules tab — Shortcut (FUG) stages-vs-reflux](docs/img/modules-fug.png)
+
+<!-- Screenshot: Modules tab, Txy/Pxy. A binary bubble/dew envelope at fixed P
+     with the azeotrope marked, and the singular-point table below. -->
+
+![Modules tab — Txy/Pxy binary envelope](docs/img/modules-txy.png)
+
+<!-- Screenshot: Modules tab, Pure Components. The searchable species database
+     with a component selected and its Psat(T) curve plotted. -->
+
+![Modules tab — Pure Components database and Psat(T)](docs/img/modules-pure.png)
+
+<!-- Screenshot: Modules tab, Phase EQ. An isothermal/vapour-fraction flash
+     result on the loaded species — the live thermo test bench. -->
+
+![Modules tab — Phase EQ flash bench](docs/img/modules-phaseeq.png)
 
 ## Column setup and results
 
@@ -402,15 +436,24 @@ runs the full suite plus `pyflakes` on Python 3.11 and 3.12.
 
 ## Screenshots
 
-Placeholders above point at `docs/img/*.png` — drop screenshots of the
-running app there with matching filenames and they'll render in place. An
-HTML comment above each embed says what that shot should show off:
+Every embed points at `docs/img/*.png`, with an HTML comment above it saying
+what that shot shows off. Captured so far:
 
 - `docs/img/hero.png` — converged run, diagram + profile plot together
 - `docs/img/specifications-tab.png` — column diagram + DoF ledger
-- `docs/img/modules-bvm.png` — BVM ternary feasibility map
 - `docs/img/thermodynamics-subtab.png` — NRTL interaction table
 - `docs/img/results-tab.png` — McCabe-Thiele + stream summary
+- `docs/img/rcm-module.png` — RCM ternary residue-curve map
+- `docs/img/modules-bvm.png` — BVM ternary feasibility map
+- `docs/img/bvm-profile-prediction.png` — BVM stage/temperature profile
+
+Still to capture (the embeds render as broken-image placeholders until you
+drop a file with the matching name — run the app, open the module, screenshot):
+
+- `docs/img/modules-fug.png` — Shortcut (FUG) stages-vs-reflux curve
+- `docs/img/modules-txy.png` — Txy/Pxy binary envelope
+- `docs/img/modules-pure.png` — Pure Components database + Psat(T)
+- `docs/img/modules-phaseeq.png` — Phase EQ flash bench
 
 ## Roadmap / not yet built
 
