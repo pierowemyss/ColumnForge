@@ -18,7 +18,7 @@ class SolverMode(Enum):
     in the persisted Case (gui/state/persistence.py) and selectColumnSolver.
     """
     BVM = "bvm"
-    HYSIM = "hysim"
+    HYSIM = "hysim"   # Inside-Out; name kept because "hysim" is in saved .colx files
 
 
 class dict2struct(dict):

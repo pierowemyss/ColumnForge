@@ -55,7 +55,7 @@ class SimulationTab(QWidget):
         # Only the rigorous MESH solvers live here; BVM and FUG are feasibility/
         # shortcut methods and now have their own widgets in the Modules tab.
         self.solver_combo.addItems([
-            "Inside-Out (HYSIM)",      # rigorous, inner/outer (implemented) — default
+            "Inside-Out",      # rigorous, inner/outer (implemented) — default
             "Bubble-Point",            # rigorous, CMO + ideal VLE (implemented)
         ])
         options_layout.addRow("Method:", self.solver_combo)

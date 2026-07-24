@@ -28,7 +28,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvas
 
 from ..panels.sci_spin_box import SciDoubleSpinBox
 from ..state.window_state import StreamType
-from ..plotting import CompactNavigationToolbar, TEMP_C as _TEMP_C
+from ..plotting import CompactNavigationToolbar, active_comps, TEMP_C as _TEMP_C
 
 from side_features.bvm import api as _mbvm_api
 from side_features.bvm.problem import build_problem
@@ -183,7 +183,6 @@ class BVMModuleWidget(QWidget):
         main, ent = self._feed_streams()
         if ent is None or not main or not main.flow:
             return
-        order = self._species_order()
         dom = max(ent.composition, key=ent.composition.get)
         self.extractive.setChecked(True)
         i = self.entrainer_combo.findText(dom)
@@ -579,18 +578,24 @@ class BVMModuleWidget(QWidget):
         if col is not None:
             x, T = col["x"], col["T"]
             stages = np.arange(x.shape[0])
-            for j, name in enumerate(comps):
-                ax1.plot(stages, x[:, j], "-o", ms=3, label=name)
+            for j in active_comps(x, comps)[0]:   # drop all-zero (unfed) comps
+                ax1.plot(stages, x[:, j], "-o", ms=3, label=comps[j])
             ax2.plot(stages, T, "-o", ms=3, color=_TEMP_C)
             for fs in design["feed_stages"]:
                 ax1.axvline(fs, color="0.5", ls="--", lw=1)
                 ax2.axvline(fs, color="0.5", ls="--", lw=1)
             ax1.set_title(f"Profile -- {design['N_total']} stages")
         else:
-            for name, prof in design.get("profiles", {}).items():
+            profiles = design.get("profiles", {})
+            # keep comps present in any section (one keep-set so color-by-index j
+            # stays consistent across sections); drop all-zero (unfed) comps
+            allX = np.vstack([np.asarray(p["X"]) for p in profiles.values()]) \
+                if profiles else np.zeros((1, len(comps)))
+            keep = active_comps(allX, comps)[0]
+            for name, prof in profiles.items():
                 X = np.asarray(prof["X"]); st = np.arange(len(X))
                 ls = self._SECTION_LS.get(name, "-")
-                for j in range(len(comps)):
+                for j in keep:
                     ax1.plot(st, X[:, j], ls, lw=1.2,
                              color=f"C{j}", label=comps[j] if name.startswith("rect") else None)
                 ax2.plot(st, prof["T"], ls, lw=1.2, label=name)

@@ -4,22 +4,22 @@ Every phase-equilibrium and energy calculation in ColumnForge is implemented in
 [`core/thermodynamics.py`](../src/python/core/thermodynamics.py) (VLE, activity
 models, EOS) and [`core/enthalpy.py`](../src/python/core/enthalpy.py). This
 document is the equation reference; each equation below is the exact form the
-code evaluates, not a textbook idealisation. Every function in those modules
+code evaluates, not a textbook idealization. Every function in those modules
 also carries a runnable `_demo()` self-check that pins these formulas to known
 data (`python -m core.thermodynamics`).
 
 - [The one seam: K-values](#the-one-seam-k-values)
-- [Vapour pressure](#vapour-pressure)
+- [vapor pressure](#vapour-pressure)
 - [Bubble and dew point](#bubble-and-dew-point)
 - [Latent heat](#latent-heat)
 - [Activity-coefficient models](#activity-coefficient-models)
   - [NRTL](#nrtl) · [Wilson](#wilson) · [UNIQUAC](#uniquac) · [Margules](#margules-two-suffix) · [UNIFAC](#unifac)
-- [Vapour-phase equation of state (SRK)](#vapour-phase-equation-of-state-srk)
+- [vapor-phase equation of state (SRK)](#vapour-phase-equation-of-state-srk)
 - [Enthalpy](#enthalpy)
 - [Unit conventions](#unit-conventions)
 - [Deliberate approximations](#deliberate-approximations)
 
-Symbols: $x_i$ liquid mole fraction, $y_i$ vapour mole fraction, $T$ temperature,
+Symbols: $x_i$ liquid mole fraction, $y_i$ vapor mole fraction, $T$ temperature,
 $P$ pressure, $R$ the gas constant, $T_K$ temperature in kelvin, $n$ the number
 of components.
 
@@ -39,17 +39,17 @@ $$
 | --------------------- | --------------------------------- | ---------------------------- |
 | **Ideal (Raoult)**    | nothing — $\gamma_i = \phi_i = 1$ | $K_i = P^{sat}_i/P$          |
 | **Activity model**    | non-ideal liquid $\gamma_i(x,T)$  | $K_i = \gamma_i P^{sat}_i/P$ |
-| **+ EOS (gamma–phi)** | vapour-phase non-ideality         | full expression above        |
+| **+ EOS (gamma–phi)** | vapor-phase non-ideality          | full expression above        |
 
-Here $\phi_i^{sat}$ is the fugacity coefficient of **pure** $i$ as a vapour at
-$(T, P^{sat}_i)$, and $\phi_i^{V}$ is evaluated for the vapour mixture in
-equilibrium with the liquid $x$. The equilibrium vapour is estimated in one shot
-as $y \approx K^{Raoult} x$ (normalised); see
+Here $\phi_i^{sat}$ is the fugacity coefficient of **pure** $i$ as a vapor at
+$(T, P^{sat}_i)$, and $\phi_i^{V}$ is evaluated for the vapor mixture in
+equilibrium with the liquid $x$. The equilibrium vapor is estimated in one shot
+as $y \approx K^{Raoult} x$ (normalized); see
 [Deliberate approximations](#deliberate-approximations).
 
 ---
 
-## Vapour pressure
+## Vapor pressure
 
 Dispatched automatically on the width of the coefficient matrix: a 3-column
 matrix is regular Antoine, a 7-column matrix is Aspen extended Antoine (PLXANT).
@@ -87,8 +87,8 @@ $$
 
 ## Latent heat
 
-Molar heat of vaporisation from the Clausius–Clapeyron slope of the
-vapour-pressure fit (`latent_heat`) — no separate latent-heat correlation is
+Molar heat of vaporization from the Clausius–Clapeyron slope of the
+vapor-pressure fit (`latent_heat`) — no separate latent-heat correlation is
 needed, it falls straight out of $P^{sat}(T)$:
 
 $$
@@ -139,7 +139,7 @@ $$
   \left( \tau_{ij} - \frac{\sum_m x_m \tau_{mj} G_{mj}}{\sum_k G_{kj} x_k} \right)
 $$
 
-The implementation evaluates this in vectorised form: with
+The implementation evaluates this in vectorized form: with
 $S_j = \sum_k x_k G_{kj}$, $r = x/S$ and $C = (x^{T}(\tau \odot G))/S$, it
 computes
 
@@ -226,7 +226,7 @@ evaluated for pure species $i$.
 
 ---
 
-## Vapour-phase equation of state (SRK)
+## Vapor-phase equation of state (SRK)
 
 Soave–Redlich–Kwong, used for the $\phi$ layer of gamma–phi VLE (`srk_phi`).
 Per component, with critical constants $T_{c,i}, P_{c,i}$ and acentric factor
@@ -256,7 +256,7 @@ A = \frac{aP}{(RT)^{2}},
 B = \frac{bP}{RT}
 $$
 
-The compressibility is the largest real root of the cubic (the vapour root):
+The compressibility is the largest real root of the cubic (the vapor root):
 
 $$
 Z^{3} - Z^{2} + (A - B - B^{2}) Z - AB = 0
@@ -270,9 +270,9 @@ $$
      \ln \left( 1 + \frac{B}{Z} \right)
 $$
 
-If the cubic has no vapour-like root (e.g. a bubble-point search probing far
+If the cubic has no vapor-like root (e.g. a bubble-point search probing far
 below the true bubble point), the code returns $\phi_i = 1$ — an EOS correction
-is meaningless where no vapour phase exists.
+is meaningless where no vapor phase exists.
 
 ---
 
@@ -317,24 +317,24 @@ VLE layer, so they are explicit at every closure:
 
 ---
 
-## Deliberate approximations
-
-These are intentional shortcuts (marked `ponytail:` in the source), each with a
-known scope and an upgrade path — listed so nothing is a silent surprise:
-
-- **Dew point** evaluates $\gamma$ at the vapour composition $y$ as a proxy for
-  the (unknown) equilibrium liquid. Exact for ideal VLE; approximate otherwise.
-  A rigorous dew point needs an inner liquid-composition solve.
-- **gamma–phi vapour** uses a one-shot estimate $y \approx K^{Raoult} x$
-  (normalised) for $\phi_i^{V}$, with no inner $y$-iteration — the outer solver
-  loop refines $x, T$ anyway. The **Poynting factor is neglected**; both are fine
-  below ~10 bar.
-- **SRK mixing uses $k_{ij} = 0$** — adequate for hydrocarbon/hydrocarbon pairs;
-  add a $k_{ij}$ matrix for polar / light-gas systems.
-- **Enthalpy** is constant liquid $c_p$ + Watson latent — the shortcut model.
-  Ideal-gas $c_p$ polynomials + a residual-enthalpy departure are the upgrade
-  when the database grows those fields.
-
-See also the [component database](../src/python/core/data/components.json) and
-its consistency gates (Antoine reproduces $T_b$ within 1 K; $\Delta H_{vap}$
-matches Clausius–Clapeyron within 12%).
+<!-- ## Deliberate approximations -->
+<!---->
+<!-- These are intentional shortcuts (marked `ponytail:` in the source), each with a -->
+<!-- known scope and an upgrade path — listed so nothing is a silent surprise: -->
+<!---->
+<!-- - **Dew point** evaluates $\gamma$ at the vapor composition $y$ as a proxy for -->
+<!--   the (unknown) equilibrium liquid. Exact for ideal VLE; approximate otherwise. -->
+<!--   A rigorous dew point needs an inner liquid-composition solve. -->
+<!-- - **gamma–phi vapor** uses a one-shot estimate $y \approx K^{Raoult} x$ -->
+<!--   (normalized) for $\phi_i^{V}$, with no inner $y$-iteration — the outer solver -->
+<!--   loop refines $x, T$ anyway. The **Poynting factor is neglected**; both are fine -->
+<!--   below ~10 bar. -->
+<!-- - **SRK mixing uses $k_{ij} = 0$** — adequate for hydrocarbon/hydrocarbon pairs; -->
+<!--   add a $k_{ij}$ matrix for polar / light-gas systems. -->
+<!-- - **Enthalpy** is constant liquid $c_p$ + Watson latent — the shortcut model. -->
+<!--   Ideal-gas $c_p$ polynomials + a residual-enthalpy departure are the upgrade -->
+<!--   when the database grows those fields. -->
+<!---->
+<!-- See also the [component database](../src/python/core/data/components.json) and -->
+<!-- its consistency gates (Antoine reproduces $T_b$ within 1 K; $\Delta H_{vap}$ -->
+<!-- matches Clausius–Clapeyron within 12%). -->

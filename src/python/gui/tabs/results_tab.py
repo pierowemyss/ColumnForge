@@ -17,6 +17,7 @@ from gui.plotting import (
     CompactNavigationToolbar, ternary_axes, composition_from_click,
     residue_curve, residue_curve_map, singular_points,
     distillation_boundaries, binary_equilibrium_curve, mccabe_thiele_steps,
+    active_comps,
     TEMP_C, DATA_C, BOUNDARY_C, RECT_C, STRIP_C,
 )
 
@@ -547,6 +548,7 @@ class ResultsTab(QWidget):
             self.data_table.setRowCount(0)
             return
         comps, x, T = prof["comps"], prof["x"], np.asarray(prof["T"])
+        keep, kept_comps = active_comps(x, comps)   # drop all-zero (unfed) comps
         u = self._units()
         # Flow series (kmol/h) honour the flow unit; kg/h needs a per-stage MW.
         mw = self._stage_mw(prof) if u.flow == "kg/h" else None
@@ -562,7 +564,7 @@ class ResultsTab(QWidget):
             else:
                 extra.append((label, vals))
         # T is in the vapour-pressure fit's unit (bundled Antoine/PLXANT: degC)
-        headers = (["Stage", f"T ({u.t_label()})"] + [f"x {c}" for c in comps]
+        headers = (["Stage", f"T ({u.t_label()})"] + [f"x {c}" for c in kept_comps]
                    + [label for label, _ in extra])
         self.data_table.setColumnCount(len(headers))
         self.data_table.setHorizontalHeaderLabels(headers)
@@ -570,7 +572,7 @@ class ResultsTab(QWidget):
         self.data_table.setRowCount(n)
         for i in range(n):
             vals = ([i, round(float(u.T(T[i])), 2)]
-                    + [round(float(v), 4) for v in x[i]]
+                    + [round(float(x[i][j]), 4) for j in keep]
                     + [round(float(vals_[i]), 4) for _, vals_ in extra])
             # stage 0 (distillate) on the top row
             for c, v in enumerate(vals):
@@ -610,8 +612,8 @@ class ResultsTab(QWidget):
             ax.plot(N, u.T(T), "-o", color=TEMP_C)
             ax.set_ylabel(f"Temperature ({u.t_label()})")
         elif dtype == "Compositions":
-            for j, name in enumerate(comps):
-                ax.plot(N, x[:, j], "-o", label=name)
+            for j in active_comps(x, comps)[0]:
+                ax.plot(N, x[:, j], "-o", label=comps[j])
             ax.set_ylabel("Liquid mole fraction x")
             ax.set_ylim(0, 1)
             ax.legend(fontsize=8)

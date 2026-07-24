@@ -456,7 +456,7 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                      max_iter=50, tol=1e-6, gamma_fn=None, efficiency=1.0,
                      cancel=None, flows_hook=None, report=None,
                      x0=None, T0=None):
-    """Inside-Out (HYSIM-style) column solve.
+    """Inside-Out column solve.
 
     The defining two-tier structure: an OUTER loop refreshes rigorous K-values
     (Antoine/PLXANT + optional activity model) and derives stage relative

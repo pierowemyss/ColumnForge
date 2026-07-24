@@ -10,11 +10,8 @@ ifeq ($(UNAME), Darwin)
     ifeq ($(MINPACK_DIR),)
         MINPACK_DIR = $(shell pwd)/../lib
     endif
-    # Look for Fortran module files
-    MINPACK_MOD_DIR ?= /Users/School/Documents/Fortran/MINPACK
-    ifeq ($(wildcard $(MINPACK_MOD_DIR)/*.mod),)
-        MINPACK_MOD_DIR = $(MINPACK_DIR)
-    endif
+    # Look for Fortran module files; fall back to the same dir as the lib
+    MINPACK_MOD_DIR ?= $(MINPACK_DIR)
 endif
 
 CFLAGS = -Wall -fPIC -arch x86_64 -I$(GSL_PREFIX)/include

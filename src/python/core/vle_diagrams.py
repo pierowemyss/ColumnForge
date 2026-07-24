@@ -129,7 +129,6 @@ def _demo():
     e, w = component_db.get("ethanol"), component_db.get("water")
     antoine = np.array([e["antoine"], w["antoine"]])          # log10 mmHg / degC
     P = 760.0
-    b = component_db._find_binary("ethanol", "water")[0]
     # DB stores i=water,j=ethanol or flipped; build tau at ~350 K in our order
     # [ethanol, water] using the curated NRTL binary directly.
     import numpy as _np

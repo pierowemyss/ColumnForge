@@ -364,7 +364,6 @@ class ColumnOverviewCanvas(QWidget):
         col_top_center = QPointF(col_rect.center().x(), col_rect.top())
         cond_center = cond_rect.center()
         vapor_in = QPointF(cond_rect.left(), cond_center.y())
-        cond_corridor_x = cond_rect.left() - 15
 
         vapor_path = [
             col_top_center,
@@ -419,7 +418,6 @@ class ColumnOverviewCanvas(QWidget):
         col_bottom_center = QPointF(col_rect.center().x(), col_rect.bottom())
         rebo_center = rebo_rect.center()
         liquid_in = QPointF(rebo_rect.left(), rebo_center.y())
-        rebo_corridor_x = rebo_rect.left() - 15
 
         liquid_path = [
             col_bottom_center,

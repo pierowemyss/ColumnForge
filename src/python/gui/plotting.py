@@ -41,6 +41,16 @@ class CompactNavigationToolbar(NavigationToolbar):
 # Ternary (right-triangle) axes — RCMplot conventions
 # --------------------------------------------------------------------------
 
+def active_comps(x, comps, tol=1e-6):
+    """Indices + names of components present anywhere in a per-stage profile. A
+    species that is 0 in every feed stays ~0 (normalises to ~1e-14) on every
+    stage, so on-screen it is just a flat zero line / column of noise.
+    # ponytail: fixed tol cleanly splits 'not in the column' from a real trace."""
+    x = np.asarray(x, float)
+    keep = [j for j in range(len(comps)) if x[:, j].max() >= tol]
+    return keep, [comps[j] for j in keep]
+
+
 def ternary_axes(ax, comps):
     """Draw the composition simplex as a right triangle on `ax`.
 

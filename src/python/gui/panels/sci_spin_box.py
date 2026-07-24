@@ -81,7 +81,7 @@ def fmt(x):
 
 def _demo():
     from PySide6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     box = SciDoubleSpinBox()
     box.setRange(-1e12, 1e12)
 

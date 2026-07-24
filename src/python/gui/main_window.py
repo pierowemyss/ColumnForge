@@ -391,7 +391,7 @@ class MainWindow(QMainWindow):
             return job
         raise ValueError(
             f"{method} is not implemented yet — choose Bubble-Point or "
-            "Inside-Out (HYSIM).")
+            "Inside-Out.")
 
     def _start_solver(self, job):
         import time
@@ -709,7 +709,7 @@ class MainWindow(QMainWindow):
         # targets when the real column runs at E<1.
         if method is None:
             method = self.sim_tab.solver_combo.currentText()
-        is_inside_out = "Inside-Out" in method or method.startswith("HYSIM")
+        is_inside_out = "Inside-Out" in method
         rigorous = solve_inside_out if is_inside_out else solve_bubble_point
         # The energy balance is an Inside-Out feature (its flows_hook seam); the
         # Wang-Henke bubble-point path stays CMO. Fold the hook into knobs only
@@ -778,10 +778,10 @@ class MainWindow(QMainWindow):
         return stats.get("solver", solve_bubble_point)(si, **knobs)
 
     def _solve_inside_out(self) -> dict:
-        """Run the Inside-Out (HYSIM) solver, with the Abort flag as cancel hook."""
+        """Run the Inside-Out solver, with the Abort flag as cancel hook."""
         from core.column_solvers import solve_inside_out
         stats = {}
-        si, knobs = self._gather_rigorous_inputs(method="Inside-Out (HYSIM)",
+        si, knobs = self._gather_rigorous_inputs(method="Inside-Out",
                                                  stats=stats)
         self._abort_flag = False
         return stats.get("solver", solve_inside_out)(
