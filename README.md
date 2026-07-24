@@ -1,30 +1,35 @@
 # ColumnForge — Distillation Column Solver
 
-[![CI](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml/badge.svg)](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml)
+<!-- [![CI](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml/badge.svg)](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml) -->
 
-A PySide6 (Qt6) desktop app for designing and rating chemical-engineering
-distillation columns, styled after Aspen Plus's RadFrac. Everything —
-GUI, thermodynamics, and every solver — is pure Python (NumPy/SciPy), no
-compiled dependency required to run it.
-
-<!-- Screenshot: the money shot, above the fold. A full window on a converged
-     multicomponent run, with the column diagram AND a composition profile plot
-     visible at once. A viewer should register "this is a real simulator" in one
-     glance, before reading a word. -->
+A PySide6 (Qt6) desktop app for designing and modeling distillation columns.
+ColumnForge aims to provide an extensive toolbox for column synthesis and
+verification via rigorous solving. Tools for preliminary column design include
+but are not limited to residue curve mapping, boundary value method,
+Fenske-Underwood-Gilliland, and visualization of thermodynamic properties.
 
 ![ColumnForge solving a multicomponent column](docs/img/hero.png)
 
 ## Why this exists
 
-Commercial column simulators (Aspen Plus, HYSYS, ChemCAD) are black boxes:
-you get an answer, not the Newton iteration that produced it. ColumnForge is
-the opposite bet — every solver is legible, self-testing Python you can step
-through, from the Antoine fit to the final tridiagonal solve. It was built to
-answer a specific question honestly: _what does it actually take to converge
-a multicomponent column, end to end?_ Three independent solver paths (a
-classical Wang-Henke MESH solve, a Boston-Sullivan Inside-Out solve, and a
-difference-point-chain boundary-value sizing tool) exist so their answers can be
-checked against each other, not just against a textbook.
+Commercial process simulators provide powerful column solvers, but their design
+workflows and initialization methods are often proprietary and difficult to
+inspect or extend. This project provides an open-source, transparent distillation
+toolkit that combines thermodynamic analysis, preliminary design, rigorous
+initialization, and simulation in one workflow. By integrating tools such as FUG,
+BVM, RCM, Txy/Pxy analysis, and a rigorous MESH solver, it enables faster
+troubleshooting, deeper insight into column behavior, and more reliable simulation
+initialization.
+
+<!-- Commercial column simulators (Aspen Plus, HYSYS, ChemCAD) are black boxes: -->
+<!-- you get an answer, not the Newton iteration that produced it. ColumnForge is -->
+<!-- the opposite bet — every solver is legible, self-testing Python you can step -->
+<!-- through, from the Antoine fit to the final tridiagonal solve. It was built to -->
+<!-- answer a specific question honestly: _what does it actually take to converge -->
+<!-- a multicomponent column, end to end?_ Three independent solver paths (a -->
+<!-- classical Wang-Henke MESH solve, a Boston-Sullivan Inside-Out solve, and a -->
+<!-- difference-point-chain boundary-value sizing tool) exist so their answers can be -->
+<!-- checked against each other, not just against a textbook. -->
 
 ## Quick Start
 
@@ -288,10 +293,6 @@ change. **Full equations for every model below are in
   the shared seam behind the Inside-Out energy balance, enthalpy-based feed
   quality, and condenser subcooling.
 
-<!-- Screenshot: Thermodynamics sub-tab. Show the NRTL binary interaction
-     parameter table filled in for a real pair — clearest evidence that the
-     thermo is modelled, not hardcoded. -->
-
 ![Thermodynamics — activity model and binary interaction table](docs/img/thermodynamics-subtab.png)
 
 ## Modules tab
@@ -308,53 +309,17 @@ full column defined:
 | **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                  |
 | **Phase EQ**        | isothermal / vapour-fraction flash on the loaded species — a live test bench for whichever thermo model is selected |
 
-<!-- Screenshot: Modules tab, RCM. Residue-curve map on a ternary — the
-     preserved predecessor app, and the only module with a compiled dependency.
-     Show the RCM window with a full annotated residue-curve map. -->
-
 ![Modules tab — RCM residue-curve map](docs/img/rcm-module.png)
-
-<!-- Screenshot: Modules tab, BVM. The differentiator — show the
-     difference-point-chain / feasibility map on a ternary diagram. It is the
-     most technically distinctive artifact here and the thing a reviewer is
-     least likely to have seen in another portfolio project. -->
 
 ![Modules tab — BVM design map](docs/img/modules-bvm.png)
 
-<!-- Screenshot: the same BVM session in the profile view — full liquid-x and
-     temperature profiles plus the per-stage table, showing BVM produces a
-     complete warm start, not just a feasibility yes/no. -->
-
 ![Modules tab — BVM stage/temperature profile](docs/img/bvm-profile-prediction.png)
-
-<!-- Screenshot: Modules tab, Shortcut (FUG). Params on the left (keys,
-     recoveries, reflux factor), and on the right the Gilliland stages-vs-reflux
-     curve with the Nmin/Rmin asymptotes and the operating point marked, plus
-     the per-component xD/xB table. -->
 
 ![Modules tab — Shortcut (FUG) stages-vs-reflux](docs/img/modules-fug.png)
 
-<!-- Screenshot: Modules tab, Txy/Pxy. A binary bubble/dew envelope at fixed P
-     with the azeotrope marked, and the singular-point table below. -->
-
 ![Modules tab — Txy/Pxy binary envelope](docs/img/modules-txy.png)
 
-<!-- Screenshot: Modules tab, Pure Components. The searchable species database
-     with a component selected and its Psat(T) curve plotted. -->
-
-<!-- ![Modules tab — Pure Components database and Psat(T)](docs/img/modules-pure.png) -->
-
-<!-- Screenshot: Modules tab, Phase EQ. An isothermal/vapour-fraction flash
-     result on the loaded species — the live thermo test bench. -->
-
-<!-- ![Modules tab — Phase EQ flash bench](docs/img/modules-phaseeq.png) -->
-
 ## Column setup and results
-
-<!-- Screenshot: Specifications tab. Show the interactive column overview
-     diagram with a stage selected and the DoF ledger reading "fully
-     specified" — the most Aspen-like screen in the app, and the one that
-     sells the UI work. -->
 
 ![Specifications tab — interactive column diagram and DoF status](docs/img/specifications-tab.png)
 
@@ -364,9 +329,9 @@ full column defined:
   degrees-of-freedom status (`core/dof.py`) — the app tells you exactly how
   many more specs it needs, and which kinds are valid under the active flow
   model, before you hit run.
-- **Interactive column diagram** (Specifications → Column Overview): stages,
-  feeds, draws, and interheater/intercooler modules on one canvas.
-- **Complex topology**: interheaters/intercoolers carry a signed duty the
+- **Interactive column sanbox** (Specifications → Column Overview): stages,
+  feeds, draws, and interreboiler/intercooler modules on one canvas.
+- **Complex topology**: interreboilers/intercoolers carry a signed duty the
   energy balance consumes as a real per-stage term.
 - **Threaded solves**: every solver runs on a QThread with live
   iteration/residual progress and a real Abort.
@@ -377,11 +342,6 @@ full column defined:
   are chosen independently of solver-internal units.
 - **Save/Load**: the full session persists to `.colx` — versioned JSON, never
   pickle, so an old save stays readable by a newer build and vice versa.
-
-<!-- Screenshot: Results tab. Show off the plotting depth — a McCabe-Thiele
-     diagram (or the ternary residue-curve overlay) alongside the product-stream
-     summary table with duties in kW, so the numbers read as engineering-grade
-     rather than toy output. -->
 
 ![Results tab — composition profile and stream summary](docs/img/results-tab.png)
 
@@ -433,27 +393,6 @@ runs the full suite plus `pyflakes` on Python 3.11 and 3.12.
   yet" tooltip.
 - `.colx` files are versioned JSON — no pickle, so an old save stays
   readable by a newer build and vice versa.
-
-## Screenshots
-
-Every embed points at `docs/img/*.png`, with an HTML comment above it saying
-what that shot shows off. Captured so far:
-
-- `docs/img/hero.png` — converged run, diagram + profile plot together
-- `docs/img/specifications-tab.png` — column diagram + DoF ledger
-- `docs/img/thermodynamics-subtab.png` — NRTL interaction table
-- `docs/img/results-tab.png` — McCabe-Thiele + stream summary
-- `docs/img/rcm-module.png` — RCM ternary residue-curve map
-- `docs/img/modules-bvm.png` — BVM ternary feasibility map
-- `docs/img/bvm-profile-prediction.png` — BVM stage/temperature profile
-
-Still to capture (the embeds render as broken-image placeholders until you
-drop a file with the matching name — run the app, open the module, screenshot):
-
-- `docs/img/modules-fug.png` — Shortcut (FUG) stages-vs-reflux curve
-- `docs/img/modules-txy.png` — Txy/Pxy binary envelope
-- `docs/img/modules-pure.png` — Pure Components database + Psat(T)
-- `docs/img/modules-phaseeq.png` — Phase EQ flash bench
 
 ## Roadmap / not yet built
 
