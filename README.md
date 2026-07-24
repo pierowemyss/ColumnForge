@@ -1,35 +1,23 @@
-# ColumnForge — Distillation Column Solver
+# ColumnForge
 
-<!-- [![CI](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml/badge.svg)](https://github.com/pierowemyss/ColumnForge/actions/workflows/ci.yml) -->
-
-A PySide6 (Qt6) desktop app for designing and modeling distillation columns.
-ColumnForge aims to provide an extensive toolbox for column synthesis and
-verification via rigorous solving. Tools for preliminary column design include
-but are not limited to residue curve mapping, boundary value method,
-Fenske-Underwood-Gilliland, and visualization of thermodynamic properties.
+A PySide6 (Qt6) desktop app for designing and modeling distillation columns:
+thermodynamic analysis, preliminary design, and rigorous solving in one workflow.
 
 ![ColumnForge solving a multicomponent column](docs/img/hero.png)
 
 ## Why this exists
 
-Commercial process simulators provide powerful column solvers, but their design
-workflows and initialization methods are often proprietary and difficult to
-inspect or extend. This project provides an open-source, transparent distillation
-toolkit that combines thermodynamic analysis, preliminary design, rigorous
-initialization, and simulation in one workflow. By integrating tools such as FUG,
-BVM, RCM, Txy/Pxy analysis, and a rigorous MESH solver, it enables faster
-troubleshooting, deeper insight into column behavior, and more reliable simulation
-initialization.
+Commercial simulators ship powerful column solvers, but their design workflows
+and initialization methods are proprietary and hard to inspect or extend.
+ColumnForge is the open version of that workflow, with the synthesis tools
+(RCM, BVM, FUG, Txy/Pxy) feeding the rigorous solver directly.
 
-<!-- Commercial column simulators (Aspen Plus, HYSYS, ChemCAD) are black boxes: -->
-<!-- you get an answer, not the Newton iteration that produced it. ColumnForge is -->
-<!-- the opposite bet — every solver is legible, self-testing Python you can step -->
-<!-- through, from the Antoine fit to the final tridiagonal solve. It was built to -->
-<!-- answer a specific question honestly: _what does it actually take to converge -->
-<!-- a multicomponent column, end to end?_ Three independent solver paths (a -->
-<!-- classical Wang-Henke MESH solve, a Boston-Sullivan Inside-Out solve, and a -->
-<!-- difference-point-chain boundary-value sizing tool) exist so their answers can be -->
-<!-- checked against each other, not just against a textbook. -->
+|                       | commercial simulator          | ColumnForge                                        |
+| --------------------- | ----------------------------- | -------------------------------------------------- |
+| solver internals      | opaque                        | readable Python, one self-check per module          |
+| initialization        | proprietary                   | BVM/FUG warm start, every intermediate visible      |
+| preliminary design    | separate tools, manual bridge | RCM/BVM/FUG in-app, sharing the session's thermo    |
+| when it fails to converge | "no solution found"       | named section, pinch, or spec that caused it        |
 
 ## Quick Start
 
@@ -43,14 +31,17 @@ python launch.py                       # run the GUI (canonical entry point)
 module directly, replicate those paths:
 `PYTHONPATH=src:src/python python -m gui.main_window`.
 
+**Solver backend.** Python is the backend that ships today, and it needs no
+compiler. A compiled C/Fortran backend selectable from the UI is in progress;
+the sources live in `src/native/`.
+
 ### The RCM module needs a compiled library
 
-Everything above is pure Python — no compiler required. The one exception is
-the **RCM** module (residue-curve maps), which calls a Fortran/C solver through
-`ctypes`. Prebuilt libraries ship in `src/side_features/freeRCM/lib/`, but they
-are **x86_64 only**; on a different architecture (an arm64 Python on Apple
-Silicon, for instance) they won't load and the module shows
-"Compile RCM_solv.c to use this module." instead of a plot. To build them:
+**RCM** (residue-curve maps) calls a Fortran/C solver through `ctypes`.
+Prebuilt libraries ship in `src/side_features/freeRCM/lib/`, but they are
+x86_64 only. On a different architecture (an arm64 Python on Apple Silicon,
+say) they will not load and the module shows "Compile RCM_solv.c to use this
+module." instead of a plot. To build them:
 
 ```bash
 cd src/side_features/freeRCM/build && make    # needs gfortran + a C compiler
@@ -60,40 +51,49 @@ The rest of the app is unaffected either way.
 
 ## Architecture
 
-ColumnForge is three layers. The GUI never does numerical work; it builds a
-plain-data description of the column and hands it to a solver.
+Three layers. The GUI never does numerical work; it builds a plain-data
+description of the column and hands it to a solver.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  gui/                                                            │
-│    WindowState  ──single source of truth for the whole session   │
-│    tabs/  (Initialization → Specifications → Simulation →        │
-│            Results → Modules)          panels/   state/          │
-└───────────────────────────┬───────────────────────────────────────┘
-                             │ WindowState.build_solver_input()
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  core/                                                            │
-│    SolverInput  ──canonical column: open per-stage NumPy arrays  │
-│    thermodynamics.py  (Antoine/PLXANT, K-values, activity/EOS)   │
-│    column_solvers.py  (Bubble-Point, Inside-Out)                 │
-│    dof.py / operating_specs.py  (spec ledger → (R, D))           │
-│    material_balance.py / enthalpy.py / shortcut.py / flash.py    │
-└───────────────────────────┬───────────────────────────────────────┘
-                             │ (BVM sizes → warm-starts →)
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  side_features/bvm/          difference-point-chain             │
-│                              boundary-value sizing (Modules tab)│
-│  side_features/freeRCM/      residue-curve maps (Modules tab)    │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph GUI["gui/ &nbsp; Qt layer"]
+        WS["<b>WindowState</b><br/>single source of truth"]
+        TABS["tabs/ &nbsp; Initialization → Specifications →<br/>Simulation → Results → Modules<br/>panels/ &nbsp; state/"]
+        WS --- TABS
+    end
+
+    subgraph CORE["core/ &nbsp; Qt-free solver library"]
+        SI["<b>SolverInput</b><br/>canonical column, per-stage NumPy arrays"]
+        TH["thermodynamics.py<br/>Antoine/PLXANT, K-values, activity, EOS"]
+        CS["column_solvers.py<br/>Bubble-Point &nbsp;·&nbsp; Inside-Out"]
+        DOF["dof.py / operating_specs.py<br/>spec ledger → (R, D)"]
+        BAL["material_balance.py · enthalpy.py<br/>shortcut.py · flash.py"]
+        SI --> CS
+        TH --> CS
+        DOF --> SI
+        BAL --> CS
+    end
+
+    subgraph SIDE["side_features/ &nbsp; Modules tab"]
+        BVM["<b>bvm/</b><br/>difference-point-chain<br/>boundary-value sizing"]
+        RCM["<b>freeRCM/</b><br/>residue-curve maps"]
+    end
+
+    GUI -->|"build_solver_input()"| CORE
+    BVM -->|"warm start: stages + profiles"| CORE
+    CORE -.->|"species, thermo model"| SIDE
+
+    style WS fill:#1f6feb,stroke:#1f6feb,color:#fff
+    style SI fill:#1f6feb,stroke:#1f6feb,color:#fff
+    style CS fill:#238636,stroke:#238636,color:#fff
+    style BVM fill:#8957e5,stroke:#8957e5,color:#fff
+    style RCM fill:#8957e5,stroke:#8957e5,color:#fff
 ```
 
-`core` never imports `gui` — it's a standalone library you could drive from
-a script or a Jupyter notebook with no Qt installed. Every `core` module also
-carries a runnable self-check (`python -m core.column_solvers` and friends),
-so correctness isn't only asserted by the pytest suite; each file vouches for
-itself.
+`core` never imports `gui`; it is a standalone library you can drive from a
+script or notebook with no Qt installed. Every `core` module carries a runnable
+self-check (`python -m core.column_solvers` and friends), so each file vouches
+for itself independently of the pytest suite.
 
 ## The solvers
 
@@ -104,13 +104,12 @@ itself.
 | **BVM**                | difference-point-chain boundary-value method | _is this split feasible, and how many stages does it need?_ | sizing/feasibility, energy balance, reactive stages |
 | **Shortcut (FUG)**     | Fenske-Underwood-Gilliland-Kirkbride         | back-of-envelope N, R<sub>min</sub>, feed stage             | screening tool, constant α                          |
 
-### Bubble-Point — Wang-Henke MESH
+### Bubble-Point (Wang-Henke MESH)
 
-The textbook rigorous solve: **M**aterial balance, **E**quilibrium,
-**S**ummation, **H**eat balance, solved stage-by-stage until temperatures
-stop moving. ColumnForge assembles the per-component material balance as a
-tridiagonal system in liquid composition and solves it with the Thomas
-algorithm — one linear solve per component, per outer iteration:
+**M**aterial balance, **E**quilibrium, **S**ummation, **H**eat balance, solved
+stage-by-stage until temperatures stop moving. The per-component material
+balance is a tridiagonal system in liquid composition, solved with the Thomas
+algorithm: one linear solve per component, per outer iteration.
 
 $$
 \underbrace{-L_{n-1} x_{i,n-1}}_{\text{liquid from stage above}} + \underbrace{\big(L_n + V_n K_{i,n}\big) x_{i,n}}_{\text{leaving stage } n} + \underbrace{\big(-V_{n+1} K_{i,n+1} x_{i,n+1}\big)}_{\text{vapour from stage below}} = F_n z_{i,n}
@@ -122,26 +121,30 @@ $$
 \text{Summation:} \quad \sum_i K_{i,n} x_{i,n} = 1 \quad \Rightarrow \quad T_n \text{ (bubble point)}
 $$
 
-with $K_i = \gamma_i \phi_i^{\mathrm{sat}} P_i^{\mathrm{sat}}(T) / (\phi_i^{V} P)$ (see
-[Thermodynamics](docs/thermodynamics.md)).
+with $K_i = \gamma_i \phi_i^{\mathrm{sat}} P_i^{\mathrm{sat}}(T) / (\phi_i^{V} P)$
+(see [Thermodynamics](docs/thermodynamics.md)).
 
-Outer loop: assemble the tridiagonal system at the current `T` profile →
-Thomas-solve for `x` → bubble-point each stage for a new `T` → repeat until
-`max|ΔT| < tol`. Constant molar overflow (CMO) by default; an optional
-`flows_hook` seam lets an energy balance replace the CMO flow assumption
-without touching the assembly code.
+Outer loop:
 
-### Inside-Out (HYSIM) — two-tier solve
+1. assemble the tridiagonal system at the current `T` profile
+2. Thomas-solve for `x`
+3. bubble-point each stage for a new `T`
+4. repeat until `max|ΔT| < tol`
 
-The trick Boston & Sullivan used to make rigorous solves converge on stiff,
-highly non-ideal systems: don't call the expensive thermodynamics (activity
-model, Antoine, EOS) every inner iteration. Split into an **outer** loop that
-refreshes rigorous K-values and freezes them into per-stage relative
-volatilities, and a cheap **inner** loop that iterates only those frozen
-ratios against the material balance:
+Constant molar overflow (CMO) by default. An optional `flows_hook` seam lets an
+energy balance replace the CMO flow assumption without touching the assembly
+code.
 
-**Outer** (expensive thermo, once per pass) — refresh rigorous K-values, then
-freeze a per-stage base K and relative volatilities:
+### Inside-Out (HYSIM), two-tier solve
+
+Rigorous thermodynamics (activity model, Antoine, EOS) is too expensive to call
+every inner iteration. Boston and Sullivan's split: an **outer** loop refreshes
+rigorous K-values and freezes them into per-stage relative volatilities, and a
+cheap **inner** loop iterates only those frozen ratios against the material
+balance.
+
+**Outer** (expensive thermo, once per pass), freeze a per-stage base K and
+relative volatilities:
 
 $$
 K_{i,n} = \frac{\gamma_{i,n} \phi_i^{\mathrm{sat}} P^{\mathrm{sat}}_i(T_n)}{\phi^{V}_{i,n} P},
@@ -151,8 +154,8 @@ K^{b}_{n} = \Big( \textstyle\prod_i K_{i,n} \Big)^{1/n_c},
 \alpha_{i,n} = \frac{K_{i,n}}{K^{b}_{n}}
 $$
 
-**Inner** (cheap, no thermo calls, iterated to `tol`) — hold $\alpha$ fixed and
-converge the base K against the material balance and bubble constraint:
+**Inner** (no thermo calls), hold $\alpha$ fixed and converge the base K against
+the material balance and bubble constraint:
 
 $$
 x = \text{tridiagonal solve at } K_{i,n} = \alpha_{i,n} K^{b}_{n},
@@ -162,29 +165,26 @@ K^{b}_{n,\text{new}} = \Big( \textstyle\sum_i \alpha_{i,n} x_{i,n} \Big)^{-1},
 \text{until } \frac{|K^{b}_{n,\text{new}} - K^{b}_{n}|}{K^{b}_{n}} < \text{tol}
 $$
 
-Refresh $T$ from a rigorous bubble-point on the new $x$, and repeat the outer
-pass until $\max|\Delta T| < \text{tol}$.
+Refresh $T$ from a rigorous bubble-point on the new $x$, repeat the outer pass
+until $\max|\Delta T| < \text{tol}$. Because the inner loop reuses one frozen
+$\alpha$, most of the iteration avoids the thermo evaluation that dominates cost
+on multicomponent, non-ideal mixtures.
 
-Because the inner loop reuses one frozen $\alpha$, most of the iteration
-avoids the thermo evaluation that dominates cost on multicomponent,
-non-ideal mixtures — the same reason production simulators default to it.
+### BVM, difference-point chain (Boundary Value Method)
 
-### BVM — difference-point chain (Boundary Value Method)
-
-BVM answers a different question than the two solvers above: not _converge
-this column_, but _is this split even reachable, and with how many stages?_
-Given an operating point `(R, S, E/F)`, it builds a **difference-point
-chain** — one difference point $\Delta_k$ per column section — and marches
-composition profiles inward from each product end until adjacent profiles
-meet. The difference point is the net-flow composition of section $k$ (a mass
-balance), collinear with every $(x,y)$ pair the section passes through:
+Not _converge this column_ but _is this split reachable, and with how many
+stages?_ Given an operating point `(R, S, E/F)`, BVM builds one **difference
+point** $\Delta_k$ per column section, the net-flow composition of that section,
+collinear with every $(x,y)$ pair the section passes through:
 
 $$
 \Delta_k = \frac{V_k y_k - L_k x_k}{V_k - L_k}
 $$
 
-Each section is then marched stage by stage — an equilibrium step followed by
-an operating-line step anchored on $\Delta_k$:
+Each section marches stage by stage, an equilibrium step followed by an
+operating-line step anchored on $\Delta_k$ (the operating-line step is the
+difference-point definition rearranged, which is what makes $\Delta_k$,
+$x_{k,n+1}$ and $y_{k,n}$ collinear):
 
 $$
 \underbrace{y_{k,n} = K(x_{k,n}, T, P) \cdot x_{k,n}}_{\text{equilibrium step}}
@@ -192,17 +192,13 @@ $$
 \underbrace{x_{k,n+1} = \frac{V_k y_{k,n} - (V_k - L_k) \Delta_k}{L_k}}_{\text{operating-line step}}
 $$
 
-(the operating-line step is just the difference-point definition rearranged —
-which is what makes $\Delta_k$, $x_{k,n+1}$ and $y_{k,n}$ collinear.)
-
-Two profiles are **connected** when they come within tolerance of each
-other in full $\mathbb{R}^{C-1}$ composition space (not a 2-D curve crossing — that
-only exists for ternaries, which is why classical textbook BVM is
-ternary-only). The stage count where that connection happens _is_ the
-design output, not an input. Feasibility, R<sub>min</sub>, feed/draw
-placement, and reactive-stage support (Ung-Doherty transform) all build on
-top of this chain; see `src/side_features/bvm/README.md` for the
-full module-by-module writeup. Module map:
+Profiles march inward from each product end until adjacent profiles meet. Two
+profiles are **connected** when they come within tolerance in full
+$\mathbb{R}^{C-1}$ composition space, not as a 2-D curve crossing, which is why
+this is not limited to the ternaries of textbook BVM. The stage count where the
+connection happens _is_ the output, not an input. Feasibility, R<sub>min</sub>,
+feed/draw placement, and reactive stages (Ung-Doherty transform) build on the
+same chain.
 
 ```
 problem.py    → feeds/draws/spec → overall balance (x_D, x_B, D, B)
@@ -219,22 +215,22 @@ handoff.py    → package stages + profiles as a rigorous-solver warm start
 api.py        → size_column / feasibility_map / to_solver (public entry points)
 ```
 
-A sized BVM column can be sent straight to Bubble-Point as a **warm start**
-(`api.to_solver`), converging in a fraction of the cold-start iterations —
-the whole reason a sizing tool and a rigorous solver share a repository.
+A sized BVM column goes straight to Bubble-Point as a **warm start**
+(`api.to_solver`), converging in a fraction of the cold-start iterations. Full
+module-by-module writeup: `src/side_features/bvm/README.md`.
 
 ### Shortcut (FUG)
 
-The pencil-and-paper method, kept honest as closed-form correlations rather
-than a solve — the "where do I even start" tool that seeds a rigorous run:
+Closed-form correlations rather than a solve, the "where do I even start" tool
+that seeds a rigorous run.
 
-**Fenske** — minimum stages at total reflux:
+**Fenske**, minimum stages at total reflux:
 
 $$
 N_{\min} = \frac{\ln \big[ (x_{LK}/x_{HK})_D (x_{HK}/x_{LK})_B \big]}{\ln \alpha_{LK,HK}}
 $$
 
-**Underwood** — minimum reflux (find the root $\theta$ between the key volatilities):
+**Underwood**, minimum reflux (root $\theta$ between the key volatilities):
 
 $$
 \sum_i \frac{\alpha_i z_i}{\alpha_i - \theta} = 1 - q
@@ -242,7 +238,7 @@ $$
 R_{\min} + 1 = \sum_i \frac{\alpha_i x_{D,i}}{\alpha_i - \theta}
 $$
 
-**Gilliland/Molokanov** — actual stages at operating reflux $R$:
+**Gilliland/Molokanov**, actual stages at operating reflux $R$:
 
 $$
 X = \frac{R - R_{\min}}{R + 1},
@@ -252,7 +248,7 @@ Y = 1 - \exp \left[ \frac{1 + 54.4X}{11 + 117.2X} \cdot \frac{X - 1}{\sqrt{X}} \
 N = \frac{Y + N_{\min}}{1 - Y}
 $$
 
-**Kirkbride** — feed-stage location ($N_r$ rectifying, $N_s$ stripping stages):
+**Kirkbride**, feed-stage location ($N_r$ rectifying, $N_s$ stripping stages):
 
 $$
 \frac{N_r}{N_s} = \left[ \frac{B}{D} \cdot \frac{x_{F,HK}}{x_{F,LK}} \cdot \left( \frac{x_{B,LK}}{x_{D,HK}} \right)^{2} \right]^{0.206}
@@ -260,90 +256,107 @@ $$
 
 ## Thermodynamics
 
-Every solver goes through one seam — the equilibrium ratio $K_i = y_i/x_i$:
+Every solver goes through one seam, the equilibrium ratio $K_i = y_i/x_i$:
 
 $$
 K_i = \frac{\gamma_i(x,T) \phi_i^{\mathrm{sat}} P^{\mathrm{sat}}_i(T)}{\phi_i^{V}(y,T,P) P}
 $$
 
-Swapping a model means swapping what plugs into that seam — solvers never
-change. **Full equations for every model below are in
-[`docs/thermodynamics.md`](docs/thermodynamics.md).**
+Swapping a model means swapping what plugs into that seam. Solvers never change.
 
-- **Vapour pressure**: Antoine ($\log_{10} P^{\mathrm{sat}} = A - B/(T+C)$) or
-  Aspen extended Antoine / PLXANT
-  ($\ln P^{\mathrm{sat}} = C_1 + C_2/(C_3+T) + C_4 T + C_5\ln T + C_6 T^{C_7}$),
-  dispatched automatically on coefficient-matrix width.
-- **Activity coefficients** (non-ideal liquids): **NRTL**, **Wilson**,
-  **UNIQUAC**, two-suffix **Margules**, and **UNIFAC** group-contribution
-  (needs no binary parameters — built from the bundled group-interaction
-  database). Each model raises a user-facing error when its parameters are
-  missing rather than silently falling back to ideal.
-- **Equation of state** (vapour-phase fugacity): **SRK**, for pressure
-  effects on relative volatility (validated on a 4-atm depropanizer).
-- **Component database**: 78 curated species (`core/data/components.json`) —
-  Antoine/PLXANT fits, Tc/Pc/ω, Cp, latent heat — searchable by name, alias,
-  CAS, or formula, one click to load into a column. Every record is gated by
-  a physical-consistency test (Antoine reproduces Tb within 1 K, ΔHvap
-  matches Clausius-Clapeyron within 12%). 7 curated NRTL binary pairs ship
-  with it, gated against known azeotropes (ethanol/water,
-  2-propanol/water, acetone/chloroform, acetone/methanol).
-- **Enthalpy**: constant liquid $c_p$ + Watson-corrected latent heat
-  ($h_V(T) = h_L(T) + \Delta H_{\mathrm{vap},T_b} [(T_c-T)/(T_c-T_b)]^{0.38}$),
-  the shared seam behind the Inside-Out energy balance, enthalpy-based feed
-  quality, and condenser subcooling.
+| layer                 | models                                                                                                                                                                                                    |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **vapour pressure**   | Antoine $\log_{10} P^{\mathrm{sat}} = A - B/(T+C)$, or Aspen extended Antoine / PLXANT $\ln P^{\mathrm{sat}} = C_1 + C_2/(C_3+T) + C_4 T + C_5\ln T + C_6 T^{C_7}$, dispatched on coefficient-matrix width |
+| **activity** $\gamma$ | NRTL, Wilson, UNIQUAC, two-suffix Margules, UNIFAC group contribution (no binary parameters needed, built from the bundled group-interaction database)                                                     |
+| **equation of state** | SRK vapour-phase fugacity, for pressure effects on relative volatility (validated on a 4-atm depropanizer)                                                                                                 |
+| **enthalpy**          | constant liquid $c_p$ + Watson-corrected latent heat, $h_V(T) = h_L(T) + \Delta H_{\mathrm{vap},T_b} \left[ (T_c-T)/(T_c-T_b) \right]^{0.38}$                                                              |
 
-![Thermodynamics — activity model and binary interaction table](docs/img/thermodynamics-subtab.png)
+Full equations for every model: [`docs/thermodynamics.md`](docs/thermodynamics.md).
+
+- **78 curated components** (`core/data/components.json`), searchable by name,
+  alias, CAS, or formula, one click to load into a column. Every record is gated
+  by a physical-consistency test: Antoine reproduces Tb within 1 K, ΔHvap
+  matches Clausius-Clapeyron within 12%.
+- **7 NRTL binary pairs** ship with it, gated against known azeotropes
+  (ethanol/water, 2-propanol/water, acetone/chloroform, acetone/methanol).
+- **No silent fallback.** A model with missing parameters raises a user-facing
+  error instead of quietly reverting to ideal.
+- The enthalpy seam is shared by the Inside-Out energy balance, enthalpy-based
+  feed quality, and condenser subcooling.
+
+![Thermodynamics, activity model and binary interaction table](docs/img/thermodynamics-subtab.png)
 
 ## Modules tab
 
-Standalone tools that share the session's species/thermo but don't need a
-full column defined:
+Standalone tools that share the session's species and thermo but need no full
+column defined.
 
-| module              | what it does                                                                                                        |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **RCM**             | residue-curve maps (the preserved predecessor app, `side_features/freeRCM/`)                                        |
-| **BVM**             | size/feasibility per above — size at one `R`, sweep a design map, send a warm start to the rigorous solver          |
-| **Shortcut (FUG)**  | Fenske/Underwood/Gilliland/Kirkbride report + stages-vs-reflux curve                                                |
-| **Txy/Pxy**         | binary bubble/dew loci at fixed P or T, plus an azeotrope table (singular-point classification)                     |
-| **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                  |
-| **Phase EQ**        | isothermal / vapour-fraction flash on the loaded species — a live test bench for whichever thermo model is selected |
+| module              | what it does                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **RCM**             | residue-curve maps (the preserved predecessor app, `side_features/freeRCM/`)                                       |
+| **BVM**             | size at one `R`, sweep a design map, send a warm start to the rigorous solver                                      |
+| **Shortcut (FUG)**  | Fenske/Underwood/Gilliland/Kirkbride report + stages-vs-reflux curve                                               |
+| **Txy/Pxy**         | binary bubble/dew loci at fixed P or T, plus an azeotrope table (singular-point classification)                    |
+| **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                 |
+| **Phase EQ**        | isothermal / vapour-fraction flash on the loaded species, a live test bench for whichever thermo model is selected |
 
-![Modules tab — RCM residue-curve map](docs/img/rcm-module.png)
-
-![Modules tab — BVM design map](docs/img/modules-bvm.png)
-
-![Modules tab — BVM stage/temperature profile](docs/img/bvm-profile-prediction.png)
-
-![Modules tab — Shortcut (FUG) stages-vs-reflux](docs/img/modules-fug.png)
-
-![Modules tab — Txy/Pxy binary envelope](docs/img/modules-txy.png)
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/img/modules-bvm.png"><img src="docs/img/modules-bvm.png" alt="BVM design map"></a>
+      <br><b>BVM</b> feasibility / design map
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/img/bvm-profile-prediction.png"><img src="docs/img/bvm-profile-prediction.png" alt="BVM stage and temperature profile"></a>
+      <br><b>BVM</b> stage and temperature profile
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/img/rcm-module.png"><img src="docs/img/rcm-module.png" alt="RCM residue-curve map"></a>
+      <br><b>RCM</b> residue-curve map
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/img/modules-txy.png"><img src="docs/img/modules-txy.png" alt="Txy/Pxy binary envelope"></a>
+      <br><b>Txy/Pxy</b> binary envelope + azeotropes
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/img/modules-fug.png"><img src="docs/img/modules-fug.png" alt="Shortcut FUG stages vs reflux"></a>
+      <br><b>Shortcut (FUG)</b> stages vs reflux
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/img/modules-phaseeq.png"><img src="docs/img/modules-phaseeq.png" alt="Phase EQ flash bench"></a>
+      <br><b>Phase EQ</b> flash bench
+    </td>
+  </tr>
+</table>
 
 ## Column setup and results
 
-![Specifications tab — interactive column diagram and DoF status](docs/img/specifications-tab.png)
+![Specifications tab, interactive column diagram and DoF status](docs/img/specifications-tab.png)
 
-- **Species & thermodynamics**: pick VLE/activity/EOS models, edit binary
-  interaction tables, search or hand-enter component properties.
-- **Column/streams/condenser/reboiler** configuration with a live
-  degrees-of-freedom status (`core/dof.py`) — the app tells you exactly how
-  many more specs it needs, and which kinds are valid under the active flow
-  model, before you hit run.
-- **Interactive column sanbox** (Specifications → Column Overview): stages,
-  feeds, draws, and interreboiler/intercooler modules on one canvas.
-- **Complex topology**: interreboilers/intercoolers carry a signed duty the
+- **Species & thermodynamics**: VLE/activity/EOS model choice, editable binary
+  interaction tables, searchable or hand-entered component properties.
+- **Live degrees-of-freedom status** (`core/dof.py`): how many more specs the
+  column needs, and which kinds are valid under the active flow model, before
+  you hit run.
+- **Interactive column sandbox** (Specifications → Column Overview): stages,
+  feeds, draws, interreboiler/intercooler modules on one canvas.
+- **Complex topology**: interreboilers and intercoolers carry a signed duty the
   energy balance consumes as a real per-stage term.
 - **Threaded solves**: every solver runs on a QThread with live
   iteration/residual progress and a real Abort.
-- **Results**: composition/temperature/pressure/flow/K-value/enthalpy
-  profile plots, a McCabe-Thiele diagram for binary columns, a
-  component-aware data table, product-stream summary with mass-balance
-  closure, and CSV export. Display units (°C/K/°F, kmol/h/kg/h, kW/MW/kJ/h)
-  are chosen independently of solver-internal units.
-- **Save/Load**: the full session persists to `.colx` — versioned JSON, never
-  pickle, so an old save stays readable by a newer build and vice versa.
+- **Results**: composition, temperature, pressure, flow, K-value, and enthalpy
+  profile plots; a McCabe-Thiele diagram for binary columns; a component-aware
+  data table; product-stream summary with mass-balance closure; CSV export.
+  Display units (°C/K/°F, kmol/h, kg/h, kW/MW/kJ/h) are independent of
+  solver-internal units.
+- **Save/Load**: the full session persists to `.colx`, versioned JSON, never
+  pickle.
 
-![Results tab — composition profile and stream summary](docs/img/results-tab.png)
+![Results tab, composition profile and stream summary](docs/img/results-tab.png)
 
 ## Project Structure
 
@@ -363,48 +376,46 @@ columnForge/
 │   ├── side_features/
 │   │   ├── bvm/           # difference-point-chain BVM solver (own README + tests/)
 │   │   └── freeRCM/       # preserved predecessor (residue curve maps)
-│   └── native/            # Fortran sources (nifco2.f90) — not bound to the app yet
+│   └── native/            # Fortran sources (nifco2.f90), not bound to the app yet
 ├── docs/                  # thermodynamics.md (equation reference), examples/, img/
 └── launch.py              # GUI entry point
 ```
 
 ## Testing
 
-The solver and state layers are Qt-free and self-checking. 113 tests, run
-headless:
+The solver and state layers are Qt-free and self-checking. 113 tests, headless:
 
 ```bash
 QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/bvm/tests/
 ```
 
-`src/python/tests/validation/` is the acceptance gate for solver changes —
-BTX ideal, a depropanizer through the PLXANT path, ethanol/water vs its
-known NRTL azeotrope, methanol/water vs Perry's VLE data. Every `core`
-module is also runnable standalone as a self-check, e.g.
-`PYTHONPATH=src/python python -m core.column_solvers`. CI (GitHub Actions)
-runs the full suite plus `pyflakes` on Python 3.11 and 3.12.
+`src/python/tests/validation/` is the acceptance gate for solver changes: BTX
+ideal, a depropanizer through the PLXANT path, ethanol/water against its known
+NRTL azeotrope, methanol/water against Perry's VLE data. Every `core` module is
+also runnable standalone as a self-check
+(`PYTHONPATH=src/python python -m core.column_solvers`). CI runs the full suite
+plus `pyflakes` on Python 3.11 and 3.12.
 
 ## Conventions worth knowing
 
-- **Stage 0 = distillate (top)** everywhere in the GUI and result profiles;
-  solvers may use a different internal ordering, converted at the boundary.
-- **Nothing is silently ignored**: every value you can enter is either
-  consumed by the active solver or visibly greyed out with a "not consumed
-  yet" tooltip.
-- `.colx` files are versioned JSON — no pickle, so an old save stays
-  readable by a newer build and vice versa.
+- **Stage 0 = distillate (top)** everywhere in the GUI and result profiles.
+  Solvers may use a different internal ordering, converted at the boundary.
+- **Nothing is silently ignored.** Every value you can enter is either consumed
+  by the active solver or visibly greyed out with a "not consumed yet" tooltip.
+- **`.colx` is versioned JSON**, never pickle, so an old save stays readable by
+  a newer build and vice versa.
 
-## Roadmap / not yet built
+## Roadmap
 
-- Native C/Fortran acceleration (`src/native/` sources exist but aren't
-  compiled or bound yet).
-- A full energy balance in the core Bubble-Point/Inside-Out solvers is
-  opt-in for Inside-Out; Bubble-Point is CMO-only (BVM has its own energy
-  balance already).
-- A full 3-section extractive BVM (interior-section stage counts are
-  feasibility-grade, not yet literature-exact — see the "known ceilings"
-  section of `src/side_features/bvm/README.md`).
+- **Selectable compiled backend.** Python today; C/Fortran sources exist in
+  `src/native/` but are not compiled or bound yet, and the UI toggle to choose
+  between them is still to come.
+- **Full energy balance** in the core solvers is opt-in for Inside-Out.
+  Bubble-Point is CMO-only (BVM already has its own energy balance).
+- **Full 3-section extractive BVM.** Interior-section stage counts are
+  feasibility-grade, not yet literature-exact; see "known ceilings" in
+  `src/side_features/bvm/README.md`.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
