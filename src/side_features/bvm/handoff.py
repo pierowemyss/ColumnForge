@@ -24,6 +24,11 @@ def to_solver(design):
     return {
         "n_stages": int(design["N_total"]),
         "feed_stage": int(col["feed_stage"]),
+        # every feed, top -> bottom: an extractive design has the entrainer stage
+        # above the main feed, and a warm start that pools them into one feed is
+        # a different column.
+        "feed_stages": [int(s) for s in design.get("feed_stages", [])
+                        or [col["feed_stage"]]],
         "draw_stages": ([int(design["side_draw_stage"])]
                         if "side_draw_stage" in design else []),
         "R": float(design["R"]),
@@ -56,6 +61,7 @@ def _demo():
     init = to_solver(d)
 
     N = init["n_stages"]
+    assert init["feed_stages"] == [init["feed_stage"]], init["feed_stages"]
     assert init["x0"].shape == (N, 3) and init["T0"].shape == (N,)
     assert np.allclose(init["x0"].sum(axis=1), 1.0, atol=1e-6)
     assert 0 < init["feed_stage"] < N - 1

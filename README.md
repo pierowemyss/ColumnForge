@@ -1,7 +1,11 @@
 # ColumnForge
 
-A PySide6 (Qt6) desktop app for designing and modeling distillation columns:
-thermodynamic analysis, preliminary design, and rigorous solving in one workflow.
+ColumnForge is a PySide6 desktop application containing an open-source
+toolkit for distillation column synthesis and rigorous equilibrium-stage
+simulation. Unlike most commercial simulators, it includes initialization
+and synthesis tools such as Boundary Value Methods (BVM), Rectification Bodies
+(RBM), Residue Curve Mapping (RCM), and other features for designing difficult
+columns and sending to a rigorous simulation in one integrated workflow.
 
 ![ColumnForge solving a multicomponent column](docs/img/hero.png)
 
@@ -10,13 +14,13 @@ thermodynamic analysis, preliminary design, and rigorous solving in one workflow
 Commercial simulators ship powerful column solvers, but their design workflows
 and initialization methods are proprietary and hard to inspect or extend.
 ColumnForge is the open version of that workflow, with the synthesis tools
-(RCM, BVM, FUG, Txy/Pxy) feeding the rigorous solver directly.
+(RCM, BVM, RBM, FUG, Txy/Pxy) feeding the rigorous solver directly.
 
 |                           | Commercial Simulator          | ColumnForge                                      |
 | ------------------------- | ----------------------------- | ------------------------------------------------ |
 | solver internals          | opaque                        | readable Python, one self-check per module       |
 | initialization            | proprietary                   | BVM/FUG warm start, every intermediate visible   |
-| preliminary design        | separate tools, manual bridge | RCM/BVM/FUG in-app, sharing the session's thermo |
+| preliminary design        | separate tools, manual bridge | RCM/BVM/RBM/FUG in-app, sharing the session's thermo |
 | when it fails to converge | "no solution found"           | named section, pinch, or spec that caused it     |
 
 ## Quick Start
@@ -76,7 +80,9 @@ flowchart TD
 
     subgraph SIDE["side_features/ &nbsp; Modules tab"]
         BVM["<b>bvm/</b><br/>difference-point-chain<br/>boundary-value sizing"]
+        RBM["<b>rbm/</b><br/>rectification bodies<br/>feasibility, R_min / R_max"]
         RCM["<b>freeRCM/</b><br/>residue-curve maps"]
+        RBM -->|"operating point"| BVM
     end
 
     GUI -->|"build_solver_input()"| CORE
@@ -87,6 +93,7 @@ flowchart TD
     style SI fill:#1f6feb,stroke:#1f6feb,color:#fff
     style CS fill:#238636,stroke:#238636,color:#fff
     style BVM fill:#8957e5,stroke:#8957e5,color:#fff
+    style RBM fill:#8957e5,stroke:#8957e5,color:#fff
     style RCM fill:#8957e5,stroke:#8957e5,color:#fff
 ```
 
@@ -103,6 +110,7 @@ flowchart TD
 | **Bubble-Point**   | Wang-Henke MESH                              | rigorous tray-by-tray profile                                | CMO, total condenser                                |
 | **Inside-Out**     | Boston-Sullivan two-tier                     | same, faster on stiff systems                                | CMO or full energy balance                          |
 | **BVM**            | difference-point-chain boundary-value method | Stages/section, $$R_(min)$$, $$E/F$$, optimal feed locations | sizing/feasibility, energy balance, reactive stages |
+| **RBM**            | rectification bodies (Bausa/Marquardt)       | feasibility, R<sub>min</sub> **and** R<sub>max</sub>, (E/F)<sub>min</sub> — no stage count | screening/feasibility, simple + extractive columns  |
 | **Shortcut (FUG)** | Fenske-Underwood-Gilliland-Kirkbride         | back-of-envelope N, R<sub>min</sub>, feed stage              | screening tool, constant α                          |
 
 ### Bubble-Point (Wang-Henke MESH)
@@ -173,19 +181,18 @@ on multicomponent, non-ideal mixtures.
 
 ### Boundary Value Method (BVM)
 
-Great for determining if a split is reachable, and with how many stages
-per section? Given an operating point `(R, S, E/F)`, BVM builds one **difference
-point** $\Delta_k$ per column section, the net-flow composition of that section,
-collinear with every $(x,y)$ pair the section passes through:
+Answers whether a split is reachable and how many stages each section needs.
+Given an operating point `(R, S, E/F)`, BVM builds one **difference point**
+$\Delta_k$ per column section — the section's net-flow composition, collinear
+with every $(x,y)$ pair the section passes through:
 
 $$
 \Delta_k = \frac{V_k y_k - L_k x_k}{V_k - L_k}
 $$
 
-Each section marches stage by stage, an equilibrium step followed by an
-operating-line step anchored on $\Delta_k$ (the operating-line step is the
-difference-point definition rearranged, which is what makes $\Delta_k$,
-$x_{k,n+1}$ and $y_{k,n}$ collinear):
+Each section marches stage by stage: an equilibrium step, then an operating-line
+step anchored on $\Delta_k$ (the difference-point definition rearranged, which is
+what keeps $\Delta_k$, $x_{k,n+1}$ and $y_{k,n}$ collinear):
 
 $$
 \underbrace{y_{k,n} = K(x_{k,n}, T, P) \cdot x_{k,n}}_{\text{equilibrium step}}
@@ -195,16 +202,62 @@ $$
 
 Profiles march inward from each product end until adjacent profiles meet. Two
 profiles are **connected** when they come within tolerance in full
-$\mathbb{R}^{C-1}$ composition space, not as a 2-D curve crossing, which is why
-this is not limited to the ternaries of textbook BVM. The stage count where the
-connection happens _is_ the output, not an input. Feasibility, R<sub>min</sub>,
-feed/draw placement, and (in the future) reactive stages (Ung-Doherty transform)
-build on the same chain.
+$\mathbb{R}^{C-1}$ composition space rather than as a 2-D curve crossing, so the
+method is not restricted to the ternaries of textbook BVM. The stage count at
+which the connection happens is an output, not an input. Feasibility,
+R<sub>min</sub>, feed/draw placement and reactive stages (Ung–Doherty transform)
+all build on the same chain.
+
+After Levy, Van Dongen & Doherty (1985) and Doherty & Malone, *Conceptual Design
+of Distillation Systems* (2001); reactive columns follow Ung & Doherty (1995).
 
 > [!TIP]
 > A sized BVM column goes straight to Bubble-Point as a **warm start**
-> (`api.to_solver`), converging in a fraction of the cold-start iterations. Full
-> module-by-module writeup: `src/side_features/bvm/README.md`.
+> (`api.to_solver`). Module-by-module writeup:
+> [`src/side_features/bvm/README.md`](src/side_features/bvm/README.md).
+
+### Rectification Body Method (RBM)
+
+BVM marches profiles and asks whether the curves meet. RBM never marches. A
+**pinch** is a stage where nothing changes any more: the equilibrium map and the
+section's operating line $y = a\,x + \mathbf{b}$ (with $a = L/V$ and
+$\mathbf{b} = (\Delta/V)\,\delta$, the same difference point BVM uses) return the
+composition to itself.
+
+$$
+K(x_p, T, P)\, x_p = a\, x_p + \mathbf{b}
+\qquad\Longleftrightarrow\qquad
+x_{p,i}\,\big(K_i - a\big) = b_i \quad \forall i
+$$
+
+Solving that algebraic system on every branch gives a section's pinch points;
+spanning them gives a **rectification body**, a linearised stand-in for the set
+its profiles can reach. Feasibility is then geometry: adjacent sections' bodies
+intersect (gap zero) exactly when one continuous profile can run the whole
+column.
+
+That buys three things marching does not:
+
+- The pinch equations are algebraic, so a component with a very small K costs
+  nothing. Marching amplifies it by ~1/K per stage.
+- Bodies are up to (C−1)-dimensional and intersect generically at any C; two 1-D
+  marched profiles generically miss for C ≥ 4.
+- An extractive column has a **maximum** reflux as well as a minimum — too much
+  reflux washes the entrainer out of the extractive section. The same test gives
+  both bounds, and sweeping them against entrainer flow gives the feasible
+  operating region, whose nose is (E/F)<sub>min</sub>.
+
+> [!IMPORTANT]
+> **RBM gives no stage count** — a body approximates the reachable set, not the
+> profile. Use RBM to locate a feasible operating point, BVM to size the column
+> there. It also wants **sharp** product specs: exact zeros in $x_D$/$x_B$ put
+> pinches on the simplex edges, where they can be bracketed. A smeared spec (98/2
+> recoveries) displaces every pinch off its edge; those are recovered by
+> continuation onto the parent face, and any that had to be clipped are counted
+> in the panel.
+
+After Bausa, von Watzdorf & Marquardt, *AIChE J.* **44**(10) 2181 (1998),
+extended to extractive columns by Brüggemann & Marquardt (2002).
 
 ### Shortcut (FUG)
 
@@ -266,6 +319,14 @@ I used AI to scrape some parameters for components and test them, and came up wi
   matches Clausius-Clapeyron within 12%.
 - **7 NRTL binary pairs** ship with it, gated against known azeotropes
   (ethanol/water, 2-propanol/water, acetone/chloroform, acetone/methanol).
+- **UNIFAC groups for 54 of the 78 components**, loaded with the component, so
+  UNIFAC needs no binary parameters and no typing — the way around a missing NRTL
+  pair. Each assignment is gated on adding up to the molecular formula, and the
+  ester/alcohol groups on reproducing two literature azeotropes (methyl
+  acetate/methanol 0.657 at 53.8 °C, ethyl acetate/ethanol 0.539 at 71.8 °C). The
+  other 24 are left blank on purpose: the curated group table cannot express them
+  (CH₄, ethers, CHCl₃, formic acid, pyridine, …) and UNIFAC then refuses that
+  species rather than running ideal.
 - The enthalpy seam is shared by the Inside-Out energy balance, enthalpy-based
   feed quality, and condenser subcooling.
 
@@ -283,7 +344,8 @@ column defined.
 | module              | what it does                                                                                                      |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | **RCM**             | residue-curve maps (the preserved predecessor app, `side_features/freeRCM/`)                                      |
-| **BVM**             | size at one `R`, sweep a design map, send a warm start to the rigorous solver                                     |
+| **BVM**             | size at one `R`, sweep a design map, send a warm start to the rigorous solver, or size a **reactive** column       |
+| **RBM**             | pinches + rectification bodies at one point, `r_min`/`r_max`, or the whole feasible **(E/F, r)** operating region  |
 | **Shortcut (FUG)**  | Fenske/Underwood/Gilliland/Kirkbride report + stages-vs-reflux curve                                              |
 | **Txy/Pxy**         | binary bubble/dew loci at fixed P or T, plus an azeotrope table (singular-point classification)                   |
 | **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                |
@@ -322,6 +384,35 @@ column defined.
   </tr>
 </table>
 
+### Reactive distillation (BVM module)
+
+Tick **Reaction** in the BVM module, type the stoichiometry (products +, reactants
+−), pick the reference component and give `Keq = exp(A + B/T[K])`, and the sizing
+runs in Ung–Doherty **transformed compositions**: same difference-point geometry,
+one fewer component, chemical equilibrium solved inside every stage. The results
+table shows the transformed profile alongside the **physical compositions and the
+reaction extent per stage**.
+
+Limits, enforced rather than assumed:
+
+- One equilibrium reaction, **ideal stages**, every stage catalytic (condenser and
+  reboiler included, so products sit on the reaction-equilibrium surface).
+  Efficiency, entrainer and *Send to Rigorous Solver* grey out with the reason —
+  the MESH solvers carry no reaction terms, so a reactive warm start would
+  converge a different column.
+- The transform must stay inside the composition simplex, which holds for a
+  **one-product** reaction with the product as reference (etherification,
+  hydration, hydrogenation). A two-product reaction — any esterification, ester
+  plus water — has no such reference, and the sizing says so
+  (`leaves_simplex`) instead of quietly returning a wrong column.
+- Dropping the reference has to leave **at least three** components, so one
+  reaction needs a four-component system (MTBE synthesis has its inert n-butane).
+  A two-component transformed problem puts every profile on one line, where
+  closest-approach connection is degenerate; that case is refused, not guessed.
+
+Details and the upgrade path:
+[`src/side_features/bvm/README.md`](src/side_features/bvm/README.md).
+
 ## Column setup and results
 
 ![Specifications tab, interactive column diagram and DoF status](docs/img/specifications-tab.png)
@@ -357,35 +448,39 @@ columnForge/
 │   │   ├── gui/
 │   │   │   ├── tabs/      # Initialization / Specifications / Simulation / Results / Modules
 │   │   │   ├── panels/    # reusable config panels (species, streams, condenser, ...)
-│   │   │   ├── modules/   # BVM, FUG, Txy/Pxy, Pure Components, Phase EQ widgets
+│   │   │   ├── modules/   # BVM, RBM, FUG, Txy/Pxy, Pure Components, Phase EQ widgets
 │   │   │   ├── state/     # WindowState (single source of truth) + .colx persistence
 │   │   │   └── theme/     # Qt stylesheet
 │   │   └── tests/         # headless pytest suite (+ tests/validation/)
 │   ├── side_features/
 │   │   ├── bvm/           # difference-point-chain BVM solver (own README + tests/)
+│   │   ├── rbm/           # rectification-body feasibility / R_min (own tests/)
 │   │   └── freeRCM/       # preserved predecessor (residue curve maps)
 │   └── native/            # Fortran sources (nifco2.f90), not bound to the app yet
-├── docs/                  # thermodynamics.md (equation reference), examples/, img/
+├── docs/                  # thermodynamics.md (equation reference), img/
 └── launch.py              # GUI entry point
 ```
 
 ## Testing
 
-The solver and state layers are Qt-free and self-checking. 113 tests, headless:
+The solver and state layers are Qt-free and self-checking. 239 tests, headless:
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/bvm/tests/
+QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/bvm/tests/ src/side_features/rbm/tests/
 ```
 
 `src/python/tests/validation/` is the acceptance gate for solver changes: BTX
 ideal, a depropanizer through the PLXANT path, ethanol/water against its known
-NRTL azeotrope, methanol/water against Perry's VLE data. Every `core` module is
+NRTL azeotrope, methanol/water against Perry's VLE data. RBM's own tests cross-check
+its R<sub>min</sub> against Underwood on a near-ideal split and its pinch
+structure against the published extractive case. Every `core` module is
 also runnable standalone as a self-check
 (`PYTHONPATH=src/python python -m core.column_solvers`).
 
 > [!NOTE]
-> The test suite isn't committed to this repo yet — it's mostly AI-generated
-> and I want to review it properly first. CI will go up alongside it.
+> Much of the suite is AI-generated and hasn't had a line-by-line review pass
+> yet; it is committed because a green gate you can run beats a private one you
+> can't. CI (`.github/workflows/ci.yml`) runs it on 3.11 and 3.12 with pyflakes.
 
 ## Conventions worth knowing
 
@@ -406,7 +501,10 @@ also runnable standalone as a self-check
   Bubble-Point is CMO-only (BVM already has its own energy balance).
 - **Full N-section BVM.** Extractive works well column profiles match
   MESH solutions well. Great for starting parameters as is, would be cool
-  to extend the idea to feasibility, optimal stage count, feed location(s)
+  to extend the idea to optimal stage count and feed location(s).
+- **RBM → BVM handoff in one click.** RBM finds the feasible operating point and
+  BVM sizes the column there, but `r` and `E/F` are copied across by hand today.
+  A dedicated RBM README is still to be written.
 
 ## License
 

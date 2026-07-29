@@ -33,6 +33,15 @@ from core.thermodynamics import (
 _HX = 1e-7      # composition step
 _HT = 1e-5      # temperature step
 
+# Branch-continuation dew point (see ColumnForgeThermo.dew). The move/temperature
+# caps are branch guards, not accuracy targets: a gamma(x) correction is a few
+# per cent of the composition and a few kelvin, while the spurious root the
+# global solve used to find is 100s of K and most of the simplex away.
+_DEW_ITERS = 12
+_DEW_TOL = 1e-10
+_DEW_MAX_DT = 40.0     # K away from the gamma(y) proxy
+_DEW_MAX_MOVE = 0.35   # L2 mole fraction away from the gamma(y) proxy
+
 
 def _cs_grad_scalar(f, x, T):
     """Gradient of a scalar map f(x, T) at one stage: returns (df/dx (C,), df/dT).
@@ -116,6 +125,14 @@ class ColumnForgeThermo(ThermoProvider):
         self.Cp = (np.full(self.n_comps, 150.0) if Cp is None
                    else np.asarray(Cp, float))
         self.Tref = float(Tref)
+        # Last converged bubble temperature, reused as the secant seed for the
+        # next one. Callers here walk a profile or scan an edge, so consecutive
+        # compositions are neighbours and the previous answer is a good guess.
+        # `_solve_T` falls back to brentq on the full bracket whenever the secant
+        # misbehaves, so a stale guess costs time and never correctness -- which
+        # is what makes carrying it on the provider safe rather than a hidden
+        # coupling between unrelated calls.
+        self._last_T = None
 
     # ---- K-values -------------------------------------------------------
     def _K_stage(self, x, T, P):
@@ -218,28 +235,67 @@ class ColumnForgeThermo(ThermoProvider):
         """
         x = np.asarray(x, float)
         x = x / x.sum()
-        T = _bubble_T(x, P, self.antoine, gamma_fn=self.gamma_fn, phi_fn=self.phi_fn)
+        T = _bubble_T(x, P, self.antoine, gamma_fn=self.gamma_fn,
+                      phi_fn=self.phi_fn, T_guess=self._last_T)
+        self._last_T = T
         y = k_values(T, P, self.antoine, self.gamma_fn, x, self.phi_fn) * x
         return y / y.sum(), T
 
-    def dew(self, y, P):
+    def dew(self, y, P, x_seed=None):
         """Dew point of vapour y at P -> (x, T): the liquid it condenses to.
 
         x_i = y_i / K_i, normalised. Used by the rectifying march.
 
-        ponytail: gamma is evaluated at y as a PROXY, not at the true liquid x.
-        A self-consistent gamma(x) fixed point (audit E6) was tried and reverted:
-        for the stiff MEOH/DMC/EG multicomp reference the global gamma(x) dew has
-        a second, EG-heavy root that the rectifying march jumps to at stage ~2
-        (T -> 1700 K, blows up), breaking the multicomp .colx contract. The proxy
-        stays on the physical MEOH-rich branch. Upgrade path: branch-continuation
-        dew seeded from the previous stage's liquid, tracked in the audit.
+        Two answers exist. Without `x_seed`, gamma is evaluated at y as a PROXY --
+        cheap, always on the physical branch, but wrong by construction for a
+        strongly non-ideal liquid. With `x_seed` (the previous stage's liquid,
+        which `march_section` has) the self-consistent gamma(x) dew point is
+        solved by BRANCH CONTINUATION: freeze gamma at the current liquid
+        estimate, solve for T, re-read the liquid, repeat.
+
+        The guards are the point. A global gamma(x) dew solve was tried and
+        reverted once (audit E6): for the stiff MeOH/DMC/EG multicomp reference it
+        has a second, EG-heavy root that the rectifying march jumped to at stage
+        ~2 (T -> 1700 K). Continuation from the previous stage starts inside the
+        physical branch's basin, and any root that still lands more than
+        `_DEW_MAX_DT` from the proxy, or moves the liquid more than
+        `_DEW_MAX_MOVE`, is rejected in favour of the proxy -- a wrong gamma is a
+        few per cent, a wrong branch is hundreds of kelvin.
         """
         y = np.asarray(y, float)
         y = y / y.sum()
         T = _dew_T(y, P, self.antoine, gamma_fn=self.gamma_fn, phi_fn=self.phi_fn)
         x = y / k_values(T, P, self.antoine, self.gamma_fn, y, self.phi_fn)
-        return x / x.sum(), T
+        x = x / x.sum()
+        if self.gamma_fn is None or x_seed is None:
+            return x, T                      # ideal liquid: the proxy IS exact
+        return self._dew_continued(y, P, x, T, x_seed)
+
+    def _dew_continued(self, y, P, x_proxy, T_proxy, x_seed):
+        """gamma(x) dew point continued from `x_seed`; the proxy on any doubt."""
+        xk = np.asarray(x_seed, float)
+        xk = xk / xk.sum()
+        xn, Tn = x_proxy, T_proxy
+        for _ in range(_DEW_ITERS):
+            # gamma frozen at the current liquid estimate: k_values evaluates it
+            # at y, so the closure ignores that argument on purpose.
+            frozen = (lambda _x, TT, _g=self.gamma_fn, _f=xk: _g(_f, TT))
+            try:
+                Tn = _dew_T(y, P, self.antoine, gamma_fn=frozen, phi_fn=self.phi_fn)
+                xn = y / k_values(Tn, P, self.antoine, frozen, y, self.phi_fn)
+                xn = xn / xn.sum()
+            except (ValueError, FloatingPointError, ZeroDivisionError):
+                return x_proxy, T_proxy      # no root on this branch
+            if not (np.all(np.isfinite(xn)) and np.isfinite(Tn)):
+                return x_proxy, T_proxy
+            if abs(Tn - T_proxy) > _DEW_MAX_DT or \
+                    np.linalg.norm(xn - x_proxy) > _DEW_MAX_MOVE:
+                return x_proxy, T_proxy      # jumped branches
+            step = float(np.linalg.norm(xn - xk))
+            xk = xn
+            if step < _DEW_TOL:
+                return xn, Tn
+        return xn, Tn                        # not converged, but still on-branch
 
 
 def _demo():
@@ -290,6 +346,20 @@ def _demo():
     # scalar helpers
     Tb = tp.bubble_T(x[0], 760.0)
     assert 80.0 < Tb < 138.0
+
+    # dew: the seeded gamma(x) solve is the exact inverse of bubble, the gamma(y)
+    # proxy is not. That difference is the whole point of the continuation.
+    yv = np.array([0.55, 0.40, 0.05])
+    xp, _ = tp2.dew(yv, 760.0)                       # proxy
+    xc, _ = tp2.dew(yv, 760.0, np.array([0.3, 0.4, 0.3]))   # continued
+    # (1e-6 not 0: the fixed point converges linearly and stops on the step size)
+    assert np.linalg.norm(tp2.bubble(xc, 760.0)[0] - yv) < 1e-6, "gamma(x) dew inverts bubble"
+    assert np.linalg.norm(tp2.bubble(xp, 760.0)[0] - yv) > 1e-2, "the proxy does not"
+    # an ideal liquid has nothing to correct, so both paths agree exactly
+    assert np.allclose(tp.dew(yv, 760.0)[0], tp.dew(yv, 760.0, x[0])[0])
+    # a seed on the far side of the simplex must NOT drag the answer off-branch
+    far, _ = tp2.dew(yv, 760.0, np.array([0.01, 0.01, 0.98]))
+    assert np.linalg.norm(far - xc) < 1e-6, (far, xc)
     print("thermo_adapter self-check OK")
 
 

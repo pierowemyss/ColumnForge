@@ -25,6 +25,7 @@ from core.thermodynamics import bubble_T, k_values
 RECT_C = "#218fa7"
 STRIP_C = "#fb8500"
 EXTRACT_C = "#2f9e44"
+INTER_C = "#9c36b5"     # intermediate (multifeed) section
 TEMP_C = "#fb8500"
 DATA_C = "#219ebc"
 BOUNDARY_C = "#d00000"

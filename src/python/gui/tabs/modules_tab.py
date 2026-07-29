@@ -17,6 +17,7 @@ class ModulesTab(QWidget):
         self.rcm_window = None
         self.rcm_placeholder = None
         self.bvm_widget = None
+        self.rbm_widget = None
         self.fug_widget = None
         self.txy_widget = None
         self.pure_widget = None
@@ -37,6 +38,7 @@ class ModulesTab(QWidget):
         self.module_combo.addItems([
             "RCM",
             "BVM",
+            "RBM (Rectification Bodies)",
             "Shortcut (FUG)",
             "Txy/Pxy",
             "Pure Components",
@@ -59,6 +61,11 @@ class ModulesTab(QWidget):
         bvm_layout.setContentsMargins(0, 0, 0, 0)
         self.content_stack.addWidget(self.bvm_container)
 
+        self.rbm_container = QWidget()
+        rbm_layout = QVBoxLayout(self.rbm_container)
+        rbm_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_stack.addWidget(self.rbm_container)
+
         self.fug_container = QWidget()
         fug_layout = QVBoxLayout(self.fug_container)
         fug_layout.setContentsMargins(0, 0, 0, 0)
@@ -80,8 +87,19 @@ class ModulesTab(QWidget):
         self.module_combo.currentTextChanged.connect(self._on_module_changed)
 
     def set_window_state(self, window_state):
-        """Set the window state reference."""
+        """Set the window state reference.
+
+        Called on startup and after every File->Load, so it is also where the
+        BVM panel's one-shot restore/entrainer-prefill is re-armed: those flags
+        latch on first show, and without this a second .colx keeps the first
+        file's BVM knobs (load_from_dict reuses the same WindowState object, so
+        the panel can't tell the state changed on its own).
+        """
         self.window_state = window_state
+        for panel in (self.bvm_widget, self.rbm_widget):
+            if panel is not None:
+                panel._restored = False
+                panel._entrainer_prefilled = False
         self._on_module_changed(self.module_combo.currentText())
 
     def _on_module_changed(self, module_name: str):
@@ -92,6 +110,7 @@ class ModulesTab(QWidget):
         launchers = {
             "RCM": self._launch_rcm,
             "BVM": self._launch_bvm,
+            "RBM (Rectification Bodies)": self._launch_rbm,
             "Shortcut (FUG)": self._launch_fug,
             "Txy/Pxy": self._launch_txy,
             "Pure Components": self._launch_pure,
@@ -175,7 +194,19 @@ class ModulesTab(QWidget):
             self.bvm_container.layout().addWidget(self.bvm_widget)
         else:
             self.bvm_widget.window_state = self.window_state
+            self.bvm_widget.reload_from_state()
         self.content_stack.setCurrentWidget(self.bvm_container)
+
+    def _launch_rbm(self):
+        """Launch the RBM module (built once, then reused)."""
+        from ..modules.rbm_module import RBMModuleWidget
+        if self.rbm_widget is None:
+            self.rbm_widget = RBMModuleWidget(window_state=self.window_state)
+            self.rbm_container.layout().addWidget(self.rbm_widget)
+        else:
+            self.rbm_widget.window_state = self.window_state
+            self.rbm_widget.reload_from_state()
+        self.content_stack.setCurrentWidget(self.rbm_container)
 
     def _launch_rcm(self):
         """Launch the RCM interface, or a build hint if its library is missing."""

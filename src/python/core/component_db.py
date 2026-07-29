@@ -98,9 +98,54 @@ def antoine_trange(rec):
     return tsat(10.0), tsat(1520.0), True
 
 
+# Which model each coverage flag unlocks — shown in the Add-Species dialog so a
+# component's usable models are visible before it is added, rather than after a
+# solver refuses it. Order is the order badges are displayed in.
+COVERAGE_LABELS = (
+    ("antoine", "Antoine"),
+    ("plxant", "PLXANT"),
+    ("wagner", "Wagner"),
+    ("unifac", "UNIFAC"),
+    ("uniquac_rq", "UNIQUAC r/q"),
+    ("srk", "SRK"),
+    ("energy", "energy balance"),
+)
+
+
+def coverage(rec, existing_names=()):
+    """What this component can actually be run with.
+
+    Returns {flag: bool} over COVERAGE_LABELS plus "nrtl_pairs"/"nrtl_missing":
+    counts of curated NRTL binaries against components already in the species
+    list. The pair counts are the one thing a user cannot read off the record
+    itself, since they depend on what else is loaded.
+    """
+    out = {
+        "antoine": bool(rec.get("antoine")),
+        "plxant": bool(rec.get("plxant")),
+        "wagner": bool(rec.get("wagner")),
+        "unifac": bool(rec.get("unifac_groups")),
+        "uniquac_rq": bool(rec.get("uniquac_rq")),
+        "srk": all(rec.get(k) is not None for k in ("tc", "pc", "omega")),
+        "energy": all(rec.get(k) is not None
+                      for k in ("tb", "hvap_tb", "cp_liq")),
+    }
+    have = miss = 0
+    for other in existing_names:
+        if get(other) is None or other.lower() == rec["name"].lower():
+            continue
+        if _find_binary(rec["name"], other, "nrtl_binaries"):
+            have += 1
+        else:
+            miss += 1
+    out["nrtl_pairs"], out["nrtl_missing"] = have, miss
+    return out
+
+
 def load_into(ws, name):
-    """Fill a WindowState with one DB component: Species + ComponentThermoParams
-    + directional NRTL params for every DB pair whose partner already exists.
+    """Fill a WindowState with one DB component: Species (incl. UNIFAC groups)
+    + ComponentThermoParams + directional NRTL params for every DB pair whose
+    partner already exists.
 
     Returns {"record": rec, "nrtl_pairs": [(i, j), ...], "missing_pairs":
     [(i, j), ...]} — missing_pairs are existing-species pairs the DB has no
@@ -116,11 +161,19 @@ def load_into(ws, name):
     ws.add_species(Species(name=rec["name"], mw=rec.get("mw"),
                            liquid_density=rec.get("liquid_density"),
                            cp=rec.get("cp_liq"), tb=rec.get("tb"),
-                           hvap_tb=rec.get("hvap_tb")))
+                           hvap_tb=rec.get("hvap_tb"),
+                           unifac_groups=dict(rec.get("unifac_groups") or {})))
     p = ws.thermodynamics_config.get_component_params(rec["name"])
     p.tc, p.pc, p.omega = rec.get("tc"), rec.get("pc"), rec.get("omega")
     p.antoine_a, p.antoine_b, p.antoine_c = rec["antoine"]
     p.antoine_tmin, p.antoine_tmax, _ = antoine_trange(rec)
+    # Extended-Antoine (PLXANT, emitting bar) and Wagner ride along so switching
+    # the vapour-pressure model on a DB component does not need retyping.
+    if rec.get("plxant"):
+        for i, v in enumerate(rec["plxant"]):
+            setattr(p, f"plxant_c{i + 1}", v)
+    if rec.get("wagner"):
+        p.wagner_a, p.wagner_b, p.wagner_c, p.wagner_d = rec["wagner"]
     if rec.get("uniquac_rq"):
         p.uniquac_r, p.uniquac_q = rec["uniquac_rq"]
 

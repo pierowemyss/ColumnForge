@@ -141,18 +141,23 @@ class ThermodynamicsConfig:
         "PLXANT": ("plxant_c1", "plxant_c2", "plxant_c3", "plxant_c4",
                    "plxant_c5", "plxant_c6", "plxant_c7"),
         "Antoine": ("antoine_a", "antoine_b", "antoine_c"),
+        # Wagner is a *reduced* form: the user enters a..d, and Tc/Pc come from
+        # the same per-component record the EOS uses. psat_params appends them so
+        # core.thermodynamics keeps its plain-matrix contract (6 columns).
+        "Wagner": ("wagner_a", "wagner_b", "wagner_c", "wagner_d"),
     }
+    _PSAT_EXTRA = {"Wagner": ("tc", "pc")}
 
     # Multiplier from bar to the pressure unit each Psat model emits, so P and
     # Psat compare correctly in Raoult's law. Aspen-exported PLXANT coefficients
     # emit Psat in bar (C1 is the Pa-basis C1 minus ln(1e5)); Antoine fits are
     # mmHg. ponytail: both assumed a fixed unit; add a per-fit unit field if a
     # coefficient set in another unit (e.g. Pa-basis PLXANT) is ever entered.
-    _BAR_TO_PSAT_UNIT = {"PLXANT": 1.0, "Antoine": 750.0617}
+    _BAR_TO_PSAT_UNIT = {"PLXANT": 1.0, "Wagner": 1.0, "Antoine": 750.0617}
 
     # Which activity/EOS models have a working implementation. The GUI greys
     # out everything else so entered parameters are never silently ignored.
-    IMPLEMENTED_VLE = ("Antoine", "PLXANT")
+    IMPLEMENTED_VLE = ("Antoine", "PLXANT", "Wagner")
     IMPLEMENTED_ACTIVITY = ("Ideal", "NRTL", "Wilson", "UNIQUAC", "Margules",
                             "UNIFAC")
     IMPLEMENTED_EOS = ("Ideal Gas", "SRK")
@@ -164,24 +169,29 @@ class ThermodynamicsConfig:
     def psat_params(self, order):
         """Vapour-pressure coefficient matrix for `order`, shaped per vle_model.
 
-        (N,7) for PLXANT, else (N,3) Antoine. core.thermodynamics.antoine_psat
-        dispatches on the column count, so callers just pass this straight through.
-        Raises ValueError naming the first component missing required coefficients,
-        or an unimplemented vle_model — nothing entered is silently ignored.
+        (N,7) for PLXANT, (N,6) for Wagner (a..d plus Tc/Pc), else (N,3) Antoine.
+        core.thermodynamics.antoine_psat dispatches on the column count, so
+        callers just pass this straight through. Raises ValueError naming the
+        first component missing required coefficients, or an unimplemented
+        vle_model — nothing entered is silently ignored.
         """
         import numpy as np
         if self.vle_model not in self._PSAT_KEYS:
             raise ValueError(
                 f"Vapour-pressure model '{self.vle_model}' is not implemented — "
-                "choose Antoine or PLXANT (Initialization → Thermodynamics).")
-        keys = self._PSAT_KEYS[self.vle_model]
+                f"choose one of {', '.join(self.IMPLEMENTED_VLE)} "
+                "(Initialization → Thermodynamics).")
+        keys = self._PSAT_KEYS[self.vle_model] + self._PSAT_EXTRA.get(
+            self.vle_model, ())
         rows = []
         for nm in order:
             p = self.component_params.get(nm)
             vals = [getattr(p, k, None) for k in keys] if p else None
             if not vals or any(v is None for v in vals):
+                missing = ", ".join(k for k, v in zip(keys, vals or [])
+                                    if v is None) or "all"
                 raise ValueError(f"Missing {self.vle_model} coefficients for '{nm}' "
-                                 "(Initialization → Thermodynamics).")
+                                 f"({missing}) — Initialization → Thermodynamics.")
             rows.append(vals)
         return np.array(rows, float)
 
@@ -315,11 +325,16 @@ class WindowState:
         # round-trip through to_dict()/load_from_dict() (.colx). {} = use defaults.
         self.bvm_params: dict = {}
 
+        # Same for the RBM (rectification-body) panel. Separate key: the two
+        # modules answer different questions and share no levers beyond the
+        # keys, so one dict would have them overwriting each other's saved
+        # settings on every File->Save.
+        self.rbm_params: dict = {}
+
         # Spec/DoF: structured extra specs (e.g. key-recovery) + CMO flag.
         # Condenser/reboiler/side-draw specs are derived from config in
         # collect_specs(); self.specs holds anything not on those panels yet.
         self.specs: List[Spec] = []
-        self.energy_balance = False          # CMO; True enables duty specs later
         self.light_key_index = 0             # 0-based light-key index
         self.heavy_key_index = None          # 0-based; None => defaults to lk+1
         self.results = None                  # last solver profile (Results tab reads this)
@@ -349,8 +364,8 @@ class WindowState:
         self.thermodynamics_config = ThermodynamicsConfig()
         self.modules = {}
         self.bvm_params = {}
+        self.rbm_params = {}
         self.specs = []
-        self.energy_balance = False
         self.light_key_index = 0
         self.heavy_key_index = None
         self.results = None
@@ -384,11 +399,28 @@ class WindowState:
     # ponytail: BVM knobs (r, q, FR_LK…) live in the Modules/BVM widget, not here,
     # so they aren't persisted yet — re-enter them after load, or lift them into
     # window_state when the BVM panel should round-trip too.
+    # `energy_balance` is deliberately absent: it lives on thermodynamics_config
+    # (which is persisted) and is exposed here as a property. It used to be a
+    # second, independent field — the Flow Model checkbox wrote the config one
+    # while the DoF ledger read this one, so it stayed False forever and duty
+    # specs were rejected on a column whose solver was running the energy
+    # balance. Old .colx files still carry the stale key; it is ignored on load.
     _PERSIST = ("num_stages", "pressure", "pressure_drop", "stage_efficiency",
                 "species", "streams", "condenser_config", "reboiler_config",
-                "thermodynamics_config", "modules", "bvm_params", "specs",
-                "energy_balance", "light_key_index", "heavy_key_index",
+                "thermodynamics_config", "modules", "bvm_params", "rbm_params",
+                "specs",
+                "light_key_index", "heavy_key_index",
                 "display_units", "solver_mode")
+
+    @property
+    def energy_balance(self) -> bool:
+        """CMO off / energy balance on — the single flag, kept on the thermo
+        config so the DoF ledger and the solver hook cannot disagree."""
+        return bool(self.thermodynamics_config.energy_balance)
+
+    @energy_balance.setter
+    def energy_balance(self, value):
+        self.thermodynamics_config.energy_balance = bool(value)
 
     def to_dict(self) -> dict:
         """Snapshot the persistable column state (goes into the .colx)."""
@@ -504,7 +536,7 @@ class WindowState:
                                  "(Initialization → Species → UNIFAC Groups).")
             groups.append(g)
         from core.thermodynamics import unifac_gamma_fn, load_unifac_db
-        return unifac_gamma_fn(groups, load_unifac_db())
+        return unifac_gamma_fn(groups, load_unifac_db(), names=list(order))
 
     GAMMA_BUILDERS = {"Ideal": _gamma_ideal, "NRTL": _gamma_nrtl,
                       "Wilson": _gamma_wilson, "UNIQUAC": _gamma_uniquac,
@@ -1142,13 +1174,23 @@ def _demo():
     tc_.eos_model = "Ideal Gas"
 
     # Unsupported vapour-pressure model raises instead of silently using Antoine.
-    ws.thermodynamics_config.vle_model = "Wagner"
+    ws.thermodynamics_config.vle_model = "Rackett"
     try:
         ws.thermodynamics_config.psat_params(["A", "B"])
     except ValueError as exc:
         assert "not implemented" in str(exc)
     else:
         raise AssertionError("unimplemented vle model must raise")
+
+    # Wagner IS implemented, but still refuses when a component has no
+    # coefficients — naming which ones are missing.
+    ws.thermodynamics_config.vle_model = "Wagner"
+    try:
+        ws.thermodynamics_config.psat_params(["A", "B"])
+    except ValueError as exc:
+        assert "wagner_a" in str(exc), exc
+    else:
+        raise AssertionError("Wagner must refuse a component with no constants")
     ws.thermodynamics_config.vle_model = "Antoine"
 
     # Feed quality from stream temperature: benzene/toluene feed at 1 atm.

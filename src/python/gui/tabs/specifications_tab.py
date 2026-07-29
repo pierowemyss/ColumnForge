@@ -823,6 +823,20 @@ class SpecificationsTab(QWidget):
                            if self.stream_list.item(r, 0).text() == self.current_stream_id), 0)
             self.stream_list.setCurrentCell(target, 0)
 
+        # Load Modules — without this a .colx's side strippers/rectifiers/
+        # pumparounds live in window_state (and solve) but never show in the list.
+        self.module_list.setRowCount(0)
+        for module_id in self.window_state.modules:
+            row = self.module_list.rowCount()
+            self.module_list.insertRow(row)
+            self.module_list.setItem(row, 0, QTableWidgetItem(module_id))
+        if self.module_list.rowCount():
+            target = next((r for r in range(self.module_list.rowCount())
+                           if self.module_list.item(r, 0).text() == self.current_module_id), 0)
+            self.module_list.setCurrentCell(target, 0)   # fires _on_module_selected
+        else:
+            self.current_module_id = None
+
         # Update Canvas
         self._update_column_canvas()
         self._update_dof_status()

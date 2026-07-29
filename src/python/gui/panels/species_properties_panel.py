@@ -18,6 +18,11 @@ class SpeciesPropertiesPanel(QWidget):
         self.current_species = None
         self.species_names = []
         self.window_state = None
+        # Set while _load_species_from_state repopulates the widgets. The spinboxes
+        # are *children*, so self.blockSignals() never stopped their valueChanged
+        # from calling _update_species_from_ui() mid-load — which wrote the stale
+        # (still-empty) group table back over the species' real unifac_groups.
+        self._loading = False
 
         self._setup_ui()
         self._setup_styles()
@@ -114,7 +119,7 @@ class SpeciesPropertiesPanel(QWidget):
         self.window_state = window_state
 
     def _on_property_changed(self):
-        if self.current_species:
+        if self.current_species and not self._loading:
             self._update_species_from_ui()
             self.propertiesChanged.emit()
 
@@ -146,10 +151,21 @@ class SpeciesPropertiesPanel(QWidget):
             self.name_edit.setText(old_name)
 
     def _add_unifac_group(self):
+        """Append a blank row and put the cursor in its Group cell.
+
+        Signals stay blocked while both cells are seeded: an unblocked setItem
+        writes through to state, which drops the still-unnamed row and rebuilds
+        the table, deleting the row the user just asked for. Nothing reaches
+        window_state until they commit a group name.
+        """
         row = self.unifac_table.rowCount()
+        self.unifac_table.blockSignals(True)
         self.unifac_table.insertRow(row)
         self.unifac_table.setItem(row, 0, QTableWidgetItem(""))
         self.unifac_table.setItem(row, 1, QTableWidgetItem("1"))
+        self.unifac_table.blockSignals(False)
+        self.unifac_table.setCurrentCell(row, 0)
+        self.unifac_table.editItem(self.unifac_table.item(row, 0))
 
     def _remove_unifac_group(self):
         row = self.unifac_table.currentRow()
@@ -158,7 +174,7 @@ class SpeciesPropertiesPanel(QWidget):
             self._on_unifac_changed(row, 0)
 
     def _on_unifac_changed(self, row, column):
-        if self.current_species:
+        if self.current_species and not self._loading:
             self._update_species_from_ui()
             self._refresh_estimate_btn()
             self.propertiesChanged.emit()
@@ -209,9 +225,7 @@ class SpeciesPropertiesPanel(QWidget):
             self.current_species = name
             self.name_edit.setText(name)
             self.header_label.setText(f"{name} Properties")
-            self.blockSignals(True)
             self._load_species_from_state()
-            self.blockSignals(False)
         else:
             self.clear()
 
@@ -221,22 +235,25 @@ class SpeciesPropertiesPanel(QWidget):
             return
         
         species = self.window_state.species.get(self.current_species)
-        if species:
+        if not species:
+            self.clear()
+            return
+
+        self._loading = True
+        try:
             self.mw_spin.setValue(species.mw if species.mw else 0)
             self.density_spin.setValue(species.liquid_density if species.liquid_density else 0)
             self.cp_spin.setValue(species.cp if species.cp else 0)
-            
-            self.unifac_table.blockSignals(True)
+
             self.unifac_table.setRowCount(0)
             for group, count in species.unifac_groups.items():
                 row = self.unifac_table.rowCount()
                 self.unifac_table.insertRow(row)
                 self.unifac_table.setItem(row, 0, QTableWidgetItem(group))
                 self.unifac_table.setItem(row, 1, QTableWidgetItem(str(count)))
-            self.unifac_table.blockSignals(False)
-            self._refresh_estimate_btn()
-        else:
-            self.clear()
+        finally:
+            self._loading = False
+        self._refresh_estimate_btn()
 
     def clear(self):
         """Clear all property values."""

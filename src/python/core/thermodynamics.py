@@ -20,13 +20,18 @@ from scipy.optimize import brentq
 def antoine_psat(T, antoine):
     """Saturation pressure of every component at temperature T.
 
-    antoine: (N, 3) [A, B, C] regular Antoine, or (N, 7) [C1..C7] Aspen PLXANT
-    (extended Antoine) — dispatched on the column count so every caller/solver
-    gets PLXANT for free just by passing a 7-wide matrix. Returns an (N,) array.
+    Dispatched on the column count, so every caller/solver gets a different fit
+    for free just by passing a differently-shaped matrix. Returns an (N,) array.
+
+        (N, 3)  [A, B, C]            regular Antoine, log10(mmHg)
+        (N, 6)  [a, b, c, d, Tc, Pc] Wagner (reduced form, bar)
+        (N, 7)  [C1..C7]             Aspen PLXANT / extended Antoine
     """
     antoine = np.asarray(antoine, float)
     if antoine.shape[1] == 7:
         return plxant_psat(T, antoine)
+    if antoine.shape[1] == 6:
+        return wagner_psat(T, antoine)
     A, B, C = antoine[:, 0], antoine[:, 1], antoine[:, 2]
     return 10.0 ** (A - B / (T + C))
 
@@ -38,7 +43,9 @@ def plxant_psat(T, c, t_to_K=lambda T: T + 273.15):
 
         ln(Psat) = C1 + C2/(C3+T) + C4*T + C5*ln(T) + C6*T**C7   (T in K)
 
-    Psat comes out in the unit the coefficients were fitted to (Aspen default Pa).
+    Psat comes out in the unit the coefficients were fitted to. The bundled
+    database emits **bar** (see ThermodynamicsConfig._BAR_TO_PSAT_UNIT); an
+    Aspen export in Pa differs only in C1, by ln(1e5).
     """
     c = np.asarray(c, float)
     Tk = t_to_K(T)
@@ -47,14 +54,39 @@ def plxant_psat(T, c, t_to_K=lambda T: T + 273.15):
     return np.exp(lnP)
 
 
+def wagner_psat(T, c, t_to_K=lambda T: T + 273.15):
+    """Wagner 25-form vapour pressure. c: (N, 6) of [a, b, c, d, Tc[K], Pc[bar]].
+
+        ln(Psat/Pc) = (a*tau + b*tau^1.5 + c*tau^3 + d*tau^6) / Tr
+        Tr = T_K/Tc,   tau = 1 - Tr
+
+    Critically anchored by construction: Psat(Tc) == Pc exactly, which is what
+    PLXANT and Antoine only approximate. Returns Psat in **bar** (Pc's unit).
+
+    ponytail: tau^1.5 is complex above Tc, so Tr is clamped to 1 and the result
+    saturates at Pc there. A solver that walks a light component past its
+    critical temperature gets Pc rather than a NaN — but the value is a floor,
+    not physics. PLXANT has no such limit, which is why it stays the default.
+    """
+    c = np.asarray(c, float)
+    Tc, Pc = c[:, 4], c[:, 5]
+    Tr = np.minimum(t_to_K(T) / Tc, 1.0)
+    tau = 1.0 - Tr
+    f = c[:, 0] * tau + c[:, 1] * tau ** 1.5 + c[:, 2] * tau ** 3 + c[:, 3] * tau ** 6
+    return Pc * np.exp(f / Tr)
+
+
 def antoine_Tsat(P, abc):
     """Invert vapour pressure for one component's boiling point at P — initial-T
-    guess only. 3-term Antoine: closed form. 7-term PLXANT: bracketed solve.
+    guess only. 3-term Antoine: closed form. Wagner/PLXANT: bracketed solve.
     """
     abc = np.asarray(abc, float)
     if abc.shape[-1] == 7:
         row = abc.reshape(1, 7)
         return _solve_T(lambda T: float(plxant_psat(T, row)[0]) - P, -100.0, 500.0)
+    if abc.shape[-1] == 6:
+        row = abc.reshape(1, 6)
+        return _solve_T(lambda T: float(wagner_psat(T, row)[0]) - P, -100.0, 500.0)
     A, B, C = abc
     return B / (A - np.log10(P)) - C
 
@@ -74,7 +106,8 @@ def latent_heat(T, antoine, t_to_K=lambda T: T + 273.15):
         lambda_i = R * T_K^2 * d ln(Psat_i)/dT
 
     T is in the fit's temperature unit (bundled fits: degC); t_to_K converts to
-    Kelvin for the R*T^2 factor. antoine: (N,3) Antoine or (N,7) PLXANT.
+    Kelvin for the R*T^2 factor. antoine: (N,3) Antoine, (N,6) Wagner or
+    (N,7) PLXANT.
     """
     antoine = np.asarray(antoine, float)
     Tk = t_to_K(T)
@@ -82,6 +115,18 @@ def latent_heat(T, antoine, t_to_K=lambda T: T + 273.15):
         c = antoine
         dlnP = (-c[:, 1] / (c[:, 2] + Tk) ** 2 + c[:, 3] + c[:, 4] / Tk
                 + c[:, 5] * c[:, 6] * Tk ** (c[:, 6] - 1.0))
+    elif antoine.shape[1] == 6:
+        # d/dT [ f(tau)/Tr ] with tau = 1 - Tr, Tr = Tk/Tc:
+        #   dlnP/dT = -(f'(tau)*Tr + f(tau)) / (Tc * Tr^2)
+        c = antoine
+        Tc = c[:, 4]
+        Tr = np.minimum(Tk / Tc, 1.0 - 1e-9)
+        tau = 1.0 - Tr
+        f = (c[:, 0] * tau + c[:, 1] * tau ** 1.5
+             + c[:, 2] * tau ** 3 + c[:, 3] * tau ** 6)
+        fp = (c[:, 0] + 1.5 * c[:, 1] * tau ** 0.5
+              + 3.0 * c[:, 2] * tau ** 2 + 6.0 * c[:, 3] * tau ** 5)
+        dlnP = -(fp * Tr + f) / (Tc * Tr ** 2)
     else:
         # log10 form: ln Psat = ln10 * (A - B/(T+C)); dT in the fit unit == dT in K
         B, C = antoine[:, 1], antoine[:, 2]
@@ -391,13 +436,16 @@ def load_unifac_db():
         return json.load(fh)
 
 
-def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15):
+def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15, names=None):
     """gamma_fn(x, T) closure for UNIFAC. `species_groups` is a list (one per
     component, same order as x) of {subgroup_name: count}. `db` is the parsed
-    unifac_groups.json. Raises if a species has no groups or names an unknown
-    subgroup — nothing entered is silently treated as ideal."""
+    unifac_groups.json. `names` (optional) labels the components in error
+    messages. Raises if a species has no groups, names an unknown subgroup, or
+    needs a main-group interaction pair the published table does not have —
+    nothing is silently treated as ideal."""
     sub = db["subgroups"]
     inter = db["interactions"]
+    label = list(names) if names else None
 
     # Union of subgroups actually used, in a stable order.
     used = []
@@ -419,13 +467,32 @@ def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15):
     gidx = {m: i for i, m in enumerate(main_names)}
     main_idx = np.array([gidx[m] for m in mains], int)
 
+    # Only 1270 of the 2862 possible main-group pairs are published. A missing
+    # pair used to default to a = 0 (Psi = 1), which is an ideal residual for
+    # that pair — invisible, and wrong more often than not. Say so instead.
     g = len(main_names)
     a_mn = np.zeros((g, g))
+    missing = []
     for mi in main_names:
         row = inter.get(mi, {})
-        for mj, val in row.items():
-            if mj in gidx:
-                a_mn[gidx[mi], gidx[mj]] = val
+        for mj in main_names:
+            if mi == mj:
+                continue                      # a_mm = 0 by definition
+            if mj in row:
+                a_mn[gidx[mi], gidx[mj]] = row[mj]
+            else:
+                missing.append((mi, mj))
+    if missing:
+        mi, mj = missing[0]
+        who = [n for n, grp in zip(label or [f"component {i}" for i in
+                                             range(len(species_groups))],
+                                   species_groups)
+               if any(sub[s][1] in (mi, mj) for s in grp)]
+        raise ValueError(
+            f"UNIFAC has no published interaction parameter for main groups "
+            f"{mi}/{mj} (needed by {', '.join(who)}). The classic UNIFAC-VLE "
+            f"table covers 1270 of 2862 pairs; this chemistry is outside it, "
+            f"so choose another activity model rather than run it as ideal.")
 
     nu = np.array([[grp.get(s, 0) for s in used] for grp in species_groups], float)
 

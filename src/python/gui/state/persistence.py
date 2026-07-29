@@ -98,7 +98,8 @@ def _enc_spec(sp: Spec) -> dict:
 def encode_state(state: dict) -> dict:
     """Primitive projection of a live WindowState.to_dict() snapshot."""
     e = dict(state)   # scalars (num_stages, feed_stage, pressure, pressure_drop,
-                      # bvm_params, energy_balance, light/heavy_key_index) pass through
+                      # bvm_params, light/heavy_key_index) pass through. The
+                      # energy-balance flag rides on thermodynamics_config.
     e["species"] = {n: _enc_species(s) for n, s in state["species"].items()}
     e["streams"] = {n: _enc_stream(s) for n, s in state["streams"].items()}
     e["condenser_config"] = _enc_condenser(state["condenser_config"])

@@ -14,25 +14,36 @@ locations, R_min, and a classified feasibility verdict. Three actions:
   * Design Map    -- sweep R; plot stage count vs R and click a point to load it.
   * Send to Solver -- hand the sized profiles to the rigorous MESH solver (warm
                      start) and report its convergence.
+
+The optional Reaction box turns the run into a *reactive* sizing: one equilibrium
+reaction, chemical equilibrium on every stage, marched in Ung-Doherty transformed
+coordinates (`side_features.bvm.reactive`). Sizing, plots and the X/Y columns of
+the table are then transformed; the physical compositions and the reaction extent
+per stage are appended to the table. Reactive designs are ideal-stage and cannot
+be sent to the rigorous solver -- MESH has no reaction terms -- so the efficiency,
+entrainer and Send buttons are greyed out with the reason in their tooltips.
 """
 
 import numpy as np
-
-from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QFormLayout, QGroupBox, QLabel,
-    QComboBox, QSpinBox, QPushButton, QCheckBox, QTableWidget, QTableWidgetItem,
-)
-
-from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvas
-
-from ..panels.sci_spin_box import SciDoubleSpinBox
-from ..state.window_state import StreamType
-from ..plotting import CompactNavigationToolbar, active_comps, TEMP_C as _TEMP_C
+from matplotlib.figure import Figure
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QPushButton, QScrollArea,
+                               QSpinBox, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from side_features.bvm import api as _mbvm_api
+from side_features.bvm import driver as _driver
+from side_features.bvm import reactive as _rx
 from side_features.bvm.problem import build_problem
 from side_features.bvm.thermo_adapter import ColumnForgeThermo
+
+from .module_thermo import session_models
+from ..panels.sci_spin_box import SciDoubleSpinBox
+from ..plotting import TEMP_C as _TEMP_C
+from ..plotting import (CompactNavigationToolbar, active_comps, RECT_C, STRIP_C,
+                        EXTRACT_C, INTER_C)
+from ..state.window_state import StreamType
 
 
 class BVMModuleWidget(QWidget):
@@ -43,9 +54,12 @@ class BVMModuleWidget(QWidget):
         self.window_state = window_state
         self._design = None
         self._map = None
+        self._region = None
         self._order_warning = ""
+        self._thermo_note = ""
         self._entrainer_prefilled = False
         self._restored = False
+        self._nu_saved = {}                  # species -> coeff restored from .colx
         self._thread = self._worker = None
         self._setup_ui()
 
@@ -53,8 +67,15 @@ class BVMModuleWidget(QWidget):
     def _setup_ui(self):
         layout = QHBoxLayout(self)
 
-        left = QWidget(); left.setMaximumWidth(340)
+        # the knob column scrolls: with the reaction editor added it no longer fits
+        # a short window, and squeezing groups collapses their rows to nothing
+        left = QWidget()
         left_col = QVBoxLayout(left)
+        left_scroll = QScrollArea()
+        left_scroll.setWidget(left)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setMaximumWidth(360)
+        left_scroll.setFrameShape(QScrollArea.NoFrame)
 
         spec = QGroupBox("Separation")
         form = QFormLayout(spec)
@@ -93,12 +114,65 @@ class BVMModuleWidget(QWidget):
         opf.addRow("Entrainer ratio E/F:", self.ef_spin)
         left_col.addWidget(op)
 
+        self.reaction_box = QGroupBox("Reaction (reactive distillation)")
+        self.reaction_box.setCheckable(True)
+        self.reaction_box.setChecked(False)
+        self.reaction_box.setToolTip(
+            "Chemical equilibrium on EVERY stage (Ung-Doherty transformed "
+            "compositions): one reaction, ideal stages, no rigorous handoff. "
+            "Sizing runs in transformed coordinates; the results table also shows "
+            "the physical compositions and the reaction extent per stage.")
+        rxf = QFormLayout(self.reaction_box)
+        # one spin box per species, rebuilt when the species list changes: an
+        # ordinary form row per coefficient, no table geometry to fight
+        self.nu_form = QFormLayout()
+        self.nu_form.setContentsMargins(0, 0, 0, 0)
+        self._nu_spins = {}
+        rxf.addRow(QLabel("Stoichiometry (products +, reactants −, inerts 0):"))
+        rxf.addRow(self.nu_form)
+        self.ref_combo = QComboBox()
+        self.ref_combo.setToolTip(
+            "Reference component eliminated by the transform. Pick the reaction "
+            "PRODUCT: then every transformed composition stays non-negative. A "
+            "two-product reaction (an esterification, say) has no such choice and "
+            "is reported as a geometry limit rather than mis-sized.")
+        rxf.addRow("Reference component:", self.ref_combo)
+        self.keq_a = self._spin(-50.0, 50.0, 2.303, decimals=4, step=0.1)
+        self.keq_b = self._spin(-20000.0, 20000.0, 0.0, decimals=2, step=100.0)
+        for w, tip in ((self.keq_a, "A in Keq = exp(A + B/T[K]); ln Keq at "
+                                    "infinite T. Activity-based (gamma x)."),
+                       (self.keq_b, "B in Keq = exp(A + B/T[K]) in K; 0 = "
+                                    "temperature-independent Keq.")):
+            w.setToolTip(tip)
+        rxf.addRow("Keq: A =", self.keq_a)
+        rxf.addRow("Keq: B (K) =", self.keq_b)
+        left_col.addWidget(self.reaction_box)
+        self.reaction_box.toggled.connect(self._sync_reactive_enabled)
+
         adv = QGroupBox("Advanced"); adv.setCheckable(True); adv.setChecked(False)
         advf = QFormLayout(adv)
         self.max_stages = self._int_spin(20, 1000, 200)
         advf.addRow("Max stages / section:", self.max_stages)
         self.eps_stage = self._spin(1e-4, 0.2, 1e-2, decimals=4, step=1e-3)
+        # Nothing silently ignored: at 3 components or fewer the junction is an
+        # actual profile crossing and this knob is not in the test at all, so say
+        # so rather than letting it look like a reflux you can buy.
+        self.eps_stage.setToolTip(
+            "Near-miss allowance on the feed junction.\n\n"
+            "Only used where the two profiles cannot be asked to cross exactly:\n"
+            "  - 4+ components (two curves in the (C-1)-simplex are over-determined)\n"
+            "  - the interior curve of an extractive / multifeed column\n"
+            "  - reactive designs (transformed coordinates)\n\n"
+            "At 3 components or fewer the junction is the crossing itself, and "
+            "loosening this cannot make an infeasible reflux feasible.")
         advf.addRow("Connection tol (eps_stage):", self.eps_stage)
+        # E/F sweep for the operating-region plot behind "Compute R_min / min E/F"
+        self.ef_min_spin = self._spin(0.0, 10.0, 0.2, decimals=3, step=0.1)
+        self.ef_max_spin = self._spin(0.0, 20.0, 2.0, decimals=3, step=0.1)
+        self.ef_pts_spin = self._int_spin(3, 40, 8)
+        advf.addRow("E/F sweep from:", self.ef_min_spin)
+        advf.addRow("E/F sweep to:", self.ef_max_spin)
+        advf.addRow("E/F sweep points:", self.ef_pts_spin)
         left_col.addWidget(adv)
 
         self.size_btn = QPushButton("Size Column"); self.size_btn.clicked.connect(self._on_size)
@@ -115,13 +189,14 @@ class BVMModuleWidget(QWidget):
 
         self.extractive.toggled.connect(self._sync_extractive_enabled)
         self._sync_extractive_enabled(self.extractive.isChecked())
+        self._sync_reactive_enabled(self.reaction_box.isChecked())
 
         self.status = QLabel("Feed, pressure and thermo come from the shared "
                              "column setup. Stage count is computed, not entered.")
         self.status.setWordWrap(True)
         left_col.addWidget(self.status)
         left_col.addStretch()
-        layout.addWidget(left)
+        layout.addWidget(left_scroll)
 
         right = QWidget(); right_col = QVBoxLayout(right)
         self.figure = Figure(figsize=(5, 4))
@@ -135,7 +210,8 @@ class BVMModuleWidget(QWidget):
         view_row.addStretch()
         view_row.addWidget(QLabel("View:"))
         self.view_combo = QComboBox()
-        self.view_combo.addItems(["Ternary (LK vs HK)", "Full profile"])
+        self.view_combo.addItems(["Ternary (LK vs HK)", "Full profile",
+                                  "Operating region"])
         self.view_combo.currentIndexChanged.connect(self._on_view_changed)
         view_row.addWidget(self.view_combo)
         right_col.addLayout(view_row)
@@ -152,8 +228,20 @@ class BVMModuleWidget(QWidget):
         """(Re)populate the key/entrainer combos from the shared species list,
         preserving each selection by name across species edits upstream."""
         names = self._species_order()
-        for combo, default in ((self.lk_combo, 0),
-                               (self.hk_combo, 1),
+        self._refresh_nu_table(names)
+        # Keys default to the session's chosen keys, not combo slots 0/1 -- the
+        # Specifications tab already asked which two components matter, and
+        # fug_module reads them the same way.
+        ws = self.window_state
+        lk = int(getattr(ws, "light_key_index", 0) or 0) if ws else 0
+        hk = getattr(ws, "heavy_key_index", None) if ws else None
+        hk = int(hk) if hk is not None else lk + 1
+        hk = min(max(hk, 0), max(len(names) - 1, 0))
+        if hk == lk:                       # the two keys must stay distinct
+            hk = lk + 1 if lk + 1 < len(names) else max(lk - 1, 0)
+        for combo, default in ((self.lk_combo, lk),
+                               (self.hk_combo, hk),
+                               (self.ref_combo, len(names) - 1),
                                (self.entrainer_combo, len(names) - 1)):
             prev = combo.currentText()
             combo.blockSignals(True)
@@ -164,14 +252,42 @@ class BVMModuleWidget(QWidget):
                                                        len(names) - 1))
             combo.blockSignals(False)
 
-    def showEvent(self, event):
-        # species may have changed on the Initialization tab since last shown
+    def _refresh_nu_table(self, names):
+        """Rebuild the stoichiometry rows for the current species, keeping any
+        coefficients the user already set (or restored from a `.colx`) for species
+        that survived. `_nu_saved` is what makes a restore order-proof: set_params
+        can land before the species list exists, and rebuilding must not silently
+        drop the reaction."""
+        kept = self._nu_values()
+        while self.nu_form.rowCount():
+            self.nu_form.removeRow(0)
+        self._nu_spins = {}
+        for n in names:
+            spin = self._spin(-9.0, 9.0, float(kept.get(n, 0.0)), decimals=2,
+                              step=1.0)
+            self._nu_spins[n] = spin
+            self.nu_form.addRow(f"{n}:", spin)
+
+    def _nu_values(self):
+        """{species: coefficient} from the spin boxes, falling back to `_nu_saved`
+        for species with no row yet."""
+        return {**self._nu_saved,
+                **{n: float(s.value()) for n, s in self._nu_spins.items()}}
+
+    def reload_from_state(self):
+        """Pull species + saved BVM knobs off window_state (one-shot, guarded by
+        `_restored`). ModulesTab re-arms those flags after a .colx load so a
+        second file's parameters actually land here."""
         self._refresh_species()
         if not self._restored and self.window_state and \
                 getattr(self.window_state, "bvm_params", None):
             self.set_params(self.window_state.bvm_params)
             self._restored = self._entrainer_prefilled = True   # don't clobber saved
         self._prefill_entrainer()
+
+    def showEvent(self, event):
+        # species may have changed on the Initialization tab since last shown
+        self.reload_from_state()
         super().showEvent(event)
 
     def _prefill_entrainer(self):
@@ -232,9 +348,6 @@ class BVMModuleWidget(QWidget):
         main = next((s for s in feeds if s is not ent), feeds[0])
         return main, ent
 
-    def _feed_stream(self):
-        return self._feed_streams()[0]
-
     def _gather(self):
         """Build (problem, provider) from window_state + local levers.
 
@@ -256,12 +369,18 @@ class BVMModuleWidget(QWidget):
         if lk < 0 or hk < 0 or lk == hk:
             raise ValueError("Light and heavy keys must be two distinct species.")
 
-        antoine = self.window_state.thermodynamics_config.psat_params(order)
-        P = self.window_state.thermodynamics_config.pressure_in_psat_unit(
-            self.window_state.pressure)
-        gamma_fn = self.window_state.build_gamma_fn(order)
-        phi_fn = self.window_state.build_phi_fn(order)   # SRK EOS or None (ideal gas)
+        # Same seam as the Txy / Phase-EQ modules, so a silent NRTL->ideal
+        # degradation is REPORTED. It matters most here: an extractive column
+        # whose entrainer has no binary parameters would otherwise be sized with
+        # the entrainer thermodynamically invisible.
+        antoine, gamma_fn, phi_fn, _label, thermo_note = session_models(
+            self.window_state, order)
+        tc = self.window_state.thermodynamics_config
+        P = tc.pressure_in_psat_unit(self.window_state.pressure)
+        dP = tc.pressure_in_psat_unit(
+            float(getattr(self.window_state, "pressure_drop", 0.0) or 0.0))
         provider = ColumnForgeThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
+        self._thermo_note = thermo_note
         self._order_warning = self._volatility_warning(order, antoine, P, provider)
 
         extractive = self.extractive.isChecked()
@@ -280,15 +399,44 @@ class BVMModuleWidget(QWidget):
                     raise ValueError("Entrainer must differ from the light/heavy keys.")
                 x_E = np.zeros(len(order)); x_E[e] = 1.0
 
+        reactions = self._reactions(order)
         prob = build_problem(
             comps=order, feeds=[(z, float(feed.flow), float(self.q_spin.value()))],
             pressure=P, lk=lk, hk=hk,
             rec_lk=self.rec_lk.value(), rec_hk=self.rec_hk.value(),
-            x_E=x_E, extractive=extractive,
+            x_E=x_E, extractive=extractive, reactions=reactions,
             max_stages=int(self.max_stages.value()),
-            efficiency=float(self.eff_spin.value()))
+            eps_stage=float(self.eps_stage.value()), dP=dP,
+            efficiency=1.0 if reactions is not None else float(self.eff_spin.value()))
+        if reactions is not None:
+            self._order_warning = self._reactive_order_warning(prob, provider)
         self.window_state.bvm_params = self.get_params()   # mirror for save
         return prob, provider
+
+    @staticmethod
+    def _reactive_order_warning(prob, provider):
+        """The reactive counterpart of `_volatility_warning`.
+
+        In transformed coordinates a pseudo-component's volatility has nothing to
+        do with its pure-component boiling point -- transformed isobutene is
+        `x_iC4 + x_MTBE`, and MTBE-locked isobutene is heavy. So rank by the actual
+        transformed K = Y/X at the transformed feed, which is what the non-key split
+        rule needs to be ordered by, and warn when it is not descending."""
+        try:
+            prob_r, tpr = _rx.transform_problem(prob, provider)
+            Xz = np.asarray(prob_r.feeds[0].z, float)
+            Yz, _ = tpr.bubble(Xz, prob.pressure)
+            K = np.where(Xz > 1e-9, Yz / np.maximum(Xz, 1e-12), np.inf)
+        except Exception:
+            return ""                    # a real failure surfaces when sizing runs
+        bad = [prob_r.comps[i] for i in range(1, len(K)) if K[i] > K[i - 1] * 1.001]
+        if bad:
+            return ("transformed species not ordered light->heavy at the feed "
+                    f"({', '.join(bad)} more volatile than the one before) -- in a "
+                    "reactive column that is often deliberate (a volatile reactant "
+                    "leaves as product instead of overhead); check the non-key split "
+                    "is the one you meant")
+        return ""
 
     @staticmethod
     def _volatility_warning(order, antoine, P, provider):
@@ -309,14 +457,64 @@ class BVMModuleWidget(QWidget):
 
     # ------------------------------------------------------------- actions
     def _sync_extractive_enabled(self, on):
-        """G7: entrainer combo + E/F spin are only consumed in extractive mode, so
+        """G7: entrainer combo + E/F spins are only consumed in extractive mode, so
         grey them out otherwise (the 'consumed or visibly disabled' honesty rule)."""
-        for w in (self.entrainer_combo, self.ef_spin):
-            w.setEnabled(bool(on))
+        for w in (self.entrainer_combo, self.ef_spin, self.ef_min_spin,
+                  self.ef_max_spin, self.ef_pts_spin):
+            w.setEnabled(bool(on) and not self.reaction_box.isChecked())
+
+    def _sync_reactive_enabled(self, on):
+        """Reactive sizing runs ideal stages and has no entrainer path, so the
+        knobs it cannot consume are greyed out with the reason in a tooltip --
+        rather than being read and quietly overridden."""
+        on = bool(on)
+        self.eff_spin.setEnabled(not on)
+        self.extractive.setEnabled(not on)
+        self.send_btn.setEnabled(not on)
+        self.eff_spin.setToolTip(
+            "Not consumed in reactive mode: a Murphree stage is an affine blend of "
+            "vapour compositions and the transform is rational, so efficiency < 1 "
+            "is not a transformed stage. Reactive sizing is ideal-stage."
+            if on else
+            "Murphree vapour efficiency (column-wide); 1 = ideal stages. "
+            "Defaults to the shared column value.")
+        self.send_btn.setToolTip(
+            "Not available for a reactive design: the rigorous MESH solvers carry "
+            "no reaction terms, so converging this warm start would silently solve "
+            "a different (non-reactive) column."
+            if on else "")
+        if on:
+            self.eff_spin.setValue(1.0)
+            self.extractive.setChecked(False)
+        self._sync_extractive_enabled(self.extractive.isChecked())
+
+    def _reactions(self, order):
+        """`Reactions` from the reaction box, or None when it is switched off."""
+        if not self.reaction_box.isChecked():
+            return None
+        nu_map = self._nu_values()
+        nu = np.array([[nu_map.get(n, 0.0) for n in order]], float)
+        if not np.any(nu):
+            raise ValueError("Reaction is enabled but every stoichiometric "
+                             "coefficient is zero.")
+        if abs(nu.sum()) > 0 and len(np.flatnonzero(nu[0] > 0)) == 0:
+            raise ValueError("Reaction needs at least one product "
+                             "(positive coefficient).")
+        ref_name = self.ref_combo.currentText()
+        if ref_name not in order:
+            raise ValueError("Select a reference component for the reaction.")
+        ref = order.index(ref_name)
+        if nu[0][ref] == 0.0:
+            raise ValueError(f"The reference component ({ref_name}) must take part "
+                             "in the reaction (non-zero coefficient).")
+        return _rx.Reactions(nu=nu, ref=[ref],
+                             keq_fn=_rx.keq_arrhenius(self.keq_a.value(),
+                                                      self.keq_b.value()))
 
     # ------------------------------------------------------- .colx persistence
     _PARAM_SPINS = ("rec_lk", "rec_hk", "r_spin", "q_spin", "eff_spin",
-                    "rmax_spin", "map_pts", "ef_spin", "max_stages", "eps_stage")
+                    "rmax_spin", "map_pts", "ef_spin", "max_stages", "eps_stage",
+                    "ef_min_spin", "ef_max_spin", "ef_pts_spin")
 
     def get_params(self) -> dict:
         """G8: flat snapshot of the BVM knobs for .colx persistence (mirrored
@@ -326,6 +524,11 @@ class BVMModuleWidget(QWidget):
         d["hk"] = self.hk_combo.currentText()
         d["extractive"] = self.extractive.isChecked()
         d["entrainer"] = self.entrainer_combo.currentText()
+        d["reaction"] = {"on": self.reaction_box.isChecked(),
+                         "nu": self._nu_values(),
+                         "ref": self.ref_combo.currentText(),
+                         "keq_a": self.keq_a.value(),
+                         "keq_b": self.keq_b.value()}
         return d
 
     def set_params(self, params: dict):
@@ -343,6 +546,19 @@ class BVMModuleWidget(QWidget):
                     combo.setCurrentIndex(i)
         if "extractive" in params:
             self.extractive.setChecked(bool(params["extractive"]))
+        rxp = params.get("reaction") or {}
+        if rxp:
+            self._nu_saved = {k: float(v) for k, v in (rxp.get("nu") or {}).items()}
+            self._nu_spins = {}               # drop stale rows so the file wins
+            self._refresh_nu_table(self._species_order())
+            if rxp.get("ref"):
+                i = self.ref_combo.findText(rxp["ref"])
+                if i >= 0:
+                    self.ref_combo.setCurrentIndex(i)
+            for key, spin in (("keq_a", self.keq_a), ("keq_b", self.keq_b)):
+                if key in rxp:
+                    spin.setValue(float(rxp[key]))
+            self.reaction_box.setChecked(bool(rxp.get("on")))
 
     # --------------------------------------------------------- threaded runs
     def _run_bg(self, label, job, on_done):
@@ -350,6 +566,7 @@ class BVMModuleWidget(QWidget):
         that touches widgets must be read on the GUI thread and closed over
         before the job is handed off."""
         from PySide6.QtCore import QThread
+
         from ..solver_worker import SolverWorker
 
         if getattr(self, "_thread", None) is not None:
@@ -395,16 +612,24 @@ class BVMModuleWidget(QWidget):
         self._design = design
         if design["feasible"]:
             self.status.setText(self._feasible_status(design))
-            self._fill_table(design["column"])
+            self._fill_table(design["column"], design)
         else:
+            # the detail field names the offending stage/composition -- it is the
+            # only part that tells the user what to change, so show it.
             reasons = "; ".join(f"{f.cls}"
                                 + (f" [{f.section}]" if f.section else "")
+                                + (f": {f.detail}" if f.detail else "")
                                 for f in design["findings"])
             conn = design.get("connection")
+            # a gap is only meaningful when both profiles actually reached the
+            # junction region; a section that never left its anchor has no gap.
             gap = (f" -- closest approach {conn['dmin']:.3f} (need <= {conn['tol']:.3f})"
-                   if conn else "")
+                   if conn and np.isfinite(conn.get("dmin", np.inf)) else "")
+            # the thermo note belongs here most of all: "no binary parameters"
+            # is a common reason a column looks infeasible.
             self.status.setText(
-                f"Infeasible at R={self.r_spin.value():g}: {reasons}{gap}")
+                f"Infeasible at R={self.r_spin.value():g}: {reasons}{gap}"
+                + (f"  [{self._thermo_note}]" if self._thermo_note else ""))
             self.data_table.setRowCount(0)
         self._plot_current()
 
@@ -413,6 +638,13 @@ class BVMModuleWidget(QWidget):
         only when they were computed (the old one-line conditional swallowed the
         stage count whenever R_min was absent)."""
         msg = f"Feasible: {design['N_total']} stages, feed@{design['feed_stages']}"
+        if design.get("reactive"):
+            msg += (". Reactive: transformed coordinates, every stage at chemical "
+                    "equilibrium")
+            ex = np.asarray(design["physical"]["extent"], float)
+            ex = ex[np.isfinite(ex)]
+            if ex.size:
+                msg += f"; extent {ex.min():.3f}..{ex.max():.3f} mol/mol"
         rmin, efmin = design.get("R_min"), design.get("EF_min")
         if rmin is not None:
             msg += f". R_min={rmin:.2f}"
@@ -420,14 +652,102 @@ class BVMModuleWidget(QWidget):
             msg += f", min E/F={efmin:.2f}"
         if self._order_warning:
             msg += f"  [warning: {self._order_warning}]"
+        if self._thermo_note:
+            msg += f"  [{self._thermo_note}]"
         return msg
 
     def _on_limits(self):
-        """G11: run the R_min / min-E/F bisection on demand, not on every size."""
-        self._on_size(with_limits=True)
+        """R_min / min-E/F on demand, and plot the picture that answers it.
+
+        The two modes ask different questions, so they get different plots:
+
+        NOT EXTRACTIVE -- one number matters, R_min, and what it looks like. Size
+        the column just above it and show the ternary, where the two profiles have
+        only just met.
+
+        EXTRACTIVE -- R_min alone is not the answer. The reflux band has an upper
+        edge as well (too much reflux dilutes the entrainer out of the middle
+        section), both edges move with E/F, and the entrainer minimum is where
+        they close on each other. So sweep E/F and draw the feasible region --
+        the bifurcation diagram of Bruggemann & Marquardt's Figure 9.
+        """
+        try:
+            prob, provider = self._gather()
+        except Exception as exc:
+            self.status.setText(f"Limits failed: {exc}")
+            return
+        R_hi = float(self.rmax_spin.value())
+        if not self.extractive.isChecked():
+            def job():
+                lo, hi = _driver.reflux_band(prob, provider, r_hi=R_hi,
+                                             n_scan=16)
+                if lo is None:
+                    return {"design": None, "band": (None, None)}
+                # size just ABOVE R_min: at R_min itself the stage count
+                # diverges, so the profile drawn there is the limiting one and
+                # has no finite column behind it.
+                d = _mbvm_api.size_column(prob, provider, R=lo * 1.02, EF=None,
+                                          with_limits=False)
+                d["R_min"] = lo
+                return {"design": d, "band": (lo, hi)}
+
+            self._run_bg("R_min", job, self._on_rmin_done)
+            return
+
+        grid = np.linspace(max(self.ef_min_spin.value(), 0.0),
+                           max(self.ef_max_spin.value(), 1e-6),
+                           int(self.ef_pts_spin.value()))
+        EF = self.ef_spin.value()
+        self._run_bg(
+            "R_min / min E/F",
+            lambda: {"region": _driver.operating_region(
+                         prob, provider, EF_grid=grid, r_hi=R_hi, n_scan=12),
+                     "band": _driver.reflux_band(prob, provider, EF=EF,
+                                                 r_hi=R_hi, n_scan=16),
+                     "EF": EF},
+            self._on_limits_done)
+
+    def _on_rmin_done(self, payload):
+        lo, hi = payload["band"]
+        if lo is None:
+            self.status.setText(
+                "No feasible reflux below the design-map R max: the profiles "
+                "never connect. Raise it, or check the split and keys.")
+            return
+        self._design = payload["design"]
+        self._fill_table(self._design.get("column"), self._design)
+        self.status.setText(
+            f"R_min = {lo:.4g}"
+            + (f", R_max = {hi:.4g}" if hi is not None else
+               " (no upper edge -- more reflux never breaks an ordinary column)")
+            + f". Column drawn at R = {lo * 1.02:.4g}, just above the minimum, "
+              f"where the sections have only just met"
+            + (f": {self._design['N_total']} stages"
+               if self._design.get("N_total") else "")
+            + (f"  [{self._thermo_note}]" if self._thermo_note else ""))
+        self.view_combo.setCurrentIndex(0)
+        self._plot_current()
+
+    def _on_limits_done(self, payload):
+        reg = payload["region"]
+        self._region = reg
+        lo, hi = payload["band"]
+        bits = []
+        if reg["EF_min"] is not None:
+            bits.append(f"min E/F ~ {reg['EF_min']:.3g} "
+                        f"(R_min ~ {reg['r_at_EF_min']:.3g} there)")
+        else:
+            bits.append("no entrainer ratio in the sweep gave a feasible column")
+        if lo is not None:
+            bits.append(f"at E/F={payload['EF']:g}: R_min={lo:.3g}"
+                        + (f", R_max={hi:.3g}" if hi is not None else
+                           ", no upper edge found below the scan ceiling"))
+        self.status.setText("Operating region: " + "; ".join(bits) + ".")
+        self.view_combo.setCurrentIndex(2)
+        self._plot_current()
 
     def _on_view_changed(self, *_):
-        if self._design is not None:
+        if self._design is not None or self.view_combo.currentIndex() == 2:
             self._plot_current()
 
     def _on_map(self):
@@ -452,27 +772,65 @@ class BVMModuleWidget(QWidget):
         if self._design is None or not self._design.get("feasible"):
             self.status.setText("Size a feasible column first, then send it.")
             return
+        if self._design.get("reactive"):
+            # nothing silently ignored: MESH has no reaction terms, so a warm start
+            # from a reactive design would converge a different column
+            self.status.setText(
+                "Reactive designs cannot be sent to the rigorous solver: the MESH "
+                "solvers carry no reaction terms, so the warm start would converge "
+                "a non-reactive column instead. The BVM sizing + profiles above are "
+                "the reactive result.")
+            return
         try:
             init = _mbvm_api.to_solver(self._design)
             from core.column_solvers import solve_bubble_point
-            comps = self._species_order()
-            feed = self._feed_stream()
-            z = np.array([feed.composition.get(n, 0.0) for n in comps])
-            F = float(feed.flow)
+            from core.solver_input import build_solver_input
+            # rebuild the problem BVM was sized from, so the handoff carries the
+            # same feeds, entrainer and pressure profile rather than a
+            # reconstruction: a single pooled feed with D computed from F+E is a
+            # different column, and dropping phi_fn silently downgrades SRK to
+            # ideal gas.
+            prob, _provider = self._gather()
+            comps = list(prob.comps)
+            _antoine, gamma_fn, phi_fn, _lbl, _note = session_models(
+                self.window_state, comps)
             psat = self.window_state.thermodynamics_config.psat_params(comps)
-            gamma_fn = self.window_state.build_gamma_fn(comps)
+            N = init["n_stages"]
+            si = build_solver_input(
+                n_stages=N, comps=comps, feeds=self._handoff_feeds(prob, init),
+                R=init["R"], D=init["D"], antoine=psat,
+                pressure=prob.pressure + float(prob.dP or 0.0) * np.arange(N),
+                gamma_fn=gamma_fn, phi_fn=phi_fn)
             eff = float(self.eff_spin.value())
         except Exception as exc:
             self.status.setText(f"Handoff failed: {exc}")
             return
         self._run_bg(
             "Warm start -> rigorous solver",
-            lambda: solve_bubble_point(
-                z, F, psat, comps, N=init["n_stages"],
-                feed_stage=init["feed_stage"], R=init["R"], D=init["D"],
-                P=init["pressure"], gamma_fn=gamma_fn, efficiency=eff,
-                x0=init["x0"], T0=init["T0"]),
+            lambda: solve_bubble_point(si, efficiency=eff, x0=init["x0"],
+                                       T0=init["T0"]),
             self._on_send_done)
+
+    @staticmethod
+    def _handoff_feeds(prob, init):
+        """(stage, flow, composition, q) per feed, in BVM's top -> bottom order.
+
+        An extractive design has two: the entrainer at the upper feed stage and
+        the main feed below it. The entrainer enters as saturated liquid (q=1) --
+        that is what makes it run down past the rectifying section, and it is the
+        assumption `sections.extractive_chain` already marches on.
+        """
+        stages = init["feed_stages"]
+        mains = [(float(f.F), np.asarray(f.z, float), float(f.q))
+                 for f in prob.feeds]
+        if prob.extractive and prob.x_E is not None and len(stages) > 1:
+            E = float(init.get("operating_point", {}).get("EF") or 0.0) * mains[0][0]
+            feeds = [(stages[0], E, np.asarray(prob.x_E, float), 1.0)]
+            feeds += [(stages[i + 1], F, z, q)
+                      for i, (F, z, q) in enumerate(mains) if i + 1 < len(stages)]
+            return feeds
+        return [(stages[min(i, len(stages) - 1)], F, z, q)
+                for i, (F, z, q) in enumerate(mains)]
 
     def _on_send_done(self, sol):
         ok = sol.get("found")
@@ -500,11 +858,20 @@ class BVMModuleWidget(QWidget):
     # -------------------------------------------------------------- plotting
     _SECTION_LS = {"rectifying": "-", "stripping": "--", "intermediate": ":",
                    "extractive": "-."}
+    # Fixed colour per section, not the axes prop cycle: the cycle assigns by
+    # draw order, so stripping came out red on a two-section design and green on
+    # a three-section one, and nothing on screen tied a colour to a section.
+    _SECTION_C = {"rectifying": RECT_C, "stripping": STRIP_C,
+                  "extractive": EXTRACT_C, "intermediate": INTER_C}
 
     def _plot_current(self):
+        view = self.view_combo.currentIndex()
+        if view == 2:
+            self._plot_region()
+            return
         if self._design is None:
             return
-        if self.view_combo.currentIndex() == 0:
+        if view == 0:
             self._plot_ternary(self._design)
         else:
             self._plot_full(self._design)
@@ -522,60 +889,128 @@ class BVMModuleWidget(QWidget):
 
         # composition triangle: keep the bottom/left axes (ticks + labels) as the
         # two legs, drop the surrounding box, draw the hypotenuse x_LK + x_HK = 1.
-        ax.plot([0, 1], [1, 0], "k-", lw=1.5)
+        ax.plot([0, 1], [1, 0], color="#9C9C9C", linestyle="-", lw=1.5)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.set_aspect("equal")
 
-        for name, prof in design.get("profiles", {}).items():
+        # A section's marched profile runs well past its junctions -- an interior
+        # section is traced along BOTH arms of its saddle and the column uses one
+        # of them, so drawing the whole trace at full weight shows an elbow that
+        # looks like it points the wrong way. Draw the trace faint and the stages
+        # the column actually occupies on top of it.
+        col = design.get("column")
+        fs = list(design.get("feed_stages", []))
+        profiles = design.get("profiles", {})
+        used = (col is not None and len(fs) + 1 == len(profiles))
+        # The faint trace gets its own legend entry: an interior section overshoots
+        # its junctions so far that its arm can run right through the neighbouring
+        # section's corner, and an unlabelled curve there reads as the neighbour's
+        # trace with the wrong colour on top of it.
+        for name, prof in profiles.items():
             X = np.asarray(prof["X"])
             # per-stage markers (G9): a one/two-point section is invisible as a
             # bare line, so draw the stages as dots on the section linestyle.
-            ax.plot(X[:, lk], X[:, hk], self._SECTION_LS.get(name, "-"),
-                    marker="o", ms=3, lw=1.5, label=name)
-        for pt, mark, lbl in ((design["xD"], "^", "x_D"),
-                              (design["xB"], "v", "x_B"),
-                              (design["feed_z"], "s", "feed")):
-            ax.plot(pt[lk], pt[hk], mark, ms=8, mfc="none", mec="0.2", label=lbl)
+            ax.plot(X[:, lk], X[:, hk], self._SECTION_LS.get(name, "--"),
+                    marker="o", ms=3, lw=1.5, alpha=0.3 if used else 1.0,
+                    color=self._SECTION_C.get(name, "0.5"),
+                    label=f"{name} (full trace)" if used else name)
+        if used:
+            xc = np.asarray(col["x"])
+            edges = [0] + fs + [len(xc)]
+            for name, lo, hi in zip(profiles, edges[:-1], edges[1:]):
+                ax.plot(xc[lo:hi, lk], xc[lo:hi, hk],
+                        self._SECTION_LS.get(name, "--"), marker="o", ms=3,
+                        lw=2.0, color=self._SECTION_C.get(name, "0.5"), label=name)
+        for pt, mark, lbl in ((design["xD"], "m^", "x_D"),
+                              (design["xB"], "mv", "x_B"),
+                              (design["feed_z"], "ys", "feed")):
+            ax.plot(pt[lk], pt[hk], mark, ms=8, mec="0.2", label=lbl)
         # entrainer stage marker (G9): the extractive column's upper feed stage
-        col = design.get("column")
-        fs = design.get("feed_stages", [])
         if col is not None and len(fs) > 1:
             xe = np.asarray(col["x"])[fs[0]]
-            ax.plot(xe[lk], xe[hk], "*", ms=13, mfc="gold", mec="0.2",
+            ax.plot(xe[lk], xe[hk], "ms", mec="0.2",
                     label="entrainer stage")
         conn = design.get("connection")
         if conn is not None:
             pA, pB = conn.get("pointA"), conn.get("pointB")
             if pA is not None:
                 col = "tab:green" if conn["connected"] else "tab:red"
-                ax.plot([pA[lk], pB[lk]], [pA[hk], pB[hk]], "-", color=col, lw=2)
-                ax.plot(conn["point"][lk], conn["point"][hk], "o", color=col, ms=7)
+                # the feed jump: the two ADJACENT stages either side of the feed,
+                # which a feed is supposed to separate. Not the junction.
+                ax.plot([pA[lk], pB[lk]], [pA[hk], pB[hk]], ":", color=col, lw=1.2,
+                        label="feed jump (adjacent stages)")
+                # the junction itself -- a liquid composition on both profiles, so
+                # it belongs on these axes. It used to be `point` from the vapour
+                # search, drawn on liquid axes, which is why the marker never sat
+                # where the curves visibly meet.
+                ax.plot(conn["point"][lk], conn["point"][hk], "o", color=col, ms=6,
+                        mfc="none", mew=1.5,
+                        label="junction" + (" (approx)" if conn.get("approximate")
+                                            else ""))
 
-        ax.set_xlabel(f"{comps[lk]} mole fraction (LK)")
-        ax.set_ylabel(f"{comps[hk]} mole fraction (HK)")
+        rx_tag = " [transformed]" if design.get("reactive") else ""
+        ax.set_xlabel(f"{comps[lk]} mole fraction (LK){rx_tag}")
+        ax.set_ylabel(f"{comps[hk]} mole fraction (HK){rx_tag}")
         ok = design["feasible"]
         # for C>3 the crossing lives in R^(C-1); this is only its LK/HK shadow (Sec 7)
         proj = "LK/HK projection" if len(comps) > 3 else "Ternary"
+        if design.get("reactive"):
+            # name the component the transform eliminated — it is missing from
+            # these axes by construction, and it is usually the product
+            gone = [c for c in design.get("physical", {}).get("comps", [])
+                    if c not in comps]
+            proj = (f"Reactive {proj.lower()}"
+                    + (f", {gone[0]} eliminated" if gone else ""))
         title = (f"{proj} -- {design['N_total']} stages"
                  if ok else
                  f"{proj} -- gap {conn['dmin']:.3f} "
                  f"(need <= {conn['tol']:.3f})" if conn else proj)
         ax.set_title(title)
         ax.set_xlim(0, 1.0); ax.set_ylim(0, 1.0)
-        ax.legend(fontsize=8, loc="upper right")
+        ax.legend(fontsize=7, loc="upper right", ncol=2, framealpha=0.85)
         self.figure.tight_layout(); self.canvas.draw()
+
+    # A reactive design's transformed coordinates are floored at
+    # reactive._TRACE (1e-4) to keep a stoichiometric feed off an exactly-zero
+    # face. That floor survives active_comps' 1e-6 default and draws a flat
+    # noise line, so the physical plot cuts above it. The 1e-6 default stays for
+    # ordinary columns, where a 0.05 mol% impurity may be the point of the job.
+    _REACTIVE_TRACE = 2e-4
 
     def _plot_full(self, design):
         """Composition + temperature vs stage. When feasible, the assembled
         column; when not, the marched section profiles vs their own stage index
-        (so an infeasible run still shows what was marched)."""
+        (so an infeasible run still shows what was marched).
+
+        A reactive design is plotted in *physical* compositions: the transform
+        drops the reference component, which is normally the reaction product --
+        the one thing you opened a reactive column to look at.
+        """
         self.figure.clear()
         comps = design["comps"]
         ax1 = self.figure.add_subplot(121)
         ax2 = self.figure.add_subplot(122)
         col = design.get("column")
-        if col is not None:
+        phys = design.get("physical") if design.get("reactive") else None
+        if phys is not None and "x" in phys and col is not None:
+            comps = phys["comps"]
+            x, T = np.asarray(phys["x"]), np.asarray(phys["T"])
+            stages = np.arange(x.shape[0])
+            for j in active_comps(x, comps, tol=self._REACTIVE_TRACE)[0]:
+                ax1.plot(stages, x[:, j], "-o", ms=3, label=comps[j])
+            ax2.plot(stages, T, "-o", ms=3, color=_TEMP_C)
+            ext = np.asarray(phys["extent"], float)
+            ax3 = ax2.twinx()
+            ax3.plot(stages, ext, "-", lw=1.2, color="tab:purple",
+                     label="extent")
+            ax3.set_ylabel("extent (mol/mol)", color="tab:purple")
+            ax3.tick_params(axis="y", labelcolor="tab:purple")
+            for fs in design["feed_stages"]:
+                ax1.axvline(fs, color="0.5", ls="--", lw=1)
+                ax2.axvline(fs, color="0.5", ls="--", lw=1)
+            ax1.set_title(f"Physical profile -- {design['N_total']} stages")
+        elif col is not None:
             x, T = col["x"], col["T"]
             stages = np.arange(x.shape[0])
             for j in active_comps(x, comps)[0]:   # drop all-zero (unfed) comps
@@ -601,7 +1036,10 @@ class BVMModuleWidget(QWidget):
                 ax2.plot(st, prof["T"], ls, lw=1.2, label=name)
             ax2.legend(fontsize=8)
             ax1.set_title("Marched sections (did not connect)")
-        ax1.set_xlabel("Stage (0 = distillate)"); ax1.set_ylabel("Liquid x")
+        ax1.set_xlabel("Stage (0 = distillate)")
+        ax1.set_ylabel("Liquid x (physical)" if phys is not None and "x" in phys
+                       else "Transformed liquid X" if design.get("reactive")
+                       else "Liquid x")
         ax1.set_ylim(0, 1); ax1.legend(fontsize=8)
         ax2.set_xlabel("Stage (0 = distillate)"); ax2.set_ylabel("T (degC)")
         ax2.set_title("Temperature")
@@ -628,29 +1066,89 @@ class BVMModuleWidget(QWidget):
         ax.legend(fontsize=8)
         self.figure.tight_layout(); self.canvas.draw()
 
+    def _plot_region(self):
+        """Feasible (E/F, R) region for an extractive column.
+
+        The bifurcation diagram of Bruggemann & Marquardt's Figure 9: R_min and
+        R_max against entrainer flow, the feasible band shaded between them. Both
+        bounds move with E/F and close on each other as it falls; the nose is the
+        minimum entrainer ratio, below which no reflux separates the mixture at
+        all. R_min on its own does not describe an extractive column, which is
+        why this and not a single number is what the button draws.
+        """
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        reg = self._region
+        if reg is None:
+            ax.text(0.5, 0.5,
+                    "Tick 'Extractive distillation' and press "
+                    "'Compute R_min / min E/F'\nto sweep entrainer flow against "
+                    "reflux.\n\nFor an ordinary column the same button reports "
+                    "R_min and draws\nthe ternary just above it.",
+                    ha="center", va="center", transform=ax.transAxes,
+                    fontsize=9, color="0.4")
+            ax.set_axis_off()
+            self.figure.tight_layout(); self.canvas.draw()
+            return
+
+        EF = np.asarray(reg["EF"], float)
+        lo = np.asarray(reg["r_min"], float)
+        hi = np.asarray(reg["r_max"], float)
+        ok = np.isfinite(lo)
+        if ok.any():
+            ax.plot(EF[ok], lo[ok], "-o", ms=4, color="tab:blue", label="R_min")
+            if np.isfinite(hi[ok]).any():
+                ax.plot(EF[ok], hi[ok], "-o", ms=4, color="tab:red",
+                        label="R_max")
+                ax.fill_between(EF[ok], lo[ok], hi[ok], color="tab:green",
+                                alpha=0.15, label="feasible")
+        if reg.get("EF_min") is not None:
+            ax.axvline(reg["EF_min"], color="0.4", ls="--", lw=1.2)
+            ax.annotate(f"min E/F ~ {reg['EF_min']:.3g}",
+                        (reg["EF_min"], reg["r_at_EF_min"]),
+                        textcoords="offset points", xytext=(6, 8), fontsize=8)
+        ax.plot([self.ef_spin.value()], [self.r_spin.value()], "k*", ms=13,
+                label="current operating point")
+        ax.set_xlabel("entrainer / feed  (E/F)")
+        ax.set_ylabel("reflux ratio R")
+        ax.set_title("Feasible operating region", fontsize=10)
+        ax.legend(fontsize=8)
+        self.figure.tight_layout(); self.canvas.draw()
+
     def _on_pick(self, event):
+        """Load the clicked design map point: size the column at that reflux."""
         if self._map is None:
             return
-        xdata = event.artist.get_xdata()
-        R = float(xdata[event.ind[0]])
+        R = float(event.artist.get_xdata()[event.ind[0]])
         self.r_spin.setValue(R)
         self._on_size()
 
-    def _fill_table(self, col):
+    def _fill_table(self, col, design=None):
         """Per-stage table: T, liquid x and vapour y for every species, plus the
-        section liquid/vapour molar flows L, V (G10)."""
-        comps = self._species_order()
+        section liquid/vapour molar flows L, V (G10).
+
+        A reactive design is marched in transformed coordinates, so the x/y columns
+        are transformed compositions over the *reduced* component list; the physical
+        liquid and the reaction extent per stage are appended (they are what the
+        column actually holds)."""
+        design = design or {}
+        phys = design.get("physical") if design.get("reactive") else None
+        comps = (list(design["comps"]) if phys is not None
+                 else self._species_order())
         x, T = np.asarray(col["x"]), np.asarray(col["T"])
         y = np.asarray(col.get("y")) if col.get("y") is not None else None
         L = np.asarray(col.get("liquid_flow")) if col.get("liquid_flow") is not None else None
         V = np.asarray(col.get("vapor_flow")) if col.get("vapor_flow") is not None else None
-        headers = ["Stage", "T (degC)"] + [f"x {c}" for c in comps]
+        tag = "X " if phys is not None else "x "
+        headers = ["Stage", "T (degC)"] + [f"{tag}{c}" for c in comps]
         if y is not None:
-            headers += [f"y {c}" for c in comps]
+            headers += [f"{'Y ' if phys is not None else 'y '}{c}" for c in comps]
         if L is not None:
             headers.append("L (kmol/h)")
         if V is not None:
             headers.append("V (kmol/h)")
+        if phys is not None:
+            headers += [f"x {c} (real)" for c in phys["comps"]] + ["extent (mol/mol)"]
         self.data_table.setColumnCount(len(headers))
         self.data_table.setHorizontalHeaderLabels(headers)
         self.data_table.setRowCount(x.shape[0])
@@ -662,18 +1160,22 @@ class BVMModuleWidget(QWidget):
                 row.append(round(float(L[r]), 2))
             if V is not None:
                 row.append(round(float(V[r]), 2))
+            if phys is not None:
+                row += [round(float(v), 4) for v in np.asarray(phys["x"])[r]]
+                row.append(round(float(np.asarray(phys["extent"])[r]), 4))
             for c, v in enumerate(row):
                 self.data_table.setItem(r, c, QTableWidgetItem(str(v)))
 
 
 def _demo():
     """Headless self-check: drive gather + size off a stub state, no event loop."""
-    import sys, os
+    import os
+    import sys
     _src_py = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # src/python
     sys.path.insert(0, _src_py)
     sys.path.insert(0, os.path.dirname(_src_py))                           # src (for side_features)
+    from gui.state.window_state import Species, Stream, StreamType, WindowState
     from PySide6.QtWidgets import QApplication
-    from gui.state.window_state import WindowState, Species, Stream, StreamType
 
     app = QApplication.instance() or QApplication([])
 
@@ -759,9 +1261,97 @@ def _demo():
     assert w2.extractive.isChecked(), "extractive prefilled from second feed"
     assert abs(w2.ef_spin.value() - 0.5) < 1e-9, w2.ef_spin.value()  # 50/100
     assert w2.entrainer_combo.currentText() == "xylene", w2.entrainer_combo.currentText()
+
+    # ---- reactive path: MTBE synthesis through the same widget ---------------
+    rws = WindowState()
+    rws.pressure = 1.01325
+    # order so the reduced list is [n-butane, methanol, isobutene]: inert overhead,
+    # methanol the HK, transformed isobutene below it (i.e. down and out as MTBE)
+    mtbe = [("n-butane", (6.80896, 935.86, 238.73)),
+            ("MTBE", (6.92944, 1156.255, 230.376)),
+            ("methanol", (7.8975, 1474.08, 229.13)),
+            ("isobutene", (6.89776, 950.02, 243.385))]
+    for name, (a, b, c) in mtbe:
+        rws.add_species(Species(name=name))
+        p = rws.thermodynamics_config.get_component_params(name)
+        p.antoine_a, p.antoine_b, p.antoine_c = a, b, c
+    rws.add_stream(Stream(id="Feed", stream_type=StreamType.FEED, stage=5, flow=100.0,
+                          composition={"n-butane": 0.30, "MTBE": 0.0,
+                                       "methanol": 0.40, "isobutene": 0.30}))
+    r = BVMModuleWidget(window_state=rws)
+    r._refresh_species()
+    r.lk_combo.setCurrentText("n-butane"); r.hk_combo.setCurrentText("methanol")
+    # R=3: this smoke test only needs a feasible reactive design to exercise the
+    # transformed-coordinate plumbing. At R=2 it now sits just the wrong side of
+    # the junction tolerance (gap 0.057 vs 0.050) -- reactive sizing's real
+    # accuracy is a documented ceiling (BVM_REACTIVE_XFAIL in test_validation),
+    # not something this widget check should pin.
+    r.rec_lk.setValue(0.98); r.rec_hk.setValue(0.02); r.r_spin.setValue(3.0)
+    r.reaction_box.setChecked(True)
+    for name, nu in (("n-butane", 0.0), ("MTBE", 1.0), ("methanol", -1.0),
+                     ("isobutene", -1.0)):
+        r._nu_spins[name].setValue(nu)
+    r.ref_combo.setCurrentText("MTBE")
+    r.keq_a.setValue(-16.33); r.keq_b.setValue(6820.0)
+    # honesty wiring: what reactive mode can't consume is greyed out, not read
+    assert not r.eff_spin.isEnabled() and not r.extractive.isEnabled()
+    assert not r.send_btn.isEnabled() and "no reaction terms" in r.send_btn.toolTip()
+    prob_r, _ = r._gather()
+    assert prob_r.reactions is not None and prob_r.efficiency == 1.0
+    r._on_size(); wait(r)
+    assert r._design["reactive"] and r._design["feasible"], r.status.text()
+    assert "Reactive" in r.status.text() and "extent" in r.status.text(), r.status.text()
+    hdrs_r = [r.data_table.horizontalHeaderItem(c).text()
+              for c in range(r.data_table.columnCount())]
+    assert "extent (mol/mol)" in hdrs_r and any(h.endswith("(real)") for h in hdrs_r)
+    assert any(h.startswith("X ") for h in hdrs_r), hdrs_r   # transformed columns
+    assert r.data_table.rowCount() == r._design["N_total"]
+    r._on_send()
+    assert "cannot be sent" in r.status.text(), r.status.text()
+    # reaction spec round-trips through the .colx snapshot
+    snap_r = r.get_params()
+    assert snap_r["reaction"]["on"] and snap_r["reaction"]["ref"] == "MTBE"
+    r2 = BVMModuleWidget(window_state=rws); r2._refresh_species()
+    r2.set_params(snap_r)
+    assert r2.reaction_box.isChecked()
+    assert r2._nu_values() == {"n-butane": 0.0, "MTBE": 1.0, "methanol": -1.0,
+                               "isobutene": -1.0}, r2._nu_values()
+    assert abs(r2.keq_a.value() - (-16.33)) < 1e-9 and r2.keq_b.value() == 6820.0
+    r.view_combo.setCurrentIndex(1); r.view_combo.setCurrentIndex(0)   # both render
+
+    # --- the R_min button: a picture, not just a number in the status line.
+    # Not extractive -> R_min and the column drawn just above it.
+    prob_l, prov_l = w._gather()
+    lo, hi = _driver.reflux_band(prob_l, prov_l, r_hi=10.0, n_scan=12)
+    assert lo is not None and hi is None, (lo, hi)   # ordinary column: open band
+    w._on_rmin_done({"design": _mbvm_api.size_column(prob_l, prov_l, R=lo * 1.02,
+                                                     with_limits=False),
+                     "band": (lo, hi)})
+    assert w.view_combo.currentIndex() == 0, "R_min should show the ternary"
+    assert "R_min" in w.status.text() and "just above" in w.status.text()
+    # no feasible reflux is reported, not drawn as an empty plot
+    w._on_rmin_done({"design": None, "band": (None, None)})
+    assert "No feasible reflux" in w.status.text()
+
+    # Extractive -> the operating region. Region view renders before any sweep,
+    # and R_max is a real second edge rather than a repeat of R_min.
+    w.view_combo.setCurrentIndex(2)
+    w._plot_region()                                  # empty-state message
+    w._on_limits_done({"region": {"EF": np.array([0.4, 0.8, 1.2]),
+                                  "r_min": np.array([np.nan, 1.5, 1.2]),
+                                  "r_max": np.array([np.nan, 3.0, 6.0]),
+                                  "EF_min": 0.8, "r_at_EF_min": 1.5,
+                                  "operating": None},
+                       "band": (1.5, 3.0), "EF": 0.8})
+    assert w.view_combo.currentIndex() == 2
+    assert "min E/F" in w.status.text() and "R_max" in w.status.text(), w.status.text()
+    assert w.ef_min_spin.isEnabled() is w.extractive.isChecked()
+
+    ex = np.asarray(r._design["physical"]["extent"], float)
     print(f"bvm_module self-check OK  N={w._design['N_total']} "
           f"feed@{w._design['feed_stages']} xD={np.round(xD, 3)}  "
-          f"entrainer-detect OK (E/F={w2.ef_spin.value():.2f})")
+          f"entrainer-detect OK (E/F={w2.ef_spin.value():.2f})  "
+          f"reactive N={r._design['N_total']} extent {ex.min():.3f}..{ex.max():.3f}")
 
 
 if __name__ == "__main__":

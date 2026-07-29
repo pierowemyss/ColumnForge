@@ -25,6 +25,15 @@ IMPLEMENTED_EOS = ThermodynamicsConfig.IMPLEMENTED_EOS
 # Full option lists (implemented + greyed-out) — shared with the Simulation tab's
 # mirror combos so the two stay in lock-step.
 VLE_MODELS = ["Antoine", "Wagner", "PLXANT", "Ideal"]
+
+# Per-component coefficient fields for each vapour-pressure model, in the
+# column order the parameter grid shows them. Shared by save/load so a new
+# model needs one entry, not two branches.
+_PURE_PSAT_KEYS = {
+    "Antoine": ("antoine_a", "antoine_b", "antoine_c"),
+    "Wagner": ("wagner_a", "wagner_b", "wagner_c", "wagner_d"),
+    "PLXANT": tuple(f"plxant_c{i + 1}" for i in range(7)),
+}
 ACTIVITY_MODELS = ["Ideal", "NRTL", "UNIQUAC", "Wilson", "Margules", "UNIFAC"]
 EOS_MODELS = ["Ideal Gas", "SRK", "PR", "BWRS"]
 
@@ -260,7 +269,9 @@ class InitializationTab(QWidget):
             if param_model == "Antoine":
                 pure_params = ["A", "B", "C"]
             elif param_model == "Wagner":
-                pure_params = ["A", "B", "C", "D"]
+                # Reduced form: Tc/Pc come from the same per-component record
+                # the EOS uses, so only a..d are entered here.
+                pure_params = ["a", "b", "c", "d"]
             elif param_model == "PLXANT":
                 pure_params = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
         
@@ -424,13 +435,14 @@ class InitializationTab(QWidget):
                 self.species_props.select_species(name)
 
     def _on_species_changed(self):
-        """Handle species property change."""
-        current = self.species_props.current_species if self.species_props else None
+        """Handle species property change.
+
+        The panel is the only emitter of propertiesChanged, so it is already in
+        sync — re-selecting it here would reload the table out from under an
+        in-progress edit (and delete a freshly added, not-yet-named UNIFAC row).
+        """
         self._refresh_species_list()
-        names = self.get_species_names()
-        self.species_props.set_species_list(names)
-        if current and current in names:
-            self.species_props.select_species(current)
+        self.species_props.set_species_list(self.get_species_names())
         self.speciesChanged.emit()
 
     def _on_species_name_changed(self, item):
@@ -469,13 +481,17 @@ class InitializationTab(QWidget):
             item.setText(old_name)
 
     def _refresh_species_list(self):
-        """Refresh the species list from window_state."""
+        """Refresh the species list from window_state, keeping the highlighted row
+        on whichever species the properties panel is showing."""
+        current = self.species_props.current_species if self.species_props else None
         self.species_list.blockSignals(True)
         self.species_list.setRowCount(0)
         for name in self.get_species_names():
             row = self.species_list.rowCount()
             self.species_list.insertRow(row)
             self.species_list.setItem(row, 0, QTableWidgetItem(name))
+            if name == current:
+                self.species_list.setCurrentCell(row, 0)
         self.species_list.blockSignals(False)
 
     def _add_species_from_db(self):
@@ -582,20 +598,16 @@ class InitializationTab(QWidget):
         
         if param_type == "Vapor Pressure":
             params = self.get_interaction_parameters()
-            if param_model == "Antoine" and params:
+            # Same key map load_interaction_parameters reads back, so every
+            # implemented Psat model round-trips without a per-model branch.
+            keys = _PURE_PSAT_KEYS.get(param_model)
+            if keys and params:
                 for i, name in enumerate(species):
-                    if i < len(params):
-                        comp_params = self.window_state.thermodynamics_config.get_component_params(name)
-                        comp_params.antoine_a = params[i][0] if params[i][0] is not None else None
-                        comp_params.antoine_b = params[i][1] if params[i][1] is not None else None
-                        comp_params.antoine_c = params[i][2] if params[i][2] is not None else None
-            elif param_model == "PLXANT" and params:
-                for i, name in enumerate(species):
-                    if i < len(params):
-                        comp_params = self.window_state.thermodynamics_config.get_component_params(name)
-                        for j in range(7):  # C1..C7
-                            v = params[i][j] if j < len(params[i]) else None
-                            setattr(comp_params, f"plxant_c{j+1}", v)
+                    if i >= len(params):
+                        continue
+                    cp = self.window_state.thermodynamics_config.get_component_params(name)
+                    for j, k in enumerate(keys):
+                        setattr(cp, k, params[i][j] if j < len(params[i]) else None)
 
         elif param_type == "EOS":
             params = self.get_interaction_parameters()
@@ -678,11 +690,7 @@ class InitializationTab(QWidget):
         def put(r, c, val):
             tbl.setItem(r, c, QTableWidgetItem("" if val is None else f"{val:g}"))
 
-        pure_keys = {
-            "Antoine": ("antoine_a", "antoine_b", "antoine_c"),
-            "Wagner": ("wagner_a", "wagner_b", "wagner_c", "wagner_d"),
-            "PLXANT": tuple(f"plxant_c{i+1}" for i in range(7)),
-        }
+        pure_keys = _PURE_PSAT_KEYS
 
         tbl.blockSignals(True)
         try:

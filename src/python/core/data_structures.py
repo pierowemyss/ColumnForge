@@ -19,6 +19,7 @@ class SolverMode(Enum):
     """
     BVM = "bvm"
     HYSIM = "hysim"   # Inside-Out; name kept because "hysim" is in saved .colx files
+    BUBBLE_POINT = "bubble_point"   # Wang-Henke; the other entry in the method combo
 
 
 class dict2struct(dict):

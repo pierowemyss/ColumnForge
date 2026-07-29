@@ -7,7 +7,8 @@ and turns it into Qt signals the GUI thread consumes:
                                     are the job's own units of work, so a run
                                     whose operating specs need a root-find can
                                     still show one monotonic sweep.
-    finished(profile)               profile dict, includes aborted runs
+    finished(profile)               profile dict, includes aborted runs; passed
+                                    as `object` so key order survives (see below)
     failed(message, traceback, user_error)   user_error: ValueError (bad
                                     config) vs an unexpected solver bug
 """
@@ -18,7 +19,13 @@ from PySide6.QtCore import QObject, Signal
 
 class SolverWorker(QObject):
     progress = Signal(int, int, float)
-    finished = Signal(dict)
+    # Signal(object), NOT Signal(dict): a dict argument is marshalled through
+    # QVariantMap, which is a sorted map, so every dict in the payload arrives
+    # with its keys in ALPHABETICAL order, recursively. That silently reordered
+    # a BVM design's `profiles` to extractive/rectifying/stripping and the ternary
+    # plot -- which reads them top->bottom -- then labelled the rectifying stages
+    # "extractive" and vice versa. `object` hands the payload over untouched.
+    finished = Signal(object)
     failed = Signal(str, str, bool)
 
     def __init__(self, job):

@@ -1,0 +1,27 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install system Qt libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pytest pyflakes
+      - name: Lint (pyflakes)
+        run: pyflakes src/python/core src/python/gui src/python/tests
+      - name: Test
+        run: python -m pytest src/python/tests/ src/side_features/bvm/tests/ -q

@@ -49,10 +49,26 @@ class Problem:
     extractive: bool = False
     side_draws: list = field(default_factory=list)   # list[SideDraw]
     dP: float = 0.0                   # per-stage pressure drop (Psat unit)
+    P_bot: float = None               # reboiler pressure; None = flat column.
+                                      # Resolved by `driver.size_column` once the
+                                      # stage count is known (it is dP*(N-1) above
+                                      # the top, and N is the method's OUTPUT).
+    eps_stage: float = 1e-2           # junction tolerance floor (connect.connect)
     reactions: object = None          # Reactions (reactive.py) or None
     max_stages: int = 200             # per-section marching cap
     efficiency: float = 1.0           # Murphree vapour efficiency (1 = ideal stages)
     balance_residual: float = 0.0     # E13: unclosed |f - (D xD + B xB)|/F, explicit path
+    trace_floor: float = 1e-4         # starting-guess floor on every product split
+    entrainer_trace: float = 1e-6     # ...and a smaller one for the entrainer
+    # Both are SEEDS for the free splits, not answers -- `driver.solve_omega`
+    # solves them against the junction condition. They still need sane values,
+    # because a seed that overshoots sends the march somewhere the solver cannot
+    # come back from, and the right value is component-specific: a heavy entrainer
+    # amplifies ~1/K = 100-800 per stage marching down, so 1e-4 of glycol overhead
+    # is already 0.3 within two stages -- past the extractive section's own level,
+    # so the rectifying section comes out one stage long. Ordinary non-keys are
+    # the other way round: reactive_mtbe leaves the simplex at 1e-5 and inverts its
+    # temperature profile at 1e-6, and wants the coarser floor.
 
     @property
     def C(self):
@@ -71,7 +87,33 @@ class Problem:
         return sum(fd.F for fd in self.feeds)
 
 
-def overall_balance(prob, EF=None):
+def free_split_indices(prob):
+    """Components whose distillate split is NOT fixed by the specification.
+
+    Two key recoveries fix two of the C component splits; the balance
+    d_i + b_i = f_i fixes nothing else. The remaining splits are genuine free
+    parameters of the design -- the classic multicomponent BVM statement that the
+    non-key distillate compositions are determined by *requiring the section
+    profiles to intersect*, not by a rule of thumb. `overall_balance` defaults
+    them to a light/heavy heuristic with a trace floor, which is only a starting
+    guess; `driver.solve_omega` solves for them.
+
+    The ENTRAINER is among them, and has to be. It enters below the rectifying
+    section so its distillate content is *small*, but pinning it at exactly zero
+    traps the whole rectifying profile on the entrainer-free face -- where, for
+    ethanol/water/EG at R=3, the operating line has a pinch pair straddling x_D
+    (0.696 and 0.950) that no profile can cross. The section then cannot reach
+    the feed at all, and the only thing it can "connect" to is its own anchor.
+    Its K really is small enough that a down-march multiplies a trace by ~800 per
+    stage, but that is an argument for stopping the march at the junction
+    (`march_section(stop_sec=...)`), not for deleting the degree of freedom:
+    x_D,entrainer is determined by the junction condition like every other free
+    split, and `driver.solve_omega` solves for it.
+    """
+    return [i for i in range(prob.C) if i not in (prob.lk, prob.hk)]
+
+
+def overall_balance(prob, EF=None, split=None):
     """Spec + feed(s) -> (xD, xB, D, B). Straight component balance f = D xD + B xB.
 
     The balance runs over *every* feed: the main feed(s) in `prob.feeds` and, in
@@ -83,8 +125,9 @@ def overall_balance(prob, EF=None):
     Explicit xD & xB win (D solved by least squares on f = D xD + B xB, D+B=F).
     Otherwise a per-component split-to-distillate fraction is built from the key
     recoveries and the non-key distribution, and d = frac*f, b = f - d. The trace
-    floor on `frac` then keeps every component present anywhere in the column at
-    >=1e-4 of its feed amount in each product, so the profiles can leave a face.
+    floor on `frac` (`prob.trace_floor`) then keeps every component present
+    anywhere in the column at >= that fraction of its feed amount in each
+    product, so the profiles can leave a face. It is a seed, not an answer.
     """
     C = prob.C
     f = prob.z_total.copy()
@@ -128,10 +171,30 @@ def overall_balance(prob, EF=None):
     # A strictly non-distributing component (frac 0 or 1) traps the profile on a
     # simplex face: heavies amplify downward in the rectifying section, so with
     # exactly zero distillate they never appear and can't reach the feed. Keep a
-    # trace in each product (1e-4) so the profile can bend off the face -- the
-    # physical reality (nothing is *perfectly* non-distributing) and standard BVM
-    # practice. ponytail: fixed floor; expose per-comp if a case needs it.
-    frac = np.clip(frac, 1e-4, 1.0 - 1e-4)
+    # trace in each product so the profile can bend off the face.
+    #
+    # That floor is only the STARTING GUESS for the free splits -- its value is
+    # not physical, and the design IS sensitive to it, which is exactly why it
+    # must not be the final answer. `split` carries the solved values (in
+    # `free_split_indices` order); see `driver.solve_omega`.
+    eps = float(prob.trace_floor)
+    frac = np.clip(frac, eps, 1.0 - eps)
+
+    # The entrainer gets its own, smaller seed rather than the common floor: it is
+    # fed BELOW the rectifying section, so its distillate content is genuinely
+    # tiny, and its down-march amplification is large enough that the common floor
+    # overshoots the extractive section in a single stage. Not zero, though --
+    # exactly zero traps the profile on the entrainer-free face, where the
+    # operating line's pinch pair straddles x_D and no profile reaches the feed.
+    # Only where the floor is what put it there: an explicit `nonkey_to_dist`
+    # asking for real entrainer overhead is a spec, not a seed, and stands.
+    if prob.extractive and prob.x_E is not None:
+        ent = (np.asarray(prob.x_E, float) > 0.5) & (frac <= eps)
+        frac[ent] = float(prob.entrainer_trace)
+
+    if split is not None:
+        for i, k in enumerate(free_split_indices(prob)):
+            frac[k] = float(np.clip(split[i], 0.0, 1.0))
 
     d = frac * f
     b = f - d

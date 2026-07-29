@@ -1,0 +1,246 @@
+{
+  "schema_version": 2,
+  "app": "ColumnForge",
+  "cases": [
+    {
+      "name": "ColumnForge Configuration",
+      "state": {
+        "num_stages": 17,
+        "pressure": 1.0,
+        "pressure_drop": 0.0,
+        "stage_efficiency": 0.5,
+        "species": {
+          "ethane": {
+            "name": "ethane",
+            "mw": 30.07,
+            "liquid_density": 544.0,
+            "cp": 141.140367,
+            "tb": 184.55,
+            "hvap_tb": 14.69,
+            "unifac_groups": {
+              "CH3": 2
+            }
+          },
+          "propane": {
+            "name": "propane",
+            "mw": 44.096,
+            "liquid_density": 493.0,
+            "cp": 114.630003,
+            "tb": 231.05,
+            "hvap_tb": 18.77,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2": 1
+            }
+          },
+          "n-butane": {
+            "name": "n-butane",
+            "mw": 58.122,
+            "liquid_density": 573.0,
+            "cp": 141.229766,
+            "tb": 272.65,
+            "hvap_tb": 22.44,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2": 2
+            }
+          }
+        },
+        "streams": {
+          "Feed": {
+            "id": "Feed",
+            "stream_type": "Feed",
+            "stage": 7,
+            "temperature": 197.61432053539698,
+            "flow": 100.0,
+            "composition": {
+              "ethane": 0.5,
+              "propane": 0.25,
+              "n-butane": 0.25
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Distillate": {
+            "id": "Distillate",
+            "stream_type": "Distillate",
+            "stage": 0,
+            "temperature": null,
+            "flow": 49.75,
+            "composition": {
+              "ethane": 0.9949748743718593,
+              "propane": 0.005025125628140708,
+              "n-butane": 0.0
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Bottoms": {
+            "id": "Bottoms",
+            "stream_type": "Bottoms",
+            "stage": 19,
+            "temperature": null,
+            "flow": 50.24999999999999,
+            "composition": {
+              "ethane": 0.009950248756218916,
+              "propane": 0.49253731343283585,
+              "n-butane": 0.49751243781094534
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          }
+        },
+        "condenser_config": {
+          "condenser_type": "Total",
+          "subcooling_temp": null,
+          "reflux_ratio": null,
+          "vapor_distillate_flow": null
+        },
+        "reboiler_config": {
+          "reboiler_type": "Kettle",
+          "boilup_ratio": null,
+          "bottoms_flow": null
+        },
+        "thermodynamics_config": {
+          "vle_model": "PLXANT",
+          "activity_model": "UNIFAC",
+          "eos_model": "Ideal Gas",
+          "energy_balance": false,
+          "component_params": {
+            "ethane": {
+              "tc": 305.32,
+              "pc": 48.72,
+              "omega": 0.099,
+              "antoine_a": 6.80266,
+              "antoine_b": 656.4,
+              "antoine_c": 256.0,
+              "antoine_tmin": -142.87946562438606,
+              "antoine_tmax": -74.71491804595036,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -6.59292,
+              "wagner_b": 1.572673,
+              "wagner_c": -1.759009,
+              "wagner_d": -2.114413,
+              "plxant_c1": 49.92451454,
+              "plxant_c2": -2814.319,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -6.778053,
+              "plxant_c6": 2.108e-05,
+              "plxant_c7": 2.0
+            },
+            "propane": {
+              "tc": 369.83,
+              "pc": 42.48,
+              "omega": 0.152,
+              "antoine_a": 6.80398,
+              "antoine_b": 803.81,
+              "antoine_c": 246.99,
+              "antoine_tmin": -108.49710374605016,
+              "antoine_tmax": -25.074006630796077,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -6.723365,
+              "wagner_b": 1.407522,
+              "wagner_c": -2.45317,
+              "wagner_d": -0.704695,
+              "plxant_c1": 43.75957454,
+              "plxant_c2": -3396.946,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -5.423393,
+              "plxant_c6": 8.95e-06,
+              "plxant_c7": 2.0
+            },
+            "n-butane": {
+              "tc": 425.12,
+              "pc": 37.96,
+              "omega": 0.2,
+              "antoine_a": 6.80896,
+              "antoine_b": 935.86,
+              "antoine_c": 238.73,
+              "antoine_tmin": -77.62370902881065,
+              "antoine_tmax": 19.28763541129777,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -7.029505,
+              "wagner_b": 1.526706,
+              "wagner_c": -2.701999,
+              "wagner_d": -1.562492,
+              "plxant_c1": 57.06437454,
+              "plxant_c2": -4444.916,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.395837,
+              "plxant_c6": 9.86e-06,
+              "plxant_c7": 2.0
+            }
+          },
+          "binary": {
+            "nrtl_aij": [],
+            "nrtl_bij": [],
+            "nrtl_cij": [],
+            "uniquac_aij": [],
+            "uniquac_bij": [],
+            "wilson_aij": [],
+            "wilson_bij": [],
+            "margules_aij": []
+          }
+        },
+        "modules": {},
+        "bvm_params": {
+          "rec_lk": 0.99,
+          "rec_hk": 0.01,
+          "r_spin": 0.175,
+          "q_spin": 1.0,
+          "eff_spin": 0.5,
+          "rmax_spin": 10.0,
+          "map_pts": 18,
+          "ef_spin": 0.5,
+          "max_stages": 200,
+          "eps_stage": 0.01,
+          "lk": "ethane",
+          "hk": "propane",
+          "extractive": false,
+          "entrainer": "n-butane",
+          "omega": null,
+          "reaction": {
+            "on": false,
+            "nu": {
+              "ethane": 0.0,
+              "propane": 0.0,
+              "n-butane": 0.0
+            },
+            "ref": "n-butane",
+            "keq_a": 2.303,
+            "keq_b": 0.0
+          }
+        },
+        "specs": [
+          {
+            "kind": "Reflux ratio",
+            "value": 0.175,
+            "unit_ref": "REFLUX_RATIO",
+            "component": -1
+          },
+          {
+            "kind": "Light-key recovery",
+            "value": 0.99,
+            "unit_ref": "LK_RECOVERY",
+            "component": -1
+          }
+        ],
+        "light_key_index": 0,
+        "heavy_key_index": 1,
+        "display_units": {
+          "temperature": "degC",
+          "pressure": "bar",
+          "flow": "kmol/h",
+          "duty": "kW"
+        },
+        "solver_mode": "hysim"
+      }
+    }
+  ]
+}

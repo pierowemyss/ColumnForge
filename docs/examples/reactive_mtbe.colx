@@ -1,0 +1,276 @@
+{
+  "schema_version": 2,
+  "app": "ColumnForge",
+  "cases": [
+    {
+      "name": "reactive_mtbe",
+      "state": {
+        "num_stages": 20,
+        "pressure": 1.01325,
+        "pressure_drop": 0.0,
+        "stage_efficiency": 1.0,
+        "species": {
+          "n-butane": {
+            "name": "n-butane",
+            "mw": 58.122,
+            "liquid_density": 573.0,
+            "cp": 141.229766,
+            "tb": 272.65,
+            "hvap_tb": 22.44,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2": 2
+            }
+          },
+          "MTBE": {
+            "name": "MTBE",
+            "mw": 88.15,
+            "liquid_density": 740.0,
+            "cp": 187.0,
+            "tb": 328.35,
+            "hvap_tb": 30.0,
+            "unifac_groups": {
+              "CH3": 3,
+              "C": 1,
+              "CH3O": 1
+            }
+          },
+          "methanol": {
+            "name": "methanol",
+            "mw": 32.042,
+            "liquid_density": 787.0,
+            "cp": 81.0,
+            "tb": 337.85,
+            "hvap_tb": 35.21,
+            "unifac_groups": {
+              "CH3OH": 1
+            }
+          },
+          "isobutene": {
+            "name": "isobutene",
+            "mw": 56.106,
+            "liquid_density": 594.0,
+            "cp": 130.855827,
+            "tb": 266.25,
+            "hvap_tb": 22.0,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2=C": 1
+            }
+          }
+        },
+        "streams": {
+          "Feed": {
+            "id": "Feed",
+            "stream_type": "Feed",
+            "stage": 10,
+            "temperature": null,
+            "flow": 100.0,
+            "composition": {
+              "n-butane": 0.3,
+              "MTBE": 0.0,
+              "methanol": 0.4,
+              "isobutene": 0.3
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Distillate": {
+            "id": "Distillate",
+            "stream_type": "Distillate",
+            "stage": 0,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Bottoms": {
+            "id": "Bottoms",
+            "stream_type": "Bottoms",
+            "stage": 19,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          }
+        },
+        "condenser_config": {
+          "condenser_type": "Total",
+          "subcooling_temp": null,
+          "reflux_ratio": null,
+          "vapor_distillate_flow": null
+        },
+        "reboiler_config": {
+          "reboiler_type": "Kettle",
+          "boilup_ratio": null,
+          "bottoms_flow": null
+        },
+        "thermodynamics_config": {
+          "vle_model": "PLXANT",
+          "activity_model": "UNIFAC",
+          "eos_model": "Ideal Gas",
+          "energy_balance": false,
+          "component_params": {
+            "n-butane": {
+              "tc": 425.12,
+              "pc": 37.96,
+              "omega": 0.2,
+              "antoine_a": 6.80896,
+              "antoine_b": 935.86,
+              "antoine_c": 238.73,
+              "antoine_tmin": -77.62370902881065,
+              "antoine_tmax": 19.28763541129777,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -7.029505,
+              "wagner_b": 1.526706,
+              "wagner_c": -2.701999,
+              "wagner_d": -1.562492,
+              "plxant_c1": 57.06437454,
+              "plxant_c2": -4444.916,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.395837,
+              "plxant_c6": 9.86e-06,
+              "plxant_c7": 2.0
+            },
+            "MTBE": {
+              "tc": 497.1,
+              "pc": 34.3,
+              "omega": 0.269,
+              "antoine_a": 6.92944,
+              "antoine_b": 1156.255,
+              "antoine_c": 230.376,
+              "antoine_tmin": -5.0,
+              "antoine_tmax": 145.0,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -7.315358,
+              "wagner_b": 1.583585,
+              "wagner_c": -3.956892,
+              "wagner_d": 0.304842,
+              "plxant_c1": 51.79748454,
+              "plxant_c2": -5322.676,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -6.212745,
+              "plxant_c6": 3.95e-06,
+              "plxant_c7": 2.0
+            },
+            "methanol": {
+              "tc": 512.6,
+              "pc": 80.97,
+              "omega": 0.565,
+              "antoine_a": 7.8975,
+              "antoine_b": 1474.08,
+              "antoine_c": 229.13,
+              "antoine_tmin": -15.417785429503454,
+              "antoine_tmax": 83.4627487489596,
+              "uniquac_r": 1.4311,
+              "uniquac_q": 1.432,
+              "wagner_a": -8.663588,
+              "wagner_b": 0.938247,
+              "wagner_c": -2.929747,
+              "wagner_d": -1.339292,
+              "plxant_c1": 61.89049454,
+              "plxant_c2": -6548.076,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.409987,
+              "plxant_c6": 5.72e-06,
+              "plxant_c7": 2.0
+            },
+            "isobutene": {
+              "tc": 417.9,
+              "pc": 40.0,
+              "omega": 0.194,
+              "antoine_a": 6.89776,
+              "antoine_b": 950.02,
+              "antoine_c": 243.385,
+              "antoine_tmin": -47.0,
+              "antoine_tmax": 82.0,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -6.747279,
+              "wagner_b": 0.969241,
+              "wagner_c": -2.234935,
+              "wagner_d": -0.088287,
+              "plxant_c1": 35.62586454,
+              "plxant_c2": -3682.162,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -3.952514,
+              "plxant_c6": 4.04e-06,
+              "plxant_c7": 2.0
+            }
+          },
+          "binary": {
+            "nrtl_aij": [],
+            "nrtl_bij": [],
+            "nrtl_cij": [],
+            "uniquac_aij": [],
+            "uniquac_bij": [],
+            "wilson_aij": [],
+            "wilson_bij": [],
+            "margules_aij": []
+          }
+        },
+        "modules": {},
+        "bvm_params": {
+          "rec_lk": 0.98,
+          "rec_hk": 0.02,
+          "r_spin": 2.0,
+          "q_spin": 1.0,
+          "eff_spin": 1.0,
+          "rmax_spin": 10.0,
+          "map_pts": 16,
+          "ef_spin": 0.5,
+          "max_stages": 200,
+          "eps_stage": 0.01,
+          "lk": "n-butane",
+          "hk": "methanol",
+          "extractive": false,
+          "entrainer": "n-butane",
+          "reaction": {
+            "on": true,
+            "nu": {
+              "n-butane": 0.0,
+              "MTBE": 1.0,
+              "methanol": -1.0,
+              "isobutene": -1.0
+            },
+            "ref": "MTBE",
+            "keq_a": -16.33,
+            "keq_b": 6820.0
+          }
+        },
+        "specs": [
+          {
+            "kind": "Reflux ratio",
+            "value": 2.0,
+            "unit_ref": "column",
+            "component": -1
+          },
+          {
+            "kind": "Distillate rate",
+            "value": 40.0,
+            "unit_ref": "column",
+            "component": -1
+          }
+        ],
+        "energy_balance": false,
+        "light_key_index": 0,
+        "heavy_key_index": 2,
+        "display_units": {
+          "temperature": "degC",
+          "pressure": "bar",
+          "flow": "kmol/h",
+          "duty": "kW"
+        },
+        "solver_mode": "hysim"
+      }
+    }
+  ]
+}

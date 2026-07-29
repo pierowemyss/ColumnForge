@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal
 
+from core.data_structures import SolverMode
 from gui.theme import set_state
 from gui.panels.sub_tab_bar import SubTabBar
 from gui.panels.sci_spin_box import SciDoubleSpinBox
@@ -162,6 +163,7 @@ class SimulationTab(QWidget):
     def _connect_signals(self):
         self.run_btn.clicked.connect(self._on_run_clicked)
         self.abort_btn.clicked.connect(self._on_abort_clicked)
+        self.solver_combo.currentTextChanged.connect(self._on_method_changed)
 
     def _on_run_clicked(self):
         """Handle Run button click."""
@@ -202,6 +204,31 @@ class SimulationTab(QWidget):
         """Give the tab the shared state and sync the mirror combos to it."""
         self.window_state = window_state
         self.refresh_thermo()
+        self.refresh_method()
+
+    # window_state.solver_mode <-> the Method combo. It is persisted in the
+    # .colx, so a file saved on Bubble-Point must come back on Bubble-Point.
+    _MODE_TO_METHOD = {SolverMode.HYSIM: "Inside-Out",
+                       SolverMode.BUBBLE_POINT: "Bubble-Point"}
+
+    def refresh_method(self):
+        """Re-sync the Method combo from window_state.solver_mode."""
+        if not self.window_state:
+            return
+        # BVM is sized in the Modules tab and has no rigorous entry here; leave
+        # the combo alone rather than silently rewriting a BVM case's mode.
+        method = self._MODE_TO_METHOD.get(self.window_state.solver_mode)
+        if method:
+            self.solver_combo.blockSignals(True)
+            self.solver_combo.setCurrentText(method)
+            self.solver_combo.blockSignals(False)
+
+    def _on_method_changed(self, method: str):
+        if self.window_state:
+            self.window_state.solver_mode = (
+                SolverMode.HYSIM if "Inside-Out" in method
+                else SolverMode.BUBBLE_POINT)
+            self.window_state.is_modified = True
 
     def _on_thermo_changed(self):
         """Write the mirror combos through to the shared thermo config and let

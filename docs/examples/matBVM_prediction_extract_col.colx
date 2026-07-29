@@ -5,7 +5,7 @@
     {
       "name": "ColumnForge Configuration",
       "state": {
-        "num_stages": 35,
+        "num_stages": 33,
         "pressure": 1.0,
         "pressure_drop": 0.0,
         "stage_efficiency": 0.5,
@@ -69,7 +69,7 @@
           "Feed": {
             "id": "Feed",
             "stream_type": "Feed",
-            "stage": 32,
+            "stage": 29,
             "temperature": 336.82259999999997,
             "flow": 1510.0,
             "composition": {
@@ -120,7 +120,7 @@
           "Entrainer": {
             "id": "Entrainer",
             "stream_type": "Feed",
-            "stage": 12,
+            "stage": 15,
             "temperature": 456.746,
             "flow": 1510.0,
             "composition": {
@@ -756,22 +756,51 @@
           }
         },
         "modules": {},
-        "bvm_params": {},
+        "bvm_params": {
+          "rec_lk": 0.98,
+          "rec_hk": 0.02,
+          "r_spin": 2.0,
+          "q_spin": 1.0,
+          "eff_spin": 0.5,
+          "rmax_spin": 10.0,
+          "map_pts": 16,
+          "ef_spin": 1.0,
+          "max_stages": 200,
+          "eps_stage": 0.01,
+          "lk": "MEOH",
+          "hk": "DMC",
+          "extractive": true,
+          "entrainer": "AN",
+          "omega": null,
+          "reaction": {
+            "on": false,
+            "nu": {
+              "MEOH": 0.0,
+              "DMC": 0.0,
+              "2ME": 0.0,
+              "EG": 0.0,
+              "EC": 0.0,
+              "AN": 0.0
+            },
+            "ref": "AN",
+            "keq_a": 2.303,
+            "keq_b": 0.0
+          }
+        },
         "specs": [
-          {
-            "kind": "Reflux ratio",
-            "value": 3.0,
-            "unit_ref": "REFLUX_RATIO",
-            "component": -1
-          },
           {
             "kind": "Light-key recovery",
             "value": 0.98,
             "unit_ref": "LK_RECOVERY",
             "component": -1
+          },
+          {
+            "kind": "Reflux ratio",
+            "value": 2.0,
+            "unit_ref": "REFLUX_RATIO",
+            "component": -1
           }
         ],
-        "energy_balance": false,
         "light_key_index": 0,
         "heavy_key_index": null,
         "display_units": {

@@ -1,0 +1,297 @@
+{
+  "schema_version": 2,
+  "app": "ColumnForge",
+  "cases": [
+    {
+      "name": "depropanizer_side_stripper",
+      "state": {
+        "num_stages": 28,
+        "pressure": 10.0,
+        "pressure_drop": 0.0,
+        "stage_efficiency": 1.0,
+        "species": {
+          "propane": {
+            "name": "propane",
+            "mw": 44.096,
+            "liquid_density": 493.0,
+            "cp": 114.630003,
+            "tb": 231.05,
+            "hvap_tb": 18.77,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2": 1
+            }
+          },
+          "isobutane": {
+            "name": "isobutane",
+            "mw": 58.122,
+            "liquid_density": 551.0,
+            "cp": 140.682241,
+            "tb": 261.45,
+            "hvap_tb": 21.3,
+            "unifac_groups": {
+              "CH3": 3,
+              "CH": 1
+            }
+          },
+          "n-butane": {
+            "name": "n-butane",
+            "mw": 58.122,
+            "liquid_density": 573.0,
+            "cp": 141.229766,
+            "tb": 272.65,
+            "hvap_tb": 22.44,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2": 2
+            }
+          },
+          "isopentane": {
+            "name": "isopentane",
+            "mw": 72.149,
+            "liquid_density": 615.0,
+            "cp": 165.851764,
+            "tb": 301.0,
+            "hvap_tb": 24.69,
+            "unifac_groups": {
+              "CH3": 3,
+              "CH2": 1,
+              "CH": 1
+            }
+          },
+          "n-pentane": {
+            "name": "n-pentane",
+            "mw": 72.149,
+            "liquid_density": 621.0,
+            "cp": 167.0,
+            "tb": 309.22,
+            "hvap_tb": 25.79,
+            "unifac_groups": {
+              "CH3": 2,
+              "CH2": 3
+            }
+          }
+        },
+        "streams": {
+          "Feed": {
+            "id": "Feed",
+            "stream_type": "Feed",
+            "stage": 14,
+            "temperature": null,
+            "flow": 100.0,
+            "composition": {
+              "propane": 0.3,
+              "isobutane": 0.2,
+              "n-butane": 0.25,
+              "isopentane": 0.15,
+              "n-pentane": 0.1
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Distillate": {
+            "id": "Distillate",
+            "stream_type": "Distillate",
+            "stage": 0,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Bottoms": {
+            "id": "Bottoms",
+            "stream_type": "Bottoms",
+            "stage": 27,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          }
+        },
+        "condenser_config": {
+          "condenser_type": "Total",
+          "subcooling_temp": null,
+          "reflux_ratio": null,
+          "vapor_distillate_flow": null
+        },
+        "reboiler_config": {
+          "reboiler_type": "Kettle",
+          "boilup_ratio": null,
+          "bottoms_flow": null
+        },
+        "thermodynamics_config": {
+          "vle_model": "PLXANT",
+          "activity_model": "Ideal",
+          "eos_model": "SRK",
+          "energy_balance": true,
+          "component_params": {
+            "propane": {
+              "tc": 369.83,
+              "pc": 42.48,
+              "omega": 0.152,
+              "antoine_a": 6.80398,
+              "antoine_b": 803.81,
+              "antoine_c": 246.99,
+              "antoine_tmin": -108.49710374605016,
+              "antoine_tmax": -25.074006630796077,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -6.723365,
+              "wagner_b": 1.407522,
+              "wagner_c": -2.45317,
+              "wagner_d": -0.704695,
+              "plxant_c1": 43.75957454,
+              "plxant_c2": -3396.946,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -5.423393,
+              "plxant_c6": 8.95e-06,
+              "plxant_c7": 2.0
+            },
+            "isobutane": {
+              "tc": 407.85,
+              "pc": 36.4,
+              "omega": 0.186,
+              "antoine_a": 6.74808,
+              "antoine_b": 882.8,
+              "antoine_c": 240.0,
+              "antoine_tmin": -86.41828227860435,
+              "antoine_tmax": 7.543880438156663,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -6.957,
+              "wagner_b": 1.545851,
+              "wagner_c": -2.65588,
+              "wagner_d": -1.829599,
+              "plxant_c1": 59.07573454,
+              "plxant_c2": -4298.161,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.798635,
+              "plxant_c6": 1.16e-05,
+              "plxant_c7": 2.0
+            },
+            "n-butane": {
+              "tc": 425.12,
+              "pc": 37.96,
+              "omega": 0.2,
+              "antoine_a": 6.80896,
+              "antoine_b": 935.86,
+              "antoine_c": 238.73,
+              "antoine_tmin": -77.62370902881065,
+              "antoine_tmax": 19.28763541129777,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -7.029505,
+              "wagner_b": 1.526706,
+              "wagner_c": -2.701999,
+              "wagner_d": -1.562492,
+              "plxant_c1": 57.06437454,
+              "plxant_c2": -4444.916,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.395837,
+              "plxant_c6": 9.86e-06,
+              "plxant_c7": 2.0
+            },
+            "isopentane": {
+              "tc": 460.4,
+              "pc": 33.81,
+              "omega": 0.229,
+              "antoine_a": 6.78967,
+              "antoine_b": 1020.012,
+              "antoine_c": 233.097,
+              "antoine_tmin": -56.91908312390865,
+              "antoine_tmax": 49.625028030983316,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -7.10351,
+              "wagner_b": 1.370755,
+              "wagner_c": -2.644065,
+              "wagner_d": -1.771254,
+              "plxant_c1": 59.52995454,
+              "plxant_c2": -4967.235,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.674379,
+              "plxant_c6": 8.66e-06,
+              "plxant_c7": 2.0
+            },
+            "n-pentane": {
+              "tc": 469.7,
+              "pc": 33.7,
+              "omega": 0.252,
+              "antoine_a": 6.87632,
+              "antoine_b": 1075.78,
+              "antoine_c": 233.205,
+              "antoine_tmin": -50.134643041903786,
+              "antoine_tmax": 57.98105182853138,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -7.172625,
+              "wagner_b": 1.412403,
+              "wagner_c": -3.418782,
+              "wagner_d": -1.053786,
+              "plxant_c1": 60.62949454,
+              "plxant_c2": -5265.589,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.720709,
+              "plxant_c6": 7.15e-06,
+              "plxant_c7": 2.0
+            }
+          },
+          "binary": {
+            "nrtl_aij": [],
+            "nrtl_bij": [],
+            "nrtl_cij": [],
+            "uniquac_aij": [],
+            "uniquac_bij": [],
+            "wilson_aij": [],
+            "wilson_bij": [],
+            "margules_aij": []
+          }
+        },
+        "modules": {
+          "C4 stripper": {
+            "module_type": "Side Stripper",
+            "stage": 18,
+            "num_stages": 4,
+            "boilup_ratio": 1.2,
+            "reflux_ratio": null,
+            "duty": null,
+            "return_stage": 17,
+            "rate": 25.0
+          }
+        },
+        "bvm_params": {},
+        "specs": [
+          {
+            "kind": "Reflux ratio",
+            "value": 2.5,
+            "unit_ref": "column",
+            "component": -1
+          },
+          {
+            "kind": "Distillate rate",
+            "value": 30.0,
+            "unit_ref": "column",
+            "component": -1
+          }
+        ],
+        "energy_balance": true,
+        "light_key_index": 0,
+        "heavy_key_index": 1,
+        "display_units": {
+          "temperature": "degC",
+          "pressure": "bar",
+          "flow": "kmol/h",
+          "duty": "kW"
+        },
+        "solver_mode": "hysim"
+      }
+    }
+  ]
+}

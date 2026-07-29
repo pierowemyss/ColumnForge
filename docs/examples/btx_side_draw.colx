@@ -1,0 +1,228 @@
+{
+  "schema_version": 2,
+  "app": "ColumnForge",
+  "cases": [
+    {
+      "name": "btx_side_draw",
+      "state": {
+        "num_stages": 34,
+        "pressure": 1.01325,
+        "pressure_drop": 0.0,
+        "stage_efficiency": 1.0,
+        "species": {
+          "benzene": {
+            "name": "benzene",
+            "mw": 78.114,
+            "liquid_density": 874.0,
+            "cp": 136.0,
+            "tb": 353.24,
+            "hvap_tb": 30.72,
+            "unifac_groups": {
+              "ACH": 6
+            }
+          },
+          "toluene": {
+            "name": "toluene",
+            "mw": 92.141,
+            "liquid_density": 862.0,
+            "cp": 157.0,
+            "tb": 383.78,
+            "hvap_tb": 33.18,
+            "unifac_groups": {
+              "ACH": 5,
+              "ACCH3": 1
+            }
+          },
+          "p-xylene": {
+            "name": "p-xylene",
+            "mw": 106.167,
+            "liquid_density": 857.0,
+            "cp": 181.0,
+            "tb": 411.5,
+            "hvap_tb": 35.67,
+            "unifac_groups": {
+              "ACH": 4,
+              "ACCH3": 2
+            }
+          }
+        },
+        "streams": {
+          "Feed": {
+            "id": "Feed",
+            "stream_type": "Feed",
+            "stage": 17,
+            "temperature": null,
+            "flow": 100.0,
+            "composition": {
+              "benzene": 0.35,
+              "toluene": 0.35,
+              "p-xylene": 0.3
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Distillate": {
+            "id": "Distillate",
+            "stream_type": "Distillate",
+            "stage": 0,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Bottoms": {
+            "id": "Bottoms",
+            "stream_type": "Bottoms",
+            "stage": 33,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Toluene draw": {
+            "id": "Toluene draw",
+            "stream_type": "Sidestream",
+            "stage": 24,
+            "temperature": null,
+            "flow": 30.0,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          }
+        },
+        "condenser_config": {
+          "condenser_type": "Total",
+          "subcooling_temp": null,
+          "reflux_ratio": null,
+          "vapor_distillate_flow": null
+        },
+        "reboiler_config": {
+          "reboiler_type": "Kettle",
+          "boilup_ratio": null,
+          "bottoms_flow": null
+        },
+        "thermodynamics_config": {
+          "vle_model": "PLXANT",
+          "activity_model": "UNIFAC",
+          "eos_model": "Ideal Gas",
+          "energy_balance": false,
+          "component_params": {
+            "benzene": {
+              "tc": 562.05,
+              "pc": 48.95,
+              "omega": 0.21,
+              "antoine_a": 6.90565,
+              "antoine_b": 1211.033,
+              "antoine_c": 220.79,
+              "antoine_tmin": 8.0,
+              "antoine_tmax": 103.0,
+              "uniquac_r": 3.1878,
+              "uniquac_q": 2.4,
+              "wagner_a": -7.132154,
+              "wagner_b": 1.662031,
+              "wagner_c": -3.050802,
+              "wagner_d": -3.341287,
+              "plxant_c1": 76.85507454,
+              "plxant_c2": -6712.9,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -10.022,
+              "plxant_c6": 7.69e-06,
+              "plxant_c7": 2.0
+            },
+            "toluene": {
+              "tc": 591.75,
+              "pc": 41.08,
+              "omega": 0.264,
+              "antoine_a": 6.95464,
+              "antoine_b": 1344.8,
+              "antoine_c": 219.48,
+              "antoine_tmin": 6.0,
+              "antoine_tmax": 136.0,
+              "uniquac_r": 3.9228,
+              "uniquac_q": 2.968,
+              "wagner_a": -6.854424,
+              "wagner_b": 0.781749,
+              "wagner_c": -3.578237,
+              "wagner_d": 2.648326,
+              "plxant_c1": 21.38598454,
+              "plxant_c2": -5013.81,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -1.348918,
+              "plxant_c6": -1.87e-06,
+              "plxant_c7": 2.0
+            },
+            "p-xylene": {
+              "tc": 616.2,
+              "pc": 35.11,
+              "omega": 0.322,
+              "antoine_a": 6.99052,
+              "antoine_b": 1453.43,
+              "antoine_c": 215.31,
+              "antoine_tmin": 27.0,
+              "antoine_tmax": 166.0,
+              "uniquac_r": 4.6578,
+              "uniquac_q": 3.536,
+              "wagner_a": -7.824914,
+              "wagner_b": 1.927404,
+              "wagner_c": -3.415565,
+              "wagner_d": -3.497173,
+              "plxant_c1": 85.83907454,
+              "plxant_c2": -8082.1,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -11.197,
+              "plxant_c6": 7.26e-06,
+              "plxant_c7": 2.0
+            }
+          },
+          "binary": {
+            "nrtl_aij": [],
+            "nrtl_bij": [],
+            "nrtl_cij": [],
+            "uniquac_aij": [],
+            "uniquac_bij": [],
+            "wilson_aij": [],
+            "wilson_bij": [],
+            "margules_aij": []
+          }
+        },
+        "modules": {},
+        "bvm_params": {},
+        "specs": [
+          {
+            "kind": "Reflux ratio",
+            "value": 3.0,
+            "unit_ref": "column",
+            "component": -1
+          },
+          {
+            "kind": "Distillate rate",
+            "value": 35.0,
+            "unit_ref": "column",
+            "component": -1
+          },
+          {
+            "kind": "Side-draw rate",
+            "value": 30.0,
+            "unit_ref": "Toluene draw",
+            "component": -1
+          }
+        ],
+        "energy_balance": false,
+        "light_key_index": 0,
+        "heavy_key_index": 1,
+        "display_units": {
+          "temperature": "degC",
+          "pressure": "bar",
+          "flow": "kmol/h",
+          "duty": "kW"
+        },
+        "solver_mode": "hysim"
+      }
+    }
+  ]
+}

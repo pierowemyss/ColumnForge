@@ -8,13 +8,26 @@ set by sign(Delta)): the map is contracting that way and blows up the other way.
     Delta < 0  (stripping-like):  march UP from the bottom anchor.
         x_n --bubble--> y_n ,  x_{n-1} = (y_n - bvec)/a   (operating line inverted)
 
+The two maps are exact inverses (down = dew o op, up = op^-1 o bubble), so the
+direction does not change which curve you trace -- only which end of it pinches
+and truncates. `sec.dir` is therefore a numerical-conditioning choice, and for a
+product-anchored section the anchor already fixes it.
+
 Each step calls the shared thermo for K/T (Sec 17). Marching stops at a pinch
-(step below `eps_pinch`), on leaving the simplex, or at `max_stages`. Profiles
-are full C-vectors; the LK/HK projection is only for reading direction (Sec 13).
+(step below `eps_pinch`), on leaving the simplex, on leaving the section's
+feasible region (`sections.feasible_margin`), or at `max_stages`. Profiles are
+full C-vectors; the LK/HK projection is only for reading direction (Sec 13).
 """
 
 import numpy as np
 from scipy.optimize import fsolve
+
+from .sections import feasible
+
+# Roundoff slack on the operating-line non-negativity test. Real violations are
+# O(0.1-1) in mole fraction (a heavy-entrainer section demands x_E >= 0.3 or the
+# balance goes negative), so this only has to absorb float noise.
+_OP_TOL = 1e-9
 
 
 def _clean(x):
@@ -29,7 +42,7 @@ def _K_stage(tp, x, T, P):
     return tp.K(np.atleast_2d(x), np.atleast_1d(T), np.atleast_1d(P))[0]
 
 
-def _dew_eff(sec, y, tp, P, E):
+def _dew_eff(sec, y, tp, P, E, x_seed=None):
     """Marching-down conjugate liquid with Murphree vapour efficiency E.
 
     The actual vapour leaving the stage is y = E*K(x)*x + (1-E)*op(x) with
@@ -40,7 +53,9 @@ def _dew_eff(sec, y, tp, P, E):
     ponytail: fsolve per stage (the direct fixed-point iteration diverges for
     E<~0.6). Only taken on the efficiency<1 path; the E=1 dew step stays fast.
     """
-    x0, T0 = tp.dew(y, P)               # equilibrium guess (also the E=1 answer)
+    # the stage above is the continuation seed: it is the nearest point on the
+    # physical branch, which is what keeps the gamma(x) dew off the spurious root.
+    x0, T0 = tp.dew(y, P, x_seed)       # equilibrium guess (also the E=1 answer)
     if E >= 1.0:
         return x0, T0
     C = y.shape[0]
@@ -68,11 +83,41 @@ def _dew_eff(sec, y, tp, P, E):
     return x, _bt(x)
 
 
-def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0):
-    """March one section from anchor x0. Returns dict(X, Y, T, status, pinched).
+def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0,
+                  dP=0.0, P_lim=None, stop_sec=None):
+    """March one section from anchor x0. Returns dict(X, Y, T, P, status, pinched).
 
     X[k] is the liquid on the k-th stage from the anchor (X[0] = x0). Y and T are
-    the conjugate vapour and stage temperature. `status` in {pinch, max, simplex}.
+    the conjugate vapour and stage temperature. `status` in
+    {pinch, max, simplex, operating_line, crossed}; `operating_line` on the anchor
+    stage itself (n == 1) means x0 was never a composition this section could hold.
+
+    `stop_sec` is the section on the far side of the next feed. Marching stops the
+    first stage that lands inside ITS feasible region (`sections.feasible`), with
+    status 'crossed'. Everything past that point is fiction: the profile has run
+    through the junction, and for a heavy entrainer it then blows up (x_E grows
+    ~800x per stage), which `connect`'s all-pairs segment search would happily
+    match against. Stopping there is the same hard balance constraint the region
+    itself expresses, not a tolerance.
+
+    It only ARMS when the anchor starts outside that region -- otherwise the test
+    carries no information and would stop the march instantly. A stripping section
+    anchored at an entrainer-rich reboiler is already inside the extractive
+    section's region (x_E >= E/L) on stage 0, so for that end there is nothing to
+    cross and the profile runs to its own pinch as before.
+
+    `P` is the pressure ON THE ANCHOR STAGE and `dP >= 0` the per-stage pressure
+    drop down the column, so the k-th stage sits at `P + k*dP` marching down and
+    `P - k*dP` marching up (an up-march is anchored at the reboiler, the
+    high-pressure end). `P` is per-stage from here on: `prof["P"][k]` is what the
+    stage was evaluated at, which is what `connect` needs to boil the lower
+    profile at its own pressure rather than the top one.
+
+    `P_lim` is the pressure at the column's OTHER end and clamps the ramp there.
+    It is not a nicety: a march runs to `max_stages`, which is several times the
+    column, so an unclamped ramp walks a stripping section 200 stages up and down
+    to 4 mmHg -- the pinch disappears and the profile is fiction. The column is
+    only as long as it is.
 
     `efficiency` is the Murphree vapour efficiency E in (0,1]; the anchor stage
     (condenser marching down / reboiler marching up) stays an equilibrium stage,
@@ -81,32 +126,47 @@ def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0
     """
     E = float(efficiency)
     X = [np.asarray(x0, float) / np.sum(x0)]
+    if stop_sec is not None and feasible(stop_sec, X[0]):
+        stop_sec = None                # anchor already inside: nothing to cross
     Y = []
     T = []
     status = "max"
     pinched = False
     down = sec.dir > 0
     y_below = None                     # actual vapour from the stage below (up-march)
+    dPs = float(dP) * (1.0 if down else -1.0)
+    if P_lim is None:                  # no far end given: let the ramp run
+        P_lo, P_hi = 1e-9, np.inf
+    else:
+        P_lo, P_hi = sorted((float(P), float(P_lim)))
+    Ps = [float(P)]
 
     for _ in range(max_stages):
         x = X[-1]
+        Pk = Ps[-1]
         try:
             if down:
+                # NO clipping here. y = a x + bvec sums to 1 exactly (V = L+Delta),
+                # so a negative component means x is outside the section's feasible
+                # region -- the balance cannot close, and clipping+renormalising
+                # would invent a stage that cannot exist. Stop and say so.
                 y = sec.a * x + sec.bvec
+                if y.min() < -_OP_TOL:
+                    status = "operating_line"; break
                 y = np.clip(y, 0.0, None)
-                s = y.sum()
-                if s <= 0:
-                    status = "simplex"; break
-                y = y / s
-                xn, Tn = _dew_eff(sec, y, tp, P, E)
+                xn, Tn = _dew_eff(sec, y, tp, Pk, E, x_seed=x)
             else:
-                y_eq, Tn = tp.bubble(x, P)
+                y_eq, Tn = tp.bubble(x, Pk)
                 if E < 1.0 and y_below is not None:
                     y = E * y_eq + (1.0 - E) * y_below
                     y = np.clip(y, 0.0, None); y = y / y.sum()
                 else:
                     y = y_eq           # reboiler / anchor stage is equilibrium
+                # inverted operating line; a > 0, so a negative liquid here is the
+                # same statement as above read the other way round.
                 xn = (y - sec.bvec) / sec.a
+                if xn.min() < -_OP_TOL:
+                    status = "operating_line"; break
                 y_below = y
         except (ValueError, FloatingPointError):
             # thermo has no saturation root here -- the march ran off the
@@ -115,27 +175,37 @@ def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0
         Y.append(y); T.append(Tn)
 
         xn, xmin = _clean(xn)
+        # one step further down (or up) the ramp, held inside the column's ends
+        Ps.append(min(max(Pk + dPs, P_lo), P_hi))
         if xmin < -1e-3:                       # left the physical region
             X.append(xn); status = "simplex"; break
         step = float(np.linalg.norm(xn - x))
         X.append(xn)
         if step < eps_pinch:                   # fixed point reached
             status = "pinch"; pinched = True; break
+        if stop_sec is not None and feasible(stop_sec, xn):
+            # entered the next section's region: this stage is past the junction
+            status = "crossed"; break
 
     # pad Y/T so lengths line up with X (last stage has no forward step recorded)
     if len(Y) < len(X):
         try:
+            if status == "operating_line":
+                # the last stage has no physical conjugate vapour -- that is why we
+                # stopped. Don't manufacture one.
+                raise ValueError
             if down:
-                yl = sec.a * X[-1] + sec.bvec; yl = np.clip(yl, 0, None); yl /= yl.sum()
-                _, Tl = tp.dew(yl, P)
+                yl = np.clip(sec.a * X[-1] + sec.bvec, 0, None); yl /= yl.sum()
+                _, Tl = tp.dew(yl, Ps[len(X) - 1], X[-1])
             else:
-                yl, Tl = tp.bubble(X[-1], P)
+                yl, Tl = tp.bubble(X[-1], Ps[len(X) - 1])
         except (ValueError, FloatingPointError):
             yl = Y[-1] if Y else X[-1]
             Tl = T[-1] if T else 0.0
         Y.append(yl); T.append(Tl)
 
     return {"X": np.array(X), "Y": np.array(Y), "T": np.array(T),
+            "P": np.array(Ps[:len(X)]),
             "status": status, "pinched": pinched, "n": len(X)}
 
 
@@ -169,6 +239,16 @@ def _demo():
         assert np.allclose(prof["X"].sum(axis=1), 1.0, atol=1e-6)
     # temperature rises from condenser (rect top) toward the reboiler (strip top)
     assert r["T"][0] < s["T"][0], "distillate cooler than bottoms"
+
+    # dP ramps the pressure the right way from each anchor, and a hotter column
+    # is what a real pressure drop buys you
+    rp = march_section(rect, xD, tp, 760.0, max_stages=60, dP=5.0)
+    sp = march_section(strip, xB, tp, 800.0, max_stages=60, dP=5.0)
+    assert rp["P"].shape == (rp["n"],) and sp["P"].shape == (sp["n"],)
+    assert np.allclose(rp["P"], 760.0 + 5.0 * np.arange(rp["n"]))   # down: rises
+    assert np.allclose(sp["P"], 800.0 - 5.0 * np.arange(sp["n"]))   # up: falls
+    assert rp["T"][3] > r["T"][3], "higher pressure -> higher stage temperature"
+    assert np.allclose(r["P"], 760.0), "dP=0 leaves the column flat"
     print(f"march self-check OK  rect {r['status']}/{r['n']}  strip {s['status']}/{s['n']}")
 
 

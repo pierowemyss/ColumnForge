@@ -19,6 +19,7 @@ class SpeciesSearchDialog(QDialog):
         self.setWindowTitle("Add Species from Database")
         self.setMinimumSize(420, 380)
         self.selected_name = None
+        self._existing_names = list(existing_names)
         self._existing = {n.lower() for n in existing_names}
 
         layout = QVBoxLayout(self)
@@ -45,10 +46,18 @@ class SpeciesSearchDialog(QDialog):
         self._refresh("")
         self.search_edit.setFocus()
 
+    _BADGES = (("plxant", "PLX"), ("wagner", "WAG"), ("unifac", "UNIFAC"),
+               ("uniquac_rq", "r/q"), ("srk", "SRK"), ("energy", "EB"))
+
     def _refresh(self, text):
         self.results.clear()
         for rec in component_db.search(text, limit=50):
-            label = f"{rec['name']}  ({rec['formula']}, {rec['cas']})"
+            cov = component_db.coverage(rec, self._existing_names)
+            tags = [tag for key, tag in self._BADGES if cov[key]]
+            if cov["nrtl_pairs"]:
+                tags.append(f"NRTL:{cov['nrtl_pairs']}")
+            label = (f"{rec['name']}  ({rec['formula']}, {rec['cas']})"
+                     + (f"   ·  {' '.join(tags)}" if tags else ""))
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, rec["name"])
             if rec["name"].lower() in self._existing:
@@ -73,11 +82,24 @@ class SpeciesSearchDialog(QDialog):
         def fmt(v, unit=""):
             return f"{v:g}{unit}" if v is not None else "—"
 
-        self.details.setText(
+        cov = component_db.coverage(rec, self._existing_names)
+        have = [lbl for key, lbl in component_db.COVERAGE_LABELS if cov[key]]
+        gaps = [lbl for key, lbl in component_db.COVERAGE_LABELS if not cov[key]]
+        if cov["nrtl_missing"]:
+            gaps.append(f"NRTL for {cov['nrtl_missing']} existing pair(s)")
+
+        lines = [
             f"MW {fmt(rec['mw'])} g/mol · Tb {fmt(rec['tb'])} K · "
-            f"Tc {fmt(rec.get('tc'))} K · Pc {fmt(rec.get('pc'))} bar\n"
-            f"Antoine valid {rng}"
-        )
+            f"Tc {fmt(rec.get('tc'))} K · Pc {fmt(rec.get('pc'))} bar",
+            f"Antoine valid {rng}",
+            "Ready for: " + (", ".join(have) or "—"),
+        ]
+        # Say what is absent too — an unlit badge is easy to miss, and a
+        # component that quietly cannot run UNIFAC is exactly the surprise this
+        # dialog exists to prevent.
+        if gaps:
+            lines.append("Not available: " + ", ".join(gaps))
+        self.details.setText("\n".join(lines))
         self._ok.setEnabled(bool(item.flags() & Qt.ItemIsEnabled))
 
     def accept(self):

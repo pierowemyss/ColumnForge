@@ -1,0 +1,304 @@
+{
+  "schema_version": 2,
+  "app": "ColumnForge",
+  "cases": [
+    {
+      "name": "extractive_ethanol_water_eg",
+      "state": {
+        "num_stages": 32,
+        "pressure": 1.01325,
+        "pressure_drop": 0.0,
+        "stage_efficiency": 1.0,
+        "species": {
+          "ethanol": {
+            "name": "ethanol",
+            "mw": 46.069,
+            "liquid_density": 785.0,
+            "cp": 112.0,
+            "tb": 351.44,
+            "hvap_tb": 38.56,
+            "unifac_groups": {
+              "CH3": 1,
+              "CH2": 1,
+              "OH": 1
+            }
+          },
+          "water": {
+            "name": "water",
+            "mw": 18.015,
+            "liquid_density": 997.0,
+            "cp": 75.3,
+            "tb": 373.15,
+            "hvap_tb": 40.66,
+            "unifac_groups": {
+              "H2O": 1
+            }
+          },
+          "ethylene glycol": {
+            "name": "ethylene glycol",
+            "mw": 62.068,
+            "liquid_density": 1110.0,
+            "cp": 150.0,
+            "tb": 470.45,
+            "hvap_tb": 53.172563,
+            "unifac_groups": {
+              "CH2": 2,
+              "OH": 2
+            }
+          }
+        },
+        "streams": {
+          "Feed": {
+            "id": "Feed",
+            "stream_type": "Feed",
+            "stage": 20,
+            "temperature": null,
+            "flow": 100.0,
+            "composition": {
+              "ethanol": 0.85,
+              "water": 0.15,
+              "ethylene glycol": 0.0
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Distillate": {
+            "id": "Distillate",
+            "stream_type": "Distillate",
+            "stage": 0,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Bottoms": {
+            "id": "Bottoms",
+            "stream_type": "Bottoms",
+            "stage": 31,
+            "temperature": null,
+            "flow": null,
+            "composition": {},
+            "user_specified": false,
+            "phase": "liquid"
+          },
+          "Entrainer": {
+            "id": "Entrainer",
+            "stream_type": "Feed",
+            "stage": 4,
+            "temperature": null,
+            "flow": 60.0,
+            "composition": {
+              "ethanol": 0.0,
+              "water": 0.0,
+              "ethylene glycol": 1.0
+            },
+            "user_specified": false,
+            "phase": "liquid"
+          }
+        },
+        "condenser_config": {
+          "condenser_type": "Total",
+          "subcooling_temp": null,
+          "reflux_ratio": null,
+          "vapor_distillate_flow": null
+        },
+        "reboiler_config": {
+          "reboiler_type": "Kettle",
+          "boilup_ratio": null,
+          "bottoms_flow": null
+        },
+        "thermodynamics_config": {
+          "vle_model": "PLXANT",
+          "activity_model": "UNIFAC",
+          "eos_model": "Ideal Gas",
+          "energy_balance": false,
+          "component_params": {
+            "ethanol": {
+              "tc": 513.92,
+              "pc": 61.48,
+              "omega": 0.649,
+              "antoine_a": 8.20417,
+              "antoine_b": 1642.89,
+              "antoine_c": 230.3,
+              "antoine_tmin": -2.2529106059407127,
+              "antoine_tmax": 96.81732874560413,
+              "uniquac_r": 2.1055,
+              "uniquac_q": 1.972,
+              "wagner_a": -8.614672,
+              "wagner_b": 0.150906,
+              "wagner_c": -3.761831,
+              "wagner_d": -1.670366,
+              "plxant_c1": 76.56247454,
+              "plxant_c2": -7652.06,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -9.471507,
+              "plxant_c6": 5.93e-06,
+              "plxant_c7": 2.0
+            },
+            "water": {
+              "tc": 647.1,
+              "pc": 220.64,
+              "omega": 0.344,
+              "antoine_a": 8.07131,
+              "antoine_b": 1730.63,
+              "antoine_c": 233.426,
+              "antoine_tmin": 1.0,
+              "antoine_tmax": 100.0,
+              "uniquac_r": 0.92,
+              "uniquac_q": 1.4,
+              "wagner_a": -7.734524,
+              "wagner_b": 1.346758,
+              "wagner_c": -2.500289,
+              "wagner_d": -1.880944,
+              "plxant_c1": 63.04209454,
+              "plxant_c2": -7295.586,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -7.442448,
+              "plxant_c6": 4.29e-06,
+              "plxant_c7": 2.0
+            },
+            "ethylene glycol": {
+              "tc": 720.0,
+              "pc": 82.0,
+              "omega": 0.506776,
+              "antoine_a": 8.09083,
+              "antoine_b": 2088.936,
+              "antoine_c": 203.454,
+              "antoine_tmin": 91.14282434919465,
+              "antoine_tmax": 222.07905808101287,
+              "uniquac_r": null,
+              "uniquac_q": null,
+              "wagner_a": -8.19992,
+              "wagner_b": 1.462088,
+              "wagner_c": -7.860047,
+              "wagner_d": 4.498507,
+              "plxant_c1": 56.60504454,
+              "plxant_c2": -9617.267,
+              "plxant_c3": 0.0,
+              "plxant_c4": 0.0,
+              "plxant_c5": -5.83171,
+              "plxant_c6": -1.14e-06,
+              "plxant_c7": 2.0
+            }
+          },
+          "binary": {
+            "nrtl_aij": [
+              [
+                "ethanol",
+                "water",
+                -0.8009
+              ],
+              [
+                "water",
+                "ethanol",
+                3.4578
+              ]
+            ],
+            "nrtl_bij": [
+              [
+                "ethanol",
+                "water",
+                246.18
+              ],
+              [
+                "water",
+                "ethanol",
+                -586.08
+              ]
+            ],
+            "nrtl_cij": [
+              [
+                "ethanol",
+                "water",
+                0.3
+              ],
+              [
+                "water",
+                "ethanol",
+                0.3
+              ]
+            ],
+            "uniquac_aij": [
+              [
+                "ethanol",
+                "water",
+                0.0
+              ],
+              [
+                "water",
+                "ethanol",
+                0.0
+              ]
+            ],
+            "uniquac_bij": [
+              [
+                "ethanol",
+                "water",
+                -30.5121
+              ],
+              [
+                "water",
+                "ethanol",
+                -116.2624
+              ]
+            ],
+            "wilson_aij": [
+              [
+                "ethanol",
+                "water",
+                -1.177846
+              ],
+              [
+                "water",
+                "ethanol",
+                1.177846
+              ]
+            ],
+            "wilson_bij": [
+              [
+                "ethanol",
+                "water",
+                -192.3803
+              ],
+              [
+                "water",
+                "ethanol",
+                -480.7997
+              ]
+            ],
+            "margules_aij": []
+          }
+        },
+        "modules": {},
+        "bvm_params": {},
+        "specs": [
+          {
+            "kind": "Reflux ratio",
+            "value": 1.5,
+            "unit_ref": "column",
+            "component": -1
+          },
+          {
+            "kind": "Distillate rate",
+            "value": 84.0,
+            "unit_ref": "column",
+            "component": -1
+          }
+        ],
+        "energy_balance": false,
+        "light_key_index": 0,
+        "heavy_key_index": 1,
+        "display_units": {
+          "temperature": "degC",
+          "pressure": "bar",
+          "flow": "kmol/h",
+          "duty": "kW"
+        },
+        "solver_mode": "hysim"
+      }
+    }
+  ]
+}

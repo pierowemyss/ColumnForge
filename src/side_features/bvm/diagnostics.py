@@ -7,6 +7,13 @@ split failed, not merely that it did. Classes mirror the Sec 11 table:
     below_min_reflux        regions pinch before overlapping
     no_connection           closest approach never within a stage step
     leaves_simplex          a marched profile went negative / exited
+    operating_line_infeasible  a section was asked to hold a liquid outside its
+                            feasible region {x : a x + bvec >= 0}
+    junction_order          both feeds land on the interior curve, but the lower
+                            one is not below the upper one
+    vanished_section        the junction lands on a section's own anchor, leaving
+                            that section no stages at all
+    profile_inverted        the assembled column's temperature falls going down
     boundary_block          required connection lies across a distillation boundary
     infeasible_entrainer    extractive manifolds cannot bridge at this E/F
     cannot_anchor           no controlling saddle on the interior-section pathway
@@ -39,7 +46,18 @@ def classify(profiles, conn, *, both_pinched=None, extractive=False,
     findings = []
 
     for name, prof in profiles.items():
-        if _left_simplex(prof):
+        # Leaving the feasible region mid-march is a legitimate way for a profile
+        # to END -- like reaching a pinch -- and everything up to that stage is
+        # usable. Only an ANCHOR outside the region is fatal: then the section was
+        # never able to hold the composition it was launched from, and there is no
+        # profile at all.
+        if prof.get("status") == "operating_line" and prof.get("n", 2) <= 1:
+            findings.append(Finding(
+                "operating_line_infeasible", name,
+                f"its anchor composition {np.round(prof['X'][0], 3)} is outside "
+                "this section's feasible region {x : a x + bvec >= 0}; the "
+                "section's balance cannot close there"))
+        elif _left_simplex(prof):
             bad = int(np.argmin(prof["X"].min(axis=1)))
             findings.append(Finding("leaves_simplex", name,
                                     f"stage {bad} comp {np.round(prof['X'][bad], 3)}"))
