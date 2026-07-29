@@ -5,7 +5,7 @@
     {
       "name": "ColumnForge Configuration",
       "state": {
-        "num_stages": 33,
+        "num_stages": 38,
         "pressure": 1.0,
         "pressure_drop": 0.0,
         "stage_efficiency": 0.5,
@@ -69,7 +69,7 @@
           "Feed": {
             "id": "Feed",
             "stream_type": "Feed",
-            "stage": 29,
+            "stage": 35,
             "temperature": 336.82259999999997,
             "flow": 1510.0,
             "composition": {
@@ -767,6 +767,9 @@
           "ef_spin": 1.0,
           "max_stages": 200,
           "eps_stage": 0.01,
+          "ef_min_spin": 0.2,
+          "ef_max_spin": 2.0,
+          "ef_pts_spin": 8,
           "lk": "MEOH",
           "hk": "DMC",
           "extractive": true,
@@ -786,6 +789,24 @@
             "keq_a": 2.303,
             "keq_b": 0.0
           }
+        },
+        "rbm_params": {
+          "lk": "2-propanol",
+          "hk": "water",
+          "rec_lk": 0.99,
+          "rec_hk": 0.01,
+          "q_spin": 1.0,
+          "sharp": false,
+          "r_spin": 3.0,
+          "extractive": true,
+          "entrainer": "ethylene glycol",
+          "ef_spin": 0.75,
+          "r_hi": 30.0,
+          "n_scan": 12,
+          "ef_lo": 0.2,
+          "ef_hi": 2.0,
+          "ef_pts": 10,
+          "view": 0
         },
         "specs": [
           {

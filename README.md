@@ -16,12 +16,12 @@ and initialization methods are proprietary and hard to inspect or extend.
 ColumnForge is the open version of that workflow, with the synthesis tools
 (RCM, BVM, RBM, FUG, Txy/Pxy) feeding the rigorous solver directly.
 
-|                           | Commercial Simulator          | ColumnForge                                      |
-| ------------------------- | ----------------------------- | ------------------------------------------------ |
-| solver internals          | opaque                        | readable Python, one self-check per module       |
-| initialization            | proprietary                   | BVM/FUG warm start, every intermediate visible   |
+|                           | Commercial Simulator          | ColumnForge                                          |
+| ------------------------- | ----------------------------- | ---------------------------------------------------- |
+| solver internals          | opaque                        | readable Python, one self-check per module           |
+| initialization            | proprietary                   | BVM/FUG warm start, every intermediate visible       |
 | preliminary design        | separate tools, manual bridge | RCM/BVM/RBM/FUG in-app, sharing the session's thermo |
-| when it fails to converge | "no solution found"           | named section, pinch, or spec that caused it     |
+| when it fails to converge | "no solution found"           | named section, pinch, or spec that caused it         |
 
 ## Quick Start
 
@@ -105,13 +105,13 @@ flowchart TD
 
 ## The solvers
 
-|                    | method                                       | answers                                                      | scope                                               |
-| ------------------ | -------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------- |
-| **Bubble-Point**   | Wang-Henke MESH                              | rigorous tray-by-tray profile                                | CMO, total condenser                                |
-| **Inside-Out**     | Boston-Sullivan two-tier                     | same, faster on stiff systems                                | CMO or full energy balance                          |
-| **BVM**            | difference-point-chain boundary-value method | Stages/section, $$R_(min)$$, $$E/F$$, optimal feed locations | sizing/feasibility, energy balance, reactive stages |
+|                    | method                                       | answers                                                                                    | scope                                               |
+| ------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| **Bubble-Point**   | Wang-Henke MESH                              | rigorous tray-by-tray profile                                                              | CMO, total condenser                                |
+| **Inside-Out**     | Boston-Sullivan two-tier                     | same, faster on stiff systems                                                              | CMO or full energy balance                          |
+| **BVM**            | difference-point-chain boundary-value method | Stages/section, $$R_(min)$$, $$E/F$$, optimal feed locations                               | sizing/feasibility, energy balance, reactive stages |
 | **RBM**            | rectification bodies (Bausa/Marquardt)       | feasibility, R<sub>min</sub> **and** R<sub>max</sub>, (E/F)<sub>min</sub> — no stage count | screening/feasibility, simple + extractive columns  |
-| **Shortcut (FUG)** | Fenske-Underwood-Gilliland-Kirkbride         | back-of-envelope N, R<sub>min</sub>, feed stage              | screening tool, constant α                          |
+| **Shortcut (FUG)** | Fenske-Underwood-Gilliland-Kirkbride         | back-of-envelope N, R<sub>min</sub>, feed stage                                            | screening tool, constant α                          |
 
 ### Bubble-Point (Wang-Henke MESH)
 
@@ -208,8 +208,8 @@ which the connection happens is an output, not an input. Feasibility,
 R<sub>min</sub>, feed/draw placement and reactive stages (Ung–Doherty transform)
 all build on the same chain.
 
-After Levy, Van Dongen & Doherty (1985) and Doherty & Malone, *Conceptual Design
-of Distillation Systems* (2001); reactive columns follow Ung & Doherty (1995).
+After Levy, Van Dongen & Doherty (1985) and Doherty & Malone, _Conceptual Design
+of Distillation Systems_ (2001); reactive columns follow Ung & Doherty (1995).
 
 > [!TIP]
 > A sized BVM column goes straight to Bubble-Point as a **warm start**
@@ -220,14 +220,14 @@ of Distillation Systems* (2001); reactive columns follow Ung & Doherty (1995).
 
 BVM marches profiles and asks whether the curves meet. RBM never marches. A
 **pinch** is a stage where nothing changes any more: the equilibrium map and the
-section's operating line $y = a\,x + \mathbf{b}$ (with $a = L/V$ and
-$\mathbf{b} = (\Delta/V)\,\delta$, the same difference point BVM uses) return the
+section's operating line $y = ax + b$ (with $a = L/V$ and
+$b = (\Delta/V)\,\delta$, the same difference point BVM uses) return the
 composition to itself.
 
 $$
-K(x_p, T, P)\, x_p = a\, x_p + \mathbf{b}
+K(x_p, T, P) x_p = a x_p + b
 \qquad\Longleftrightarrow\qquad
-x_{p,i}\,\big(K_i - a\big) = b_i \quad \forall i
+x_{p,i}\big(K_i - a\big) = b_i \quad \forall i
 $$
 
 Solving that algebraic system on every branch gives a section's pinch points;
@@ -250,13 +250,13 @@ That buys three things marching does not:
 > [!IMPORTANT]
 > **RBM gives no stage count** — a body approximates the reachable set, not the
 > profile. Use RBM to locate a feasible operating point, BVM to size the column
-> there. It also wants **sharp** product specs: exact zeros in $x_D$/$x_B$ put
+> there. It also wants **sharp** product specs: exact zeros in $x_D/x_B$ put
 > pinches on the simplex edges, where they can be bracketed. A smeared spec (98/2
 > recoveries) displaces every pinch off its edge; those are recovered by
 > continuation onto the parent face, and any that had to be clipped are counted
 > in the panel.
 
-After Bausa, von Watzdorf & Marquardt, *AIChE J.* **44**(10) 2181 (1998),
+After Bausa, von Watzdorf & Marquardt, _AIChE J._ **44**(10) 2181 (1998),
 extended to extractive columns by Brüggemann & Marquardt (2002).
 
 ### Shortcut (FUG)
@@ -344,8 +344,8 @@ column defined.
 | module              | what it does                                                                                                      |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | **RCM**             | residue-curve maps (the preserved predecessor app, `side_features/freeRCM/`)                                      |
-| **BVM**             | size at one `R`, sweep a design map, send a warm start to the rigorous solver, or size a **reactive** column       |
-| **RBM**             | pinches + rectification bodies at one point, `r_min`/`r_max`, or the whole feasible **(E/F, r)** operating region  |
+| **BVM**             | size at one `R`, sweep a design map, send a warm start to the rigorous solver, or size a **reactive** column      |
+| **RBM**             | pinches + rectification bodies at one point, `r_min`/`r_max`, or the whole feasible **(E/F, r)** operating region |
 | **Shortcut (FUG)**  | Fenske/Underwood/Gilliland/Kirkbride report + stages-vs-reflux curve                                              |
 | **Txy/Pxy**         | binary bubble/dew loci at fixed P or T, plus an azeotrope table (singular-point classification)                   |
 | **Pure Components** | browse/search the 78-species database, plot Psat(T), load straight into the column                                |
@@ -355,21 +355,21 @@ column defined.
   <tr>
     <td width="50%" valign="top">
       <a href="docs/img/modules-bvm.png"><img src="docs/img/modules-bvm.png" alt="BVM design map"></a>
-      <br><b>BVM</b> feasibility / design map
+      <br><b>BVM</b> Analysis on a ternary extractive column
     </td>
     <td width="50%" valign="top">
       <a href="docs/img/bvm-profile-prediction.png"><img src="docs/img/bvm-profile-prediction.png" alt="BVM stage and temperature profile"></a>
-      <br><b>BVM</b> stage and temperature profile
+      <br><b>BVM</b> Auto-joined column profile
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <a href="docs/img/rcm-module.png"><img src="docs/img/rcm-module.png" alt="RCM residue-curve map"></a>
-      <br><b>RCM</b> residue-curve map
+      <br><b>Residue Curve Mapping</b>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/img/modules-txy.png"><img src="docs/img/modules-txy.png" alt="Txy/Pxy binary envelope"></a>
-      <br><b>Txy/Pxy</b> binary envelope + azeotropes
+      <a href="docs/img/modules-rbm.png"><img src="docs/img/modules-rbm.png" alt="RBM visualization"></a>
+      <br><b>Rectifying Body Method</b> for an extractive column with node/eigenvector visualization
     </td>
   </tr>
   <tr>
@@ -378,8 +378,8 @@ column defined.
       <br><b>Shortcut (FUG)</b> stages vs reflux
     </td>
     <td width="50%" valign="top">
-      <a href="docs/img/modules-phaseeq.png"><img src="docs/img/modules-phaseeq.png" alt="Phase EQ flash bench"></a>
-      <br><b>Phase EQ</b> flash bench
+      <a href="docs/img/modules-txy.png"><img src="docs/img/modules-txy.png" alt="Txy/Pxy binary envelope"></a>
+      <br><b>Txy/Pxy</b> binary envelope + azeotropes
     </td>
   </tr>
 </table>
@@ -397,7 +397,7 @@ Limits, enforced rather than assumed:
 
 - One equilibrium reaction, **ideal stages**, every stage catalytic (condenser and
   reboiler included, so products sit on the reaction-equilibrium surface).
-  Efficiency, entrainer and *Send to Rigorous Solver* grey out with the reason —
+  Efficiency, entrainer and _Send to Rigorous Solver_ grey out with the reason —
   the MESH solvers carry no reaction terms, so a reactive warm start would
   converge a different column.
 - The transform must stay inside the composition simplex, which holds for a

@@ -16,6 +16,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# side_features (BVM) is the default module now, so it loads on window construction
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
 
 EXAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "..", "..", "docs", "examples")
@@ -112,7 +115,7 @@ def test_bvm_panel_picks_up_a_second_file():
     first = os.path.join(EXAMPLES, "reactive_mtbe.colx")
     second = os.path.join(EXAMPLES, "reactive_tame.colx")
     _load_into(win, first)
-    win.modules_tab.module_combo.setCurrentText("BVM")
+    win.modules_tab.module_combo.setCurrentText("Boundary Value Method (BVM)")
     panel = win.modules_tab.bvm_widget
     assert panel is not None
     assert panel.get_params()["lk"] == "n-butane"

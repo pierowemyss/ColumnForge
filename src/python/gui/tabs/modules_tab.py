@@ -36,13 +36,13 @@ class ModulesTab(QWidget):
         
         self.module_combo = QComboBox(self)
         self.module_combo.addItems([
-            "RCM",
-            "BVM",
-            "RBM (Rectification Bodies)",
-            "Shortcut (FUG)",
-            "Txy/Pxy",
-            "Pure Components",
-            "Phase EQ",
+            "Boundary Value Method (BVM)",
+            "Rectification Body Method (RBM)",
+            "Residue Curve Map (RCM)",
+            "Shortcut Design (Fenske-Underwood-Gilliland)",
+            "Txy/Pxy Diagrams",
+            "Pure Component Properties",
+            "Phase Equilibrium (Flash)",
         ])
         header_layout.addWidget(self.module_combo)
         header_layout.addStretch()
@@ -108,13 +108,13 @@ class ModulesTab(QWidget):
 
     def _dispatch(self, module_name: str):
         launchers = {
-            "RCM": self._launch_rcm,
-            "BVM": self._launch_bvm,
-            "RBM (Rectification Bodies)": self._launch_rbm,
-            "Shortcut (FUG)": self._launch_fug,
-            "Txy/Pxy": self._launch_txy,
-            "Pure Components": self._launch_pure,
-            "Phase EQ": self._launch_phase_eq,
+            "Boundary Value Method (BVM)": self._launch_bvm,
+            "Rectification Body Method (RBM)": self._launch_rbm,
+            "Residue Curve Map (RCM)": self._launch_rcm,
+            "Shortcut Design (Fenske-Underwood-Gilliland)": self._launch_fug,
+            "Txy/Pxy Diagrams": self._launch_txy,
+            "Pure Component Properties": self._launch_pure,
+            "Phase Equilibrium (Flash)": self._launch_phase_eq,
         }
         launch = launchers.get(module_name)
         if launch:
