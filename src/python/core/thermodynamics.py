@@ -276,7 +276,89 @@ def nrtl_gamma(x, tau, alpha):
     return np.exp(ln_gamma)
 
 
-def nrtl_gamma_fn(tau_a, tau_b, alpha, t_to_K=lambda T: T + 273.15):
+def degC_to_K(T):
+    """Default temperature conversion for the model closures below.
+
+    A module-level function rather than the `lambda T: T + 273.15` it replaced,
+    because the closures that carry it have to survive `pickle` -- that is what
+    lets `side_features.bvm.parallel` sweep operating points on a process pool
+    instead of one at a time (a lambda pickles to nothing but an error).
+    """
+    return T + 273.15
+
+
+class _NRTLGamma:
+    """gamma_fn(x, T) for NRTL. A class, not a closure, so it is picklable."""
+    __slots__ = ("tau_a", "tau_b", "alpha", "t_to_K")
+
+    def __init__(self, tau_a, tau_b, alpha, t_to_K):
+        self.tau_a = np.asarray(tau_a, float)
+        self.tau_b = np.asarray(tau_b, float)
+        self.alpha = np.asarray(alpha, float)
+        self.t_to_K = t_to_K
+
+    def __call__(self, x, T):
+        return nrtl_gamma(x, self.tau_a + self.tau_b / self.t_to_K(T), self.alpha)
+
+    def __getstate__(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+
+
+class _WilsonGamma(_NRTLGamma):
+    __slots__ = ("a", "b")
+
+    def __init__(self, a, b, t_to_K):
+        self.a = np.asarray(a, float)
+        self.b = np.asarray(b, float)
+        self.t_to_K = t_to_K
+
+    def __call__(self, x, T):
+        return wilson_gamma(x, np.exp(self.a + self.b / self.t_to_K(T)))
+
+    def __getstate__(self):
+        return {"a": self.a, "b": self.b, "t_to_K": self.t_to_K}
+
+
+class _UNIQUACGamma(_NRTLGamma):
+    __slots__ = ("r", "q", "a", "b")
+
+    def __init__(self, r, q, a, b, t_to_K):
+        self.r = np.asarray(r, float)
+        self.q = np.asarray(q, float)
+        self.a = np.asarray(a, float)
+        self.b = np.asarray(b, float)
+        self.t_to_K = t_to_K
+
+    def __call__(self, x, T):
+        return uniquac_gamma(x, self.r, self.q,
+                             np.exp(self.a + self.b / self.t_to_K(T)))
+
+    def __getstate__(self):
+        return {k: getattr(self, k) for k in ("r", "q", "a", "b", "t_to_K")}
+
+
+class _MargulesGamma:
+    """Two-suffix Margules is temperature-independent, so T is ignored."""
+    __slots__ = ("A",)
+
+    def __init__(self, A):
+        self.A = np.asarray(A, float)
+
+    def __call__(self, x, T):
+        return margules_gamma(x, self.A)
+
+    def __getstate__(self):
+        return {"A": self.A}
+
+    def __setstate__(self, state):
+        self.A = state["A"]
+
+
+def nrtl_gamma_fn(tau_a, tau_b, alpha, t_to_K=degC_to_K):
     """Build a gamma_fn(x, T) closure for k_values/bubble_T, with the common
     temperature-dependent form tau_ij = a_ij + b_ij / T_K.
 
@@ -290,15 +372,7 @@ def nrtl_gamma_fn(tau_a, tau_b, alpha, t_to_K=lambda T: T + 273.15):
     ponytail: default assumes the bundled fits' degrees-C unit; pass
     t_to_K=lambda T: T if your Antoine coefficients are already in Kelvin.
     """
-    tau_a = np.asarray(tau_a, float)
-    tau_b = np.asarray(tau_b, float)
-    alpha = np.asarray(alpha, float)
-
-    def gamma_fn(x, T):
-        tau = tau_a + tau_b / t_to_K(T)
-        return nrtl_gamma(x, tau, alpha)
-
-    return gamma_fn
+    return _NRTLGamma(tau_a, tau_b, alpha, t_to_K)
 
 
 def wilson_gamma(x, Lam):
@@ -315,16 +389,10 @@ def wilson_gamma(x, Lam):
     return np.exp(ln_gamma)
 
 
-def wilson_gamma_fn(a, b, t_to_K=lambda T: T + 273.15):
+def wilson_gamma_fn(a, b, t_to_K=degC_to_K):
     """gamma_fn(x, T) closure for Wilson with ln Lambda_ij = a_ij + b_ij/T_K
     (the Aspen WILSON form; a_ii = b_ii = 0 gives Lambda_ii = 1)."""
-    a = np.asarray(a, float)
-    b = np.asarray(b, float)
-
-    def gamma_fn(x, T):
-        return wilson_gamma(x, np.exp(a + b / t_to_K(T)))
-
-    return gamma_fn
+    return _WilsonGamma(a, b, t_to_K)
 
 
 def uniquac_gamma(x, r, q, tau, z=10.0):
@@ -350,18 +418,10 @@ def uniquac_gamma(x, r, q, tau, z=10.0):
     return np.exp(ln_gC + ln_gR)
 
 
-def uniquac_gamma_fn(r, q, a, b, t_to_K=lambda T: T + 273.15):
+def uniquac_gamma_fn(r, q, a, b, t_to_K=degC_to_K):
     """gamma_fn(x, T) closure for UNIQUAC with tau_ij = exp(a_ij + b_ij/T_K)
     (the Aspen UNIQ form; a_ii = b_ii = 0 gives tau_ii = 1)."""
-    r = np.asarray(r, float)
-    q = np.asarray(q, float)
-    a = np.asarray(a, float)
-    b = np.asarray(b, float)
-
-    def gamma_fn(x, T):
-        return uniquac_gamma(x, r, q, np.exp(a + b / t_to_K(T)))
-
-    return gamma_fn
+    return _UNIQUACGamma(r, q, a, b, t_to_K)
 
 
 def margules_gamma(x, A):
@@ -377,8 +437,7 @@ def margules_gamma(x, A):
 def margules_gamma_fn(A):
     """gamma_fn(x, T) closure for two-suffix Margules (A dimensionless,
     temperature-independent — the teaching model)."""
-    A = np.asarray(A, float)
-    return lambda x, T: margules_gamma(x, A)
+    return _MargulesGamma(A)
 
 
 # --- UNIFAC (group-contribution activity coefficients) --------------------
@@ -388,13 +447,15 @@ def margules_gamma_fn(A):
 
 def _unifac_group_ln_gamma(nu_vec, Q, Psi):
     """ln Gamma_k for every subgroup, given a group-count/weight vector.
-    nu_vec: (m,) group weights (mixture: sum_i x_i nu_i^k; pure: nu_i^k).
+    nu_vec: (..., m) group weights (mixture: sum_i x_i nu_i^k; pure: nu_i^k) --
+    a stack of them is done in one pass, which is how `unifac_gamma` gets the
+    mixture and every pure component out of a single call.
     Q: (m,) subgroup areas. Psi: (m,m) interaction matrix exp(-a_mn/T)."""
-    Xg = nu_vec / nu_vec.sum()
+    Xg = nu_vec / nu_vec.sum(-1, keepdims=True)
     QX = Q * Xg
-    theta = QX / QX.sum()
+    theta = QX / QX.sum(-1, keepdims=True)
     S = theta @ Psi                       # S_k = sum_m theta_m Psi_mk (also denom_m)
-    term2 = Psi @ (theta / S)             # sum_m Psi_km theta_m / S_m
+    term2 = (theta / S) @ Psi.T           # sum_m Psi_km theta_m / S_m
     return Q * (1.0 - np.log(S) - term2)
 
 
@@ -403,6 +464,17 @@ def unifac_gamma(x, nu, R, Q, main_idx, a_mn, T_K):
     x: (n,) liquid mole fractions. nu: (n,m) subgroup counts per species.
     R,Q: (m,) subgroup volume/area. main_idx: (m,) main-group index per subgroup.
     a_mn: (g,g) main-group interaction energies [K]. Returns (n,) gamma."""
+    return _unifac_gamma_sub(x, nu, R, Q, a_mn[np.ix_(main_idx, main_idx)], T_K)
+
+
+def _unifac_gamma_sub(x, nu, R, Q, a_sub, T_K):
+    """`unifac_gamma` with the subgroup interaction matrix already expanded.
+
+    The expansion (`a_mn[ix_(main_idx, main_idx)]`, a fancy-index gather) is
+    constant for a given component list, and this is called once per bubble/dew
+    Newton step -- tens of thousands of times per BVM column. `unifac_gamma_fn`
+    hoists it into the closure.
+    """
     x = np.asarray(x, float)
     x = np.clip(x, 1e-12, None)
     x = x / x.sum()
@@ -416,15 +488,33 @@ def unifac_gamma(x, nu, R, Q, main_idx, a_mn, T_K):
     l = 5.0 * (r - q) - (r - 1.0)
     ln_c = np.log(phi / x) + 5.0 * q * np.log(theta / phi) + l - (phi / x) * (x @ l)
 
-    # Residual. Psi over subgroups via their main groups.
-    Psi = np.exp(-a_mn[np.ix_(main_idx, main_idx)] / T_K)
-    lnG_mix = _unifac_group_ln_gamma(x @ nu, Q, Psi)
-    ln_r = np.empty(len(x))
-    for i in range(len(x)):
-        lnG_pure = _unifac_group_ln_gamma(nu[i], Q, Psi)
-        ln_r[i] = float(nu[i] @ (lnG_mix - lnG_pure))
+    # Residual. Mixture and every pure component in one batched group solve.
+    Psi = np.exp(-a_sub / T_K)
+    lnG = _unifac_group_ln_gamma(np.vstack([x @ nu, nu]), Q, Psi)
+    ln_r = np.einsum("ik,ik->i", nu, lnG[0] - lnG[1:])
 
     return np.exp(ln_c + ln_r)
+
+
+class _UNIFACGamma:
+    """gamma_fn(x, T) for UNIFAC, with the subgroup interaction matrix already
+    expanded (see `_unifac_gamma_sub`)."""
+    __slots__ = ("nu", "R", "Q", "a_sub", "t_to_K")
+
+    def __init__(self, nu, R, Q, a_sub, t_to_K):
+        self.nu, self.R, self.Q, self.a_sub = nu, R, Q, a_sub
+        self.t_to_K = t_to_K
+
+    def __call__(self, x, T):
+        return _unifac_gamma_sub(x, self.nu, self.R, self.Q, self.a_sub,
+                                 self.t_to_K(T))
+
+    def __getstate__(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
 
 
 @lru_cache(maxsize=1)
@@ -436,7 +526,7 @@ def load_unifac_db():
         return json.load(fh)
 
 
-def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15, names=None):
+def unifac_gamma_fn(species_groups, db, t_to_K=degC_to_K, names=None):
     """gamma_fn(x, T) closure for UNIFAC. `species_groups` is a list (one per
     component, same order as x) of {subgroup_name: count}. `db` is the parsed
     unifac_groups.json. `names` (optional) labels the components in error
@@ -496,10 +586,7 @@ def unifac_gamma_fn(species_groups, db, t_to_K=lambda T: T + 273.15, names=None)
 
     nu = np.array([[grp.get(s, 0) for s in used] for grp in species_groups], float)
 
-    def gamma_fn(x, T):
-        return unifac_gamma(x, nu, R, Q, main_idx, a_mn, t_to_K(T))
-
-    return gamma_fn
+    return _UNIFACGamma(nu, R, Q, a_mn[np.ix_(main_idx, main_idx)], t_to_K)
 
 
 def _srk_z(A, B):
@@ -587,23 +674,29 @@ def srk_phi(y, T_K, P_Pa, tc, pc, omega):
     return np.exp(lnphi)
 
 
-def srk_phi_fn(tc, pc, omega, t_to_K=lambda T: T + 273.15, p_to_Pa=133.322):
-    """phi_fn(y, T, P) closure for SRK (see k_values). tc in K, pc in bar,
-    omega dimensionless; T/P arrive in the Antoine fit's units and are
-    converted via t_to_K / p_to_Pa (default: degC and mmHg)."""
-    tc = np.asarray(tc, float)
-    pc_Pa = np.asarray(pc, float) * 1.0e5
-    omega = np.asarray(omega, float)
+class _SRKPhi:
+    """phi_fn(y, T, P) for SRK. A class rather than a closure with a function
+    attribute, so that `pure` survives pickling along with the rest of it."""
+    __slots__ = ("tc", "pc_Pa", "omega", "t_to_K", "p_to_Pa")
 
-    def phi_fn(y, T, P):
-        return srk_phi(y, t_to_K(T), P * p_to_Pa, tc, pc_Pa, omega)
+    def __init__(self, tc, pc, omega, t_to_K, p_to_Pa):
+        self.tc = np.asarray(tc, float)
+        self.pc_Pa = np.asarray(pc, float) * 1.0e5
+        self.omega = np.asarray(omega, float)
+        self.t_to_K = t_to_K
+        self.p_to_Pa = p_to_Pa
 
-    def pure(T, psat):
+    def __call__(self, y, T, P):
+        return srk_phi(y, self.t_to_K(T), P * self.p_to_Pa, self.tc, self.pc_Pa,
+                       self.omega)
+
+    def pure(self, T, psat):
         """All pure-component phi^sat in one vectorised call — the k_values
         fast path (it otherwise loops n one-hot srk_phi calls per K-value).
         Pure i: a_mix = a_i, b_mix = b_i, each at its own pressure psat[i]."""
-        T_K = t_to_K(T)
-        P = np.asarray(psat, float) * p_to_Pa
+        tc, pc_Pa, omega = self.tc, self.pc_Pa, self.omega
+        T_K = self.t_to_K(T)
+        P = np.asarray(psat, float) * self.p_to_Pa
         m = 0.480 + 1.574 * omega - 0.176 * omega * omega
         alpha = (1.0 + m * (1.0 - np.sqrt(T_K / tc))) ** 2
         ai = 0.42748 * (R_GAS * tc) ** 2 / pc_Pa * alpha
@@ -616,8 +709,19 @@ def srk_phi_fn(tc, pc, omega, t_to_K=lambda T: T + 273.15, p_to_Pa=133.322):
         lnphi = (Zs - 1.0) - np.log(Zs - Bs) - (A / Bs) * np.log(1.0 + Bs / Zs)
         return np.where(ok, np.exp(lnphi), 1.0)
 
-    phi_fn.pure = pure
-    return phi_fn
+    def __getstate__(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+
+
+def srk_phi_fn(tc, pc, omega, t_to_K=degC_to_K, p_to_Pa=133.322):
+    """phi_fn(y, T, P) closure for SRK (see k_values). tc in K, pc in bar,
+    omega dimensionless; T/P arrive in the Antoine fit's units and are
+    converted via t_to_K / p_to_Pa (default: degC and mmHg)."""
+    return _SRKPhi(tc, pc, omega, t_to_K, p_to_Pa)
 
 
 def _demo():

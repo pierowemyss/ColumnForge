@@ -3,7 +3,7 @@
   "app": "ColumnForge",
   "cases": [
     {
-      "name": "petlyuk_side_rectifier",
+      "name": "btx_side_rectifier",
       "state": {
         "num_stages": 30,
         "pressure": 1.01325,
@@ -183,13 +183,13 @@
         "modules": {
           "Toluene rectifier": {
             "module_type": "Side Rectifier",
-            "stage": 9,
-            "num_stages": 5,
+            "stage": 20,
+            "num_stages": 10,
             "boilup_ratio": null,
-            "reflux_ratio": 2.0,
+            "reflux_ratio": 1.0,
             "duty": null,
-            "return_stage": 11,
-            "rate": 45.0
+            "return_stage": 22,
+            "rate": 70.0
           }
         },
         "bvm_params": {},
@@ -202,7 +202,7 @@
           },
           {
             "kind": "Distillate rate",
-            "value": 20.0,
+            "value": 35.0,
             "unit_ref": "column",
             "component": -1
           }

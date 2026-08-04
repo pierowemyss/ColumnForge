@@ -917,6 +917,8 @@ def main():
     from .theme.mpl_style import apply as apply_mpl_style
     app.setStyleSheet(load_theme())      # one app-wide dark theme
     apply_mpl_style()                    # matplotlib figures match the shell
+    from .table_edit import install as install_table_edit
+    app._table_assist = install_table_edit(app)   # Ctrl+C/V + editor commits
 
     window = MainWindow()
     window.show()

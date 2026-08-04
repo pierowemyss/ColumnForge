@@ -3,7 +3,7 @@
   "app": "ColumnForge",
   "cases": [
     {
-      "name": "extractive_ipa_water_eg",
+      "name": "ColumnForge Configuration",
       "state": {
         "num_stages": 32,
         "pressure": 1.01325,
@@ -109,8 +109,8 @@
           "bottoms_flow": null
         },
         "thermodynamics_config": {
-          "vle_model": "PLXANT",
-          "activity_model": "UNIFAC",
+          "vle_model": "Antoine",
+          "activity_model": "NRTL",
           "eos_model": "Ideal Gas",
           "energy_balance": false,
           "component_params": {
@@ -161,26 +161,26 @@
               "plxant_c7": 2.0
             },
             "2-propanol": {
-              "tc": 513.92,
-              "pc": 61.48,
-              "omega": 0.649,
-              "antoine_a": 8.20417,
-              "antoine_b": 1642.89,
-              "antoine_c": 230.3,
-              "antoine_tmin": -2.2529106059407127,
-              "antoine_tmax": 96.81732874560413,
-              "uniquac_r": 2.1055,
-              "uniquac_q": 1.972,
-              "wagner_a": -8.614672,
-              "wagner_b": 0.150906,
-              "wagner_c": -3.761831,
-              "wagner_d": -1.670366,
-              "plxant_c1": 76.56247454,
-              "plxant_c2": -7652.06,
-              "plxant_c3": 0.0,
+              "tc": 508.3,
+              "pc": 47.62,
+              "omega": 0.665,
+              "antoine_a": 8.11778,
+              "antoine_b": 1580.92,
+              "antoine_c": 219.61,
+              "antoine_tmin": 0.0,
+              "antoine_tmax": 101.0,
+              "uniquac_r": 2.7791,
+              "uniquac_q": 2.508,
+              "wagner_a": -5.367686,
+              "wagner_b": -7.220499,
+              "wagner_c": 4.800747,
+              "wagner_d": -23.359611,
+              "plxant_c1": 12.0717237464,
+              "plxant_c2": -3640.202825,
+              "plxant_c3": -53.54,
               "plxant_c4": 0.0,
-              "plxant_c5": -9.471507,
-              "plxant_c6": 5.93e-06,
+              "plxant_c5": 0.0,
+              "plxant_c6": 0.0,
               "plxant_c7": 2.0
             }
           },
@@ -189,24 +189,64 @@
               [
                 "2-propanol",
                 "water",
-                -0.8009
+                9.9999
               ],
               [
                 "water",
                 "2-propanol",
-                3.4578
+                -3.8765
+              ],
+              [
+                "water",
+                "ethylene glycol",
+                7.16639
+              ],
+              [
+                "ethylene glycol",
+                "2-propanol",
+                4.05912
+              ],
+              [
+                "2-propanol",
+                "ethylene glycol",
+                0.30225
+              ],
+              [
+                "ethylene glycol",
+                "water",
+                -6.46137
               ]
             ],
             "nrtl_bij": [
               [
                 "2-propanol",
                 "water",
-                246.18
+                -3526.43
               ],
               [
                 "water",
                 "2-propanol",
-                -586.08
+                2146.64
+              ],
+              [
+                "2-propanol",
+                "ethylene glycol",
+                95.17378
+              ],
+              [
+                "water",
+                "ethylene glycol",
+                -2906.12055
+              ],
+              [
+                "ethylene glycol",
+                "2-propanol",
+                -1464.08864
+              ],
+              [
+                "ethylene glycol",
+                "water",
+                2570.40088
               ]
             ],
             "nrtl_cij": [
@@ -218,6 +258,26 @@
               [
                 "water",
                 "2-propanol",
+                0.3
+              ],
+              [
+                "ethylene glycol",
+                "2-propanol",
+                0.3
+              ],
+              [
+                "ethylene glycol",
+                "water",
+                0.3
+              ],
+              [
+                "2-propanol",
+                "ethylene glycol",
+                0.3
+              ],
+              [
+                "water",
+                "ethylene glycol",
                 0.3
               ]
             ],
@@ -273,7 +333,60 @@
           }
         },
         "modules": {},
-        "bvm_params": {},
+        "bvm_params": {
+          "rec_lk": 0.999,
+          "rec_hk": 0.001,
+          "r_spin": 0.9,
+          "q_spin": 1.0,
+          "eff_spin": 0.999,
+          "rmax_spin": 10.0,
+          "map_pts": 11,
+          "ef_spin": 0.95,
+          "max_stages": 200,
+          "eps_stage": 0.01,
+          "ef_min_spin": 0.2,
+          "ef_max_spin": 2.0,
+          "ef_pts_spin": 8,
+          "lk": "2-propanol",
+          "hk": "water",
+          "extractive": true,
+          "entrainer": "ethylene glycol",
+          "reaction": {
+            "on": false,
+            "nu": {
+              "MEOH": 0.0,
+              "DMC": 0.0,
+              "2ME": 0.0,
+              "EG": 0.0,
+              "EC": 0.0,
+              "AN": 0.0,
+              "2-propanol": 0.0,
+              "water": 0.0,
+              "ethylene glycol": 0.0
+            },
+            "ref": "ethylene glycol",
+            "keq_a": 2.303,
+            "keq_b": 0.0
+          }
+        },
+        "rbm_params": {
+          "lk": "2-propanol",
+          "hk": "water",
+          "rec_lk": 0.999,
+          "rec_hk": 0.001,
+          "q_spin": 1.0,
+          "sharp": false,
+          "r_spin": 0.9,
+          "extractive": true,
+          "entrainer": "ethylene glycol",
+          "ef_spin": 0.95,
+          "r_hi": 30.0,
+          "n_scan": 12,
+          "ef_lo": 0.2,
+          "ef_hi": 2.0,
+          "ef_pts": 8,
+          "view": 1
+        },
         "specs": [
           {
             "kind": "Reflux ratio",
@@ -288,7 +401,6 @@
             "component": -1
           }
         ],
-        "energy_balance": false,
         "light_key_index": 0,
         "heavy_key_index": 1,
         "display_units": {

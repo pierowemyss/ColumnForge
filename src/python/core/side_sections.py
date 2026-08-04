@@ -9,6 +9,14 @@ A side section is a small column hung off a main-column stage:
     condensed sub-column; its distillate is a side product, its bottom liquid
     returns to the main column at stage j (below the draw).
 
+Which side of the FEED the draw sits on is what makes the arrangement a coupled
+column rather than an expensive way to make a product twice: a stripper draws
+liquid ABOVE the feed (below it the liquid is already bottoms) and a rectifier
+draws vapour BELOW it (above it the vapour is already distillate). Nothing here
+enforces that — it is a design statement, not a mass balance — but both bundled
+examples once had it backwards, so `test_examples` now pins the side product
+being a genuine intermediate.
+
 Nothing new is needed inside the solvers: the draw is an ordinary `liquid_draw`/
 `vapor_draw` and the return is an ordinary feed (saturated vapour for a stripper,
 saturated liquid for a rectifier), so the main column's mass balance closes on its
@@ -122,6 +130,35 @@ def _returned(sec: SideSection, sub_prof: dict) -> np.ndarray:
             else np.asarray(sub_prof["xB"])).copy()
 
 
+def _extrapolate(new: np.ndarray, step: np.ndarray, prev_step) -> np.ndarray:
+    """Aitken jump along a geometrically converging recycle step.
+
+    The tear crawls: successive substitution on a side column contracts by the
+    fraction of the draw that comes back, which on a real arrangement is 0.75-0.96
+    per pass, i.e. hundreds of passes to 1e-5. Two consecutive steps give the
+    ratio r, and a geometric series sums the whole remaining tail at once:
+
+        x* = x_k + r/(1-r) * (x_k - x_{k-1})
+
+    Only the *next iterate* is extrapolated -- the pass after it re-solves from
+    scratch, so an overshoot costs one pass rather than a wrong answer. Guarded:
+    a ratio that is not a contraction (r >= 0.98, or growing) means the sequence
+    is not geometric here and the plain substitution stands.
+    """
+    if prev_step is None:
+        return new
+    n0 = float(np.linalg.norm(prev_step))
+    n1 = float(np.linalg.norm(step))
+    if n0 <= 0.0:
+        return new
+    r = n1 / n0
+    if not (0.0 < r < 0.98):
+        return new
+    x = np.clip(new + r / (1.0 - r) * step, 0.0, None)
+    s = float(x.sum())
+    return x / s if s > 0.0 else new
+
+
 def _product(sec: SideSection, sub_prof: dict) -> tuple:
     """(composition, temperature) of the section's side product."""
     if sec.kind == "stripper":
@@ -144,18 +181,41 @@ def make_side_solver(solver, sections: List[SideSection], rebuild,
     (feed_totals / side_draws) already netted so the recycle never shows up as an
     external feed or a product.
 
-    # ponytail: plain successive substitution. It converges linearly (~0.4 per
-    # pass on a refinery-ish stripper) but each section keeps its return_comp
-    # between calls, so only the first solve of a run pays the full tear and the
-    # operating-point root-find's later trials need 2-3 passes. Add Aitken
-    # extrapolation here if a stiff section ever runs out of passes.
+    # ponytail: successive substitution with an Aitken jump (`_extrapolate`) --
+    # plain substitution contracts by the returned fraction of the draw, which on
+    # a real arrangement left both bundled examples still moving after 25 passes.
+    # Each section keeps its return_comp between calls, so only the first solve of
+    # a run pays the full tear and the operating-point root-find's later trials
+    # need 2-3 passes. Upgrade path if a section ever still runs out: a fully
+    # coupled Naphtali-Sandholm block instead of a tear.
     """
     def solve(si, **knobs):
         sub_knobs = {k: v for k, v in knobs.items()
                      if k in ("max_iter", "tol", "efficiency", "cancel")}
+        # Every pass after the first warm-starts from the pass before, so the
+        # caller's own warm start is consumed once and then dropped -- keeping it
+        # in `knobs` made the re-solve pass x0 twice ("got multiple values for
+        # keyword argument 'x0'"), which only ever fired on the GUI's threaded
+        # path, the one place that warm-starts the final solve.
+        pass_knobs = {k: v for k, v in knobs.items() if k not in ("x0", "T0")}
+        # Seed the tear before the first solve. `rebuild` only puts a return feed
+        # on the column once return_comp exists, so an unseeded first pass carries
+        # the DRAW without the RETURN: the main column is solved short by the
+        # recycle, which at best costs the tear a dozen passes crawling back and at
+        # worst fails outright with "bottoms rate B=-5 must be positive" -- an
+        # error that blames the user's distillate rate for a missing internal
+        # stream. The external feed is the honest seed; one pass replaces it.
+        if any(s.return_comp is None for s in sections):
+            z = np.asarray(si.feed, float).sum(axis=0)
+            z = z / z.sum() if z.sum() > 0 else z
+            for s in sections:
+                if s.return_comp is None:
+                    s.return_comp = z.copy()
+            si = rebuild(si)
         prof = solver(si, **knobs)
         subs = []
         moved = 0.0
+        prev_step = {}                     # per-section step, for _extrapolate
         for _ in range(max_passes):
             if prof.get("message") == "Aborted.":
                 break
@@ -163,16 +223,26 @@ def make_side_solver(solver, sections: List[SideSection], rebuild,
             moved = 0.0
             for sec, sub in zip(sections, subs):
                 new = _returned(sec, sub)
-                if sec.return_comp is not None:
-                    moved = max(moved, float(np.max(np.abs(new - sec.return_comp))))
-                else:
-                    moved = float("inf")
-                sec.return_comp = new
+                # `moved` stays the raw fixed-point residual |G(x) - x|, not the
+                # accelerated jump, so the convergence test means what it says.
+                step = new - sec.return_comp
+                moved = max(moved, float(np.max(np.abs(step))))
+                sec.return_comp = _extrapolate(new, step, prev_step.get(sec.id))
+                prev_step[sec.id] = step
             if moved < tol:
                 break
             si = rebuild(si)
-            prof = solver(si, x0=prof["x"], T0=prof["T"], **knobs)
+            prof = solver(si, x0=prof["x"], T0=prof["T"], **pass_knobs)
         prof["side_tear_residual"] = moved if subs else 0.0
+        # A tear that ran out of passes used to return mid-crawl compositions
+        # wearing the main solver's "Converged" message. Say it in the one place
+        # the GUI already shows (Simulation status), because the side product and
+        # everything above the return stage are wrong by `moved`, not by `tol`.
+        if subs and moved >= tol:
+            prof["message"] = (
+                f"{prof.get('message', 'Solved')}  [side-section recycle NOT "
+                f"converged: composition still moving {moved:.2e} after "
+                f"{max_passes} passes]")
         _net_report(prof, si, sections, subs)
         return prof
 
@@ -268,6 +338,29 @@ def _demo():
     assert np.allclose(F * z, out_r, atol=1e-3), (F * z, out_r)
     assert sr["comp"][0] > prof_r["y"][sr["stage"]][0], (sr["comp"],
                                                          prof_r["y"][sr["stage"]])
+
+    # --- the cold start has to be mass-balanced -------------------------------
+    # A draw big enough that D + draw > F is perfectly legal (most of it comes
+    # straight back as the return), but only if the FIRST solve already carries
+    # the return. Unseeded it died with "bottoms rate B=-5 must be positive".
+    big = SideSection(id="SR2", kind="rectifier", draw_stage=6, return_stage=7,
+                      rate=70.0, ratio=1.0, n_stages=4)
+
+    def build_b(_si=None):
+        feeds = [(8, F, z)]
+        if big.return_comp is not None:
+            feeds.append((big.return_stage, big.return_flow, big.return_comp, 1.0))
+        liq, vap = big.draw_rates()
+        return build_solver_input(
+            n_stages=N, comps=comps, feeds=feeds,
+            draws=[(big.draw_stage, liq, vap)],
+            R=R, D=D, pressure=760.0, antoine=antoine)
+
+    prof_b = make_side_solver(solve_bubble_point, [big], build_b)(build_b(),
+                                                                 max_iter=300)
+    assert abs(prof_b["B"] - (F - D - big.product_flow)) < 1e-6, prof_b["B"]
+    assert prof_b["side_tear_residual"] < 1e-5, prof_b["side_tear_residual"]
+    assert "NOT converged" not in prof_b["message"], prof_b["message"]
     print("side_sections self-check OK")
 
 

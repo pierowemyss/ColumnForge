@@ -12,7 +12,11 @@ split failed, not merely that it did. Classes mirror the Sec 11 table:
     junction_order          both feeds land on the interior curve, but the lower
                             one is not below the upper one
     vanished_section        the junction lands on a section's own anchor, leaving
-                            that section no stages at all
+                            that section no stages at all. A WARNING on a
+                            two-section column, where a feed on the top tray is a
+                            real design; a REJECTION of an interior-curve
+                            candidate, where the next candidate can be tried
+                            instead -- see `driver._degenerate`
     profile_inverted        the assembled column's temperature falls going down
     boundary_block          required connection lies across a distillation boundary
     infeasible_entrainer    extractive manifolds cannot bridge at this E/F

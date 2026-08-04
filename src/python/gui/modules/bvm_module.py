@@ -38,12 +38,21 @@ from side_features.bvm import reactive as _rx
 from side_features.bvm.problem import build_problem
 from side_features.bvm.thermo_adapter import ColumnForgeThermo
 
-from .module_thermo import session_models
+from .module_thermo import (ENTRAINER_EB_TIP, attach_entrainer_energy_balance,
+                            live_species, session_models)
 from ..panels.sci_spin_box import SciDoubleSpinBox
 from ..plotting import TEMP_C as _TEMP_C
 from ..plotting import (CompactNavigationToolbar, active_comps, RECT_C, STRIP_C,
                         EXTRACT_C, INTER_C)
 from ..state.window_state import StreamType
+
+#: (label, `Problem.anchor_method`) for the interior-anchor combo, in the order
+#: the scratchpad lists them. No "auto" entry on purpose: the three do not agree
+#: on r_max, so which is right is a design judgement the panel should not make
+#: silently. `saddle` leads because it is what BVM has always done.
+ANCHOR_METHODS = (("Saddle manifolds", "saddle"),
+                  ("Saddle ray end (S vertex)", "ray"),
+                  ("Branch from neighbours", "continuation"))
 
 
 class BVMModuleWidget(QWidget):
@@ -59,7 +68,6 @@ class BVMModuleWidget(QWidget):
         self._thermo_note = ""
         self._entrainer_prefilled = False
         self._restored = False
-        self._nu_saved = {}                  # species -> coeff restored from .colx
         self._thread = self._worker = None
         self._setup_ui()
 
@@ -112,42 +120,39 @@ class BVMModuleWidget(QWidget):
         opf.addRow("Entrainer:", self.entrainer_combo)
         self.ef_spin = self._spin(0.0, 20.0, 0.5, decimals=3, step=0.1)
         opf.addRow("Entrainer ratio E/F:", self.ef_spin)
+        self.entrainer_eb = QCheckBox("Energy balance on the entrainer feed")
+        self.entrainer_eb.setToolTip(ENTRAINER_EB_TIP)
+        opf.addRow(self.entrainer_eb)
+        self.anchor_combo = QComboBox()
+        for label, key in ANCHOR_METHODS:
+            self.anchor_combo.addItem(label, key)
+        self.anchor_combo.setToolTip(
+            "Where the INTERIOR section's profile is started. Only consumed by a "
+            "column that has one -- extractive, or more than one feed; a "
+            "two-section column has no interior section to anchor.\n\n"
+            "Saddle manifolds -- the invariant manifolds through the section's "
+            "saddle pinch, which is the limiting profile of a strongly pinched "
+            "section. No arbitrary launch stage.\n"
+            "Saddle ray end (S vertex) -- march inward from the far end of the "
+            "stable eigendirection, i.e. the start of the extractive profile "
+            "the rectification body predicts.\n"
+            "Branch from neighbours -- launch from stages of the rectifying and "
+            "stripping profiles that lie inside this section's own region.\n\n"
+            "They do not agree on the maximum reflux; there is deliberately no "
+            "'auto'. See docs/adr/0004.")
+        opf.addRow("Interior anchor:", self.anchor_combo)
         left_col.addWidget(op)
 
+        # The reaction itself is edited on Initialization / Reactions -- it is
+        # chemistry, not a BVM lever. What stays here is the status line, because
+        # a reaction changes what THIS panel can do (ideal stages, no handoff)
+        # and a user looking at a greyed-out efficiency spin needs to see why.
         self.reaction_box = QGroupBox("Reaction (reactive distillation)")
-        self.reaction_box.setCheckable(True)
-        self.reaction_box.setChecked(False)
-        self.reaction_box.setToolTip(
-            "Chemical equilibrium on EVERY stage (Ung-Doherty transformed "
-            "compositions): one reaction, ideal stages, no rigorous handoff. "
-            "Sizing runs in transformed coordinates; the results table also shows "
-            "the physical compositions and the reaction extent per stage.")
-        rxf = QFormLayout(self.reaction_box)
-        # one spin box per species, rebuilt when the species list changes: an
-        # ordinary form row per coefficient, no table geometry to fight
-        self.nu_form = QFormLayout()
-        self.nu_form.setContentsMargins(0, 0, 0, 0)
-        self._nu_spins = {}
-        rxf.addRow(QLabel("Stoichiometry (products +, reactants −, inerts 0):"))
-        rxf.addRow(self.nu_form)
-        self.ref_combo = QComboBox()
-        self.ref_combo.setToolTip(
-            "Reference component eliminated by the transform. Pick the reaction "
-            "PRODUCT: then every transformed composition stays non-negative. A "
-            "two-product reaction (an esterification, say) has no such choice and "
-            "is reported as a geometry limit rather than mis-sized.")
-        rxf.addRow("Reference component:", self.ref_combo)
-        self.keq_a = self._spin(-50.0, 50.0, 2.303, decimals=4, step=0.1)
-        self.keq_b = self._spin(-20000.0, 20000.0, 0.0, decimals=2, step=100.0)
-        for w, tip in ((self.keq_a, "A in Keq = exp(A + B/T[K]); ln Keq at "
-                                    "infinite T. Activity-based (gamma x)."),
-                       (self.keq_b, "B in Keq = exp(A + B/T[K]) in K; 0 = "
-                                    "temperature-independent Keq.")):
-            w.setToolTip(tip)
-        rxf.addRow("Keq: A =", self.keq_a)
-        rxf.addRow("Keq: B (K) =", self.keq_b)
+        rxf = QVBoxLayout(self.reaction_box)
+        self.reaction_status = QLabel()
+        self.reaction_status.setWordWrap(True)
+        rxf.addWidget(self.reaction_status)
         left_col.addWidget(self.reaction_box)
-        self.reaction_box.toggled.connect(self._sync_reactive_enabled)
 
         adv = QGroupBox("Advanced"); adv.setCheckable(True); adv.setChecked(False)
         advf = QFormLayout(adv)
@@ -184,12 +189,19 @@ class BVMModuleWidget(QWidget):
         self.map_btn = QPushButton("Design Map"); self.map_btn.clicked.connect(self._on_map)
         self.send_btn = QPushButton("Send to Rigorous Solver")
         self.send_btn.clicked.connect(self._on_send)
-        for b in (self.size_btn, self.limits_btn, self.map_btn, self.send_btn):
+        # A sweep is minutes of work even on a pool, so it gets the same escape
+        # hatch the RBM panel has: the run is already off the GUI thread, but
+        # "responsive" is worth little if the only way out is waiting.
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        for b in (self.size_btn, self.limits_btn, self.map_btn, self.send_btn,
+                  self.cancel_btn):
             left_col.addWidget(b)
 
         self.extractive.toggled.connect(self._sync_extractive_enabled)
         self._sync_extractive_enabled(self.extractive.isChecked())
-        self._sync_reactive_enabled(self.reaction_box.isChecked())
+        self._sync_reactive_enabled(self._reactive_on())
 
         self.status = QLabel("Feed, pressure and thermo come from the shared "
                              "column setup. Stage count is computed, not entered.")
@@ -228,7 +240,7 @@ class BVMModuleWidget(QWidget):
         """(Re)populate the key/entrainer combos from the shared species list,
         preserving each selection by name across species edits upstream."""
         names = self._species_order()
-        self._refresh_nu_table(names)
+        self._sync_reaction_status()
         # Keys default to the session's chosen keys, not combo slots 0/1 -- the
         # Specifications tab already asked which two components matter, and
         # fug_module reads them the same way.
@@ -241,7 +253,6 @@ class BVMModuleWidget(QWidget):
             hk = lk + 1 if lk + 1 < len(names) else max(lk - 1, 0)
         for combo, default in ((self.lk_combo, lk),
                                (self.hk_combo, hk),
-                               (self.ref_combo, len(names) - 1),
                                (self.entrainer_combo, len(names) - 1)):
             prev = combo.currentText()
             combo.blockSignals(True)
@@ -252,27 +263,29 @@ class BVMModuleWidget(QWidget):
                                                        len(names) - 1))
             combo.blockSignals(False)
 
-    def _refresh_nu_table(self, names):
-        """Rebuild the stoichiometry rows for the current species, keeping any
-        coefficients the user already set (or restored from a `.colx`) for species
-        that survived. `_nu_saved` is what makes a restore order-proof: set_params
-        can land before the species list exists, and rebuilding must not silently
-        drop the reaction."""
-        kept = self._nu_values()
-        while self.nu_form.rowCount():
-            self.nu_form.removeRow(0)
-        self._nu_spins = {}
-        for n in names:
-            spin = self._spin(-9.0, 9.0, float(kept.get(n, 0.0)), decimals=2,
-                              step=1.0)
-            self._nu_spins[n] = spin
-            self.nu_form.addRow(f"{n}:", spin)
+    def _rx_params(self):
+        """The shared reaction, edited on Initialization / Reactions. {} = none."""
+        return dict(getattr(self.window_state, "reactions", None) or {})
 
-    def _nu_values(self):
-        """{species: coefficient} from the spin boxes, falling back to `_nu_saved`
-        for species with no row yet."""
-        return {**self._nu_saved,
-                **{n: float(s.value()) for n, s in self._nu_spins.items()}}
+    def _reactive_on(self):
+        return bool(self._rx_params().get("on"))
+
+    def _sync_reaction_status(self):
+        """Say what the shared reaction is doing to THIS panel, or that there is
+        none. The efficiency spin and the handoff button are disabled by a
+        setting on another tab, so the reason has to be visible from here."""
+        rx = self._rx_params()
+        if not rx.get("on"):
+            self.reaction_status.setText(
+                "No reaction. Set one on <b>Initialization &rarr; Reactions</b> "
+                "to size in Ung-Doherty transformed compositions.")
+            return
+        nu = {k: v for k, v in (rx.get("nu") or {}).items() if v}
+        terms = ", ".join(f"{v:+g} {k}" for k, v in nu.items()) or "(no coefficients)"
+        self.reaction_status.setText(
+            f"Reactive sizing is ON (Initialization &rarr; Reactions): {terms}; "
+            f"reference {rx.get('ref') or '?'}. Ideal stages, and the design "
+            f"cannot be sent to the rigorous solvers.")
 
     def reload_from_state(self):
         """Pull species + saved BVM knobs off window_state (one-shot, guarded by
@@ -369,20 +382,6 @@ class BVMModuleWidget(QWidget):
         if lk < 0 or hk < 0 or lk == hk:
             raise ValueError("Light and heavy keys must be two distinct species.")
 
-        # Same seam as the Txy / Phase-EQ modules, so a silent NRTL->ideal
-        # degradation is REPORTED. It matters most here: an extractive column
-        # whose entrainer has no binary parameters would otherwise be sized with
-        # the entrainer thermodynamically invisible.
-        antoine, gamma_fn, phi_fn, _label, thermo_note = session_models(
-            self.window_state, order)
-        tc = self.window_state.thermodynamics_config
-        P = tc.pressure_in_psat_unit(self.window_state.pressure)
-        dP = tc.pressure_in_psat_unit(
-            float(getattr(self.window_state, "pressure_drop", 0.0) or 0.0))
-        provider = ColumnForgeThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
-        self._thermo_note = thermo_note
-        self._order_warning = self._volatility_warning(order, antoine, P, provider)
-
         extractive = self.extractive.isChecked()
         x_E = None
         if extractive:
@@ -399,15 +398,46 @@ class BVMModuleWidget(QWidget):
                     raise ValueError("Entrainer must differ from the light/heavy keys.")
                 x_E = np.zeros(len(order)); x_E[e] = 1.0
 
+        # A species in no feed is in no stage -- but `trace_floor` seeds it into
+        # the product splits anyway, and a dead heavy one then amplifies 1/K per
+        # stage down the march. Reaction species are the exception: a product is
+        # made on the tray, not fed. See `module_thermo.live_species`.
+        rx = self._rx_params()
+        made = ([n for n, v in (rx.get("nu") or {}).items() if float(v or 0.0)]
+                if rx.get("on") else [])
+        order, z, x_E, lk, hk, dropped = live_species(order, z, x_E, lk, hk, made)
+
+        # Same seam as the Txy / Phase-EQ modules, so a silent NRTL->ideal
+        # degradation is REPORTED. It matters most here: an extractive column
+        # whose entrainer has no binary parameters would otherwise be sized with
+        # the entrainer thermodynamically invisible.
+        antoine, gamma_fn, phi_fn, _label, thermo_note = session_models(
+            self.window_state, order)
+        tc = self.window_state.thermodynamics_config
+        P = tc.pressure_in_psat_unit(self.window_state.pressure)
+        dP = tc.pressure_in_psat_unit(
+            float(getattr(self.window_state, "pressure_drop", 0.0) or 0.0))
+        provider = ColumnForgeThermo(antoine, gamma_fn=gamma_fn, phi_fn=phi_fn)
+        self._thermo_note = " ".join(filter(None, [
+            thermo_note,
+            "held at zero (in no feed): " + ", ".join(dropped) if dropped else ""]))
+        self._order_warning = self._volatility_warning(order, antoine, P, provider)
+
         reactions = self._reactions(order)
         prob = build_problem(
             comps=order, feeds=[(z, float(feed.flow), float(self.q_spin.value()))],
             pressure=P, lk=lk, hk=hk,
             rec_lk=self.rec_lk.value(), rec_hk=self.rec_hk.value(),
             x_E=x_E, extractive=extractive, reactions=reactions,
+            anchor_method=self.anchor_combo.currentData() or "saddle",
             max_stages=int(self.max_stages.value()),
             eps_stage=float(self.eps_stage.value()), dP=dP,
             efficiency=1.0 if reactions is not None else float(self.eff_spin.value()))
+        if extractive and self.entrainer_eb.isChecked():
+            note = attach_entrainer_energy_balance(
+                self.window_state, order, prob, provider, ent_stream)
+            if note:
+                self._thermo_note = (self._thermo_note + "  " + note).strip()
         if reactions is not None:
             self._order_warning = self._reactive_order_warning(prob, provider)
         self.window_state.bvm_params = self.get_params()   # mirror for save
@@ -460,8 +490,8 @@ class BVMModuleWidget(QWidget):
         """G7: entrainer combo + E/F spins are only consumed in extractive mode, so
         grey them out otherwise (the 'consumed or visibly disabled' honesty rule)."""
         for w in (self.entrainer_combo, self.ef_spin, self.ef_min_spin,
-                  self.ef_max_spin, self.ef_pts_spin):
-            w.setEnabled(bool(on) and not self.reaction_box.isChecked())
+                  self.ef_max_spin, self.ef_pts_spin, self.entrainer_eb):
+            w.setEnabled(bool(on) and not self._reactive_on())
 
     def _sync_reactive_enabled(self, on):
         """Reactive sizing runs ideal stages and has no entrainer path, so the
@@ -489,27 +519,33 @@ class BVMModuleWidget(QWidget):
         self._sync_extractive_enabled(self.extractive.isChecked())
 
     def _reactions(self, order):
-        """`Reactions` from the reaction box, or None when it is switched off."""
-        if not self.reaction_box.isChecked():
+        """`Reactions` from the shared reaction state, or None when it is off.
+
+        The validation stays here rather than in the editor: an incomplete
+        reaction is only an error at the moment something tries to size with it,
+        and the panel is where that error can be shown next to the run."""
+        rx = self._rx_params()
+        if not rx.get("on"):
             return None
-        nu_map = self._nu_values()
-        nu = np.array([[nu_map.get(n, 0.0) for n in order]], float)
+        nu_map = rx.get("nu") or {}
+        nu = np.array([[float(nu_map.get(n, 0.0)) for n in order]], float)
         if not np.any(nu):
-            raise ValueError("Reaction is enabled but every stoichiometric "
-                             "coefficient is zero.")
+            raise ValueError("Reaction is enabled (Initialization -> Reactions) "
+                             "but every stoichiometric coefficient is zero.")
         if abs(nu.sum()) > 0 and len(np.flatnonzero(nu[0] > 0)) == 0:
             raise ValueError("Reaction needs at least one product "
                              "(positive coefficient).")
-        ref_name = self.ref_combo.currentText()
+        ref_name = rx.get("ref")
         if ref_name not in order:
-            raise ValueError("Select a reference component for the reaction.")
+            raise ValueError("Select a reference component for the reaction "
+                             "(Initialization -> Reactions).")
         ref = order.index(ref_name)
         if nu[0][ref] == 0.0:
             raise ValueError(f"The reference component ({ref_name}) must take part "
                              "in the reaction (non-zero coefficient).")
         return _rx.Reactions(nu=nu, ref=[ref],
-                             keq_fn=_rx.keq_arrhenius(self.keq_a.value(),
-                                                      self.keq_b.value()))
+                             keq_fn=_rx.keq_arrhenius(float(rx.get("keq_a", 0.0)),
+                                                      float(rx.get("keq_b", 0.0))))
 
     # ------------------------------------------------------- .colx persistence
     _PARAM_SPINS = ("rec_lk", "rec_hk", "r_spin", "q_spin", "eff_spin",
@@ -523,12 +559,12 @@ class BVMModuleWidget(QWidget):
         d["lk"] = self.lk_combo.currentText()
         d["hk"] = self.hk_combo.currentText()
         d["extractive"] = self.extractive.isChecked()
+        d["entrainer_eb"] = self.entrainer_eb.isChecked()
         d["entrainer"] = self.entrainer_combo.currentText()
-        d["reaction"] = {"on": self.reaction_box.isChecked(),
-                         "nu": self._nu_values(),
-                         "ref": self.ref_combo.currentText(),
-                         "keq_a": self.keq_a.value(),
-                         "keq_b": self.keq_b.value()}
+        d["anchor_method"] = self.anchor_combo.currentData()
+        # no "reaction" key any more: it lives on window_state.reactions, which
+        # is persisted in its own right. Writing it here too would give a .colx
+        # two copies that could disagree.
         return d
 
     def set_params(self, params: dict):
@@ -546,19 +582,22 @@ class BVMModuleWidget(QWidget):
                     combo.setCurrentIndex(i)
         if "extractive" in params:
             self.extractive.setChecked(bool(params["extractive"]))
+        if "entrainer_eb" in params:
+            self.entrainer_eb.setChecked(bool(params["entrainer_eb"]))
+        if params.get("anchor_method"):
+            i = self.anchor_combo.findData(params["anchor_method"])
+            if i >= 0:
+                self.anchor_combo.setCurrentIndex(i)
+        # Migration: files written before the editor moved carry the reaction
+        # under bvm_params["reaction"]. Promote it to the shared state, but never
+        # over a reaction already there -- on a current file window_state.reactions
+        # is the copy the user edited and bvm_params has no such key at all.
         rxp = params.get("reaction") or {}
-        if rxp:
-            self._nu_saved = {k: float(v) for k, v in (rxp.get("nu") or {}).items()}
-            self._nu_spins = {}               # drop stale rows so the file wins
-            self._refresh_nu_table(self._species_order())
-            if rxp.get("ref"):
-                i = self.ref_combo.findText(rxp["ref"])
-                if i >= 0:
-                    self.ref_combo.setCurrentIndex(i)
-            for key, spin in (("keq_a", self.keq_a), ("keq_b", self.keq_b)):
-                if key in rxp:
-                    spin.setValue(float(rxp[key]))
-            self.reaction_box.setChecked(bool(rxp.get("on")))
+        if rxp and self.window_state is not None and \
+                not getattr(self.window_state, "reactions", None):
+            self.window_state.reactions = dict(rxp)
+        self._sync_reaction_status()
+        self._sync_reactive_enabled(self._reactive_on())
 
     # --------------------------------------------------------- threaded runs
     def _run_bg(self, label, job, on_done):
@@ -575,8 +614,18 @@ class BVMModuleWidget(QWidget):
         buttons = (self.size_btn, self.limits_btn, self.map_btn, self.send_btn)
         for b in buttons:
             b.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
 
-        self._worker = SolverWorker(lambda report, cancel: job())
+        # A job that declares parameters gets the worker's report/cancel hooks;
+        # one that takes none (a single sizing) stays supported as it was.
+        import inspect
+        wants = bool(inspect.signature(job).parameters)
+        self._worker = SolverWorker(
+            (lambda report, cancel: job(report=report, cancel=cancel)) if wants
+            else (lambda report, cancel: job()))
+        self._worker.progress.connect(
+            lambda done, total, _r: self.status.setText(
+                f"{label} ... {done}/{total}"))
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -590,8 +639,16 @@ class BVMModuleWidget(QWidget):
         self._thread.finished.connect(lambda: self._run_done(buttons))
         self._thread.start()
 
+    def _on_cancel(self):
+        if self._worker is not None:
+            self._worker.cancel()
+            self.status.setText("Cancelling ...")
+
     def _run_done(self, buttons):
+        from side_features.bvm import parallel
+        parallel.shutdown()          # let the sweep's worker processes go
         self._thread = self._worker = None
+        self.cancel_btn.setEnabled(False)
         for b in buttons:
             b.setEnabled(True)
 
@@ -645,6 +702,17 @@ class BVMModuleWidget(QWidget):
             ex = ex[np.isfinite(ex)]
             if ex.size:
                 msg += f"; extent {ex.min():.3f}..{ex.max():.3f} mol/mol"
+        # Say what each junction actually closed to. "Feasible" covers both an
+        # exact crossing (~1e-16) and a near miss accepted inside one stage of
+        # travel, and the stage counts either side of a feed are only as good as
+        # that number -- so it does not get to stay implicit.
+        near = [j for j in design.get("junctions", ()) if j["approximate"]]
+        if near:
+            msg += (". Approximate junction"
+                    + ("s" if len(near) > 1 else "") + ": "
+                    + ", ".join(f"{j['pair']} closest approach {j['dmin']:.3f} "
+                                f"(within one stage, {j['tol']:.3f})"
+                                for j in near))
         rmin, efmin = design.get("R_min"), design.get("EF_min")
         if rmin is not None:
             msg += f". R_min={rmin:.2f}"
@@ -678,9 +746,9 @@ class BVMModuleWidget(QWidget):
             return
         R_hi = float(self.rmax_spin.value())
         if not self.extractive.isChecked():
-            def job():
+            def job(report, cancel):
                 lo, hi = _driver.reflux_band(prob, provider, r_hi=R_hi,
-                                             n_scan=16)
+                                             n_scan=16, cancelled=cancel)
                 if lo is None:
                     return {"design": None, "band": (None, None)}
                 # size just ABOVE R_min: at R_min itself the stage count
@@ -698,14 +766,18 @@ class BVMModuleWidget(QWidget):
                            max(self.ef_max_spin.value(), 1e-6),
                            int(self.ef_pts_spin.value()))
         EF = self.ef_spin.value()
-        self._run_bg(
-            "R_min / min E/F",
-            lambda: {"region": _driver.operating_region(
-                         prob, provider, EF_grid=grid, r_hi=R_hi, n_scan=12),
-                     "band": _driver.reflux_band(prob, provider, EF=EF,
-                                                 r_hi=R_hi, n_scan=16),
-                     "EF": EF},
-            self._on_limits_done)
+        def job(report, cancel):
+            reg = _driver.operating_region(
+                prob, provider, EF_grid=grid, r_hi=R_hi, n_scan=12,
+                on_step=lambda d, t: report(d, t + 1, 0.0), cancelled=cancel)
+            if cancel():
+                return {"region": reg, "band": (None, None), "EF": EF}
+            band = _driver.reflux_band(prob, provider, EF=EF, r_hi=R_hi,
+                                       n_scan=16, cancelled=cancel)
+            report(len(grid) + 1, len(grid) + 1, 0.0)
+            return {"region": reg, "band": band, "EF": EF}
+
+        self._run_bg("R_min / min E/F", job, self._on_limits_done)
 
     def _on_rmin_done(self, payload):
         lo, hi = payload["band"]
@@ -758,7 +830,9 @@ class BVMModuleWidget(QWidget):
             return
         R_grid = np.linspace(0.2, self.rmax_spin.value(), int(self.map_pts.value()))
         self._run_bg("Design map",
-                     lambda: _mbvm_api.feasibility_map(prob, provider, R_grid=R_grid),
+                     lambda report, cancel: _mbvm_api.feasibility_map(
+                         prob, provider, R_grid=R_grid,
+                         on_step=lambda d, t: report(d, t, 0.0), cancelled=cancel),
                      self._on_map_done)
 
     def _on_map_done(self, fm):
@@ -1174,6 +1248,7 @@ def _demo():
     _src_py = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))  # src/python
     sys.path.insert(0, _src_py)
     sys.path.insert(0, os.path.dirname(_src_py))                           # src (for side_features)
+    from gui.panels.reactions_panel import ReactionsPanel
     from gui.state.window_state import Species, Stream, StreamType, WindowState
     from PySide6.QtWidgets import QApplication
 
@@ -1287,12 +1362,18 @@ def _demo():
     # accuracy is a documented ceiling (BVM_REACTIVE_XFAIL in test_validation),
     # not something this widget check should pin.
     r.rec_lk.setValue(0.98); r.rec_hk.setValue(0.02); r.r_spin.setValue(3.0)
-    r.reaction_box.setChecked(True)
-    for name, nu in (("n-butane", 0.0), ("MTBE", 1.0), ("methanol", -1.0),
-                     ("isobutene", -1.0)):
-        r._nu_spins[name].setValue(nu)
-    r.ref_combo.setCurrentText("MTBE")
-    r.keq_a.setValue(-16.33); r.keq_b.setValue(6820.0)
+    # the reaction is edited on Initialization -> Reactions and reaches this
+    # panel through window_state, so drive it the way that page does
+    rx_panel = ReactionsPanel()
+    rx_panel.set_window_state(rws)
+    rx_panel.set_params({"on": True, "ref": "MTBE", "keq_a": -16.33,
+                         "keq_b": 6820.0,
+                         "nu": {"n-butane": 0.0, "MTBE": 1.0, "methanol": -1.0,
+                                "isobutene": -1.0}})
+    assert rws.reactions["on"] and rws.reactions["ref"] == "MTBE"
+    r._refresh_species()
+    r._sync_reactive_enabled(r._reactive_on())
+    assert "Reactive sizing is ON" in r.reaction_status.text()
     # honesty wiring: what reactive mode can't consume is greyed out, not read
     assert not r.eff_spin.isEnabled() and not r.extractive.isEnabled()
     assert not r.send_btn.isEnabled() and "no reaction terms" in r.send_btn.toolTip()
@@ -1308,15 +1389,21 @@ def _demo():
     assert r.data_table.rowCount() == r._design["N_total"]
     r._on_send()
     assert "cannot be sent" in r.status.text(), r.status.text()
-    # reaction spec round-trips through the .colx snapshot
-    snap_r = r.get_params()
-    assert snap_r["reaction"]["on"] and snap_r["reaction"]["ref"] == "MTBE"
-    r2 = BVMModuleWidget(window_state=rws); r2._refresh_species()
-    r2.set_params(snap_r)
-    assert r2.reaction_box.isChecked()
-    assert r2._nu_values() == {"n-butane": 0.0, "MTBE": 1.0, "methanol": -1.0,
-                               "isobutene": -1.0}, r2._nu_values()
-    assert abs(r2.keq_a.value() - (-16.33)) < 1e-9 and r2.keq_b.value() == 6820.0
+    # the reaction round-trips through the Reactions panel, and NOT through
+    # bvm_params -- two copies in one .colx could disagree
+    assert "reaction" not in r.get_params()
+    rx2 = ReactionsPanel(); rx2.set_window_state(rws)
+    assert rx2.enabled.isChecked() and rx2.ref_combo.currentText() == "MTBE"
+    assert rx2.nu_values() == {"n-butane": 0.0, "MTBE": 1.0, "methanol": -1.0,
+                               "isobutene": -1.0}, rx2.nu_values()
+    assert abs(rx2.keq_a.value() - (-16.33)) < 1e-9 and rx2.keq_b.value() == 6820.0
+    # ...and a file written BEFORE the move still loads its reaction
+    old = WindowState(); old.species = dict(rws.species)
+    r3 = BVMModuleWidget(window_state=old); r3._refresh_species()
+    r3.set_params({"reaction": {"on": True, "ref": "MTBE", "keq_a": -16.33,
+                                "keq_b": 6820.0, "nu": {"MTBE": 1.0}}})
+    assert old.reactions.get("on") and old.reactions["ref"] == "MTBE"
+    assert r3._reactive_on() and not r3.eff_spin.isEnabled()
     r.view_combo.setCurrentIndex(1); r.view_combo.setCurrentIndex(0)   # both render
 
     # --- the R_min button: a picture, not just a number in the status line.

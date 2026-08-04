@@ -331,6 +331,14 @@ class WindowState:
         # settings on every File->Save.
         self.rbm_params: dict = {}
 
+        # One equilibrium reaction, edited on Initialization / Reactions:
+        # {on, nu: {species: coefficient}, ref, keq_a, keq_b}. Shared state
+        # because a reaction is chemistry, not a property of one sizing method --
+        # though BVM is currently the only thing that reads it (the panel says
+        # so). Older .colx files carry the same dict under
+        # bvm_params["reaction"]; `bvm_module.set_params` still honours it.
+        self.reactions: dict = {}
+
         # Spec/DoF: structured extra specs (e.g. key-recovery) + CMO flag.
         # Condenser/reboiler/side-draw specs are derived from config in
         # collect_specs(); self.specs holds anything not on those panels yet.
@@ -365,6 +373,7 @@ class WindowState:
         self.modules = {}
         self.bvm_params = {}
         self.rbm_params = {}
+        self.reactions = {}
         self.specs = []
         self.light_key_index = 0
         self.heavy_key_index = None
@@ -408,7 +417,7 @@ class WindowState:
     _PERSIST = ("num_stages", "pressure", "pressure_drop", "stage_efficiency",
                 "species", "streams", "condenser_config", "reboiler_config",
                 "thermodynamics_config", "modules", "bvm_params", "rbm_params",
-                "specs",
+                "reactions", "specs",
                 "light_key_index", "heavy_key_index",
                 "display_units", "solver_mode")
 

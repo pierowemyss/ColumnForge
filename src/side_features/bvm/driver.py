@@ -11,6 +11,7 @@ Stage 0 = distillate (top), matching the ColumnForge GUI convention.
 """
 
 from dataclasses import replace
+from functools import partial
 
 import numpy as np
 
@@ -21,11 +22,15 @@ from .problem import overall_balance, SideDraw, free_split_indices
 from .sections import (single_feed_chain, extractive_chain, multifeed_chain,
                        feasible)
 from .march import march_section
+from . import connect as CN
 from .connect import connect
 from .place import side_draw_stage
-from .anchor import interior_candidates
+from .anchor import interior_candidates, ray_end_candidates
+from .bodies import (TOUCH_TOL, body_distance, middle_bodies, product_bodies,
+                     viable_middle_bodies)
 from .diagnostics import classify, Finding
-from .pinch import bisect_min, feasible_band
+from .parallel import pmap
+from .pinch import bisect_min, feasible_band, pinch_points
 
 
 def _concat(top_prof, top_n, bot_prof_rev, bot_n, secs_top, secs_bot):
@@ -68,12 +73,89 @@ def _concat(top_prof, top_n, bot_prof_rev, bot_n, secs_top, secs_bot):
 #: by tens of degrees and come back.
 T_INVERSION_TOL = 5.0
 
+#: The same allowance for the one step that CROSSES A FEED, where a temperature
+#: fall is not evidence of anything wrong. An extractive column's main feed is
+#: 100 kmol/h of ~80 C liquid entering a 134 C stage -- some 40% of the liquid
+#: traffic below it -- and it drops that tray 15 K. Judging that step by the
+#: within-section number rejected valid designs (ipa/water/EG at R=0.9,
+#: E/F=3.5 stalls at exactly 15.3 K), while the failure this check exists for --
+#: an arm joining sections that are 40-90 K apart, as in `_reject_inverted`'s
+#: 79 -> 187 -> 98 -> 140 C example -- clears 25 K several times over.
+T_FEED_INVERSION_TOL = 25.0
 
-def _temperature_inversion(T):
-    """Largest downward step in a top->bottom temperature profile (0 if monotone)."""
+
+def _temperature_inversion(T, skip=()):
+    """Largest downward step in a top->bottom temperature profile (0 if monotone).
+
+    `skip` names diff indices to leave out -- the steps that cross a feed, which
+    `_inversion_verdict` judges against `T_FEED_INVERSION_TOL` instead.
+    """
     if T is None or len(T) < 2:
         return 0.0
-    return float(max(0.0, -np.min(np.diff(np.asarray(T, float)))))
+    d = np.diff(np.asarray(T, float))
+    if skip:
+        d = np.delete(d, [i for i in skip if 0 <= i < len(d)])
+    return float(max(0.0, -np.min(d))) if len(d) else 0.0
+
+
+def _inversion_verdict(T, feed_idx=()):
+    """(ok, drop, where) for an assembled top->bottom temperature profile.
+
+    Two allowances, because two different things are being tested. WITHIN a
+    section the profile is one continuous march and nothing physical makes it
+    fall by degrees, so `T_INVERSION_TOL` stays tight. ACROSS a feed the fall is
+    ordinary mixing and needs the looser `T_FEED_INVERSION_TOL`. Reporting which
+    of the two tripped matters as much as the number: "falls 15 K at the feed" and
+    "falls 15 K mid-section" are different diagnoses with different fixes.
+    """
+    feed_idx = tuple(feed_idx)
+    inner = _temperature_inversion(T, skip=feed_idx)
+    if inner > T_INVERSION_TOL:
+        return False, inner, "within a section"
+    if T is None or len(T) < 2:
+        return True, inner, ""
+    d = np.diff(np.asarray(T, float))
+    at_feed = max([0.0] + [-float(d[i]) for i in feed_idx if 0 <= i < len(d)])
+    if at_feed > T_FEED_INVERSION_TOL:
+        return False, at_feed, "across a feed"
+    return True, max(inner, at_feed), ""
+
+
+def _stage_budget(prob):
+    """Largest assembled column this problem will accept (`Problem.max_column_stages`)."""
+    cap = getattr(prob, "max_column_stages", None)
+    return int(prob.max_stages if cap is None else cap)
+
+
+def _reject_oversized(out, prob, section):
+    """Refuse a design that only closes after an uneconomic number of stages.
+
+    A pinched section reaches its neighbour eventually -- that is what a pinch
+    is -- so "the profiles meet" on its own does not say a column exists. On
+    ipa/water/EG at r=1.72, E/F=1 the extractive section met both neighbours after
+    236 stages, of which the last fifty moved ~0. Nobody builds that; the operating
+    point is simply sitting on top of R_min.
+
+    Kept SEPARATE from the geometric verdict, and the finding says so: "the
+    profiles cross but you need 354 trays" is a useful reading of where you are in
+    the design space, not a failure to compute. `_reject_inverted` is the same
+    shape of late veto for a different impossibility.
+    """
+    n = out.get("N_total")
+    cap = _stage_budget(prob)
+    if not n or n <= cap:
+        return out
+    out["feasible"] = False
+    out["findings"] = [Finding(
+        "too_many_stages", section,
+        f"the sections do meet, but only after {int(n)} stages against a budget of "
+        f"{cap}: at this operating point the column is on top of its minimum "
+        f"reflux and the stage count is not economic. Raise R or E/F, or raise "
+        f"Problem.max_column_stages if the count itself is the answer you want.")]
+    out["N_total"] = None
+    out["column"] = None
+    out["feed_stages"] = []
+    return out
 
 
 def _reject_inverted(out, findings_section):
@@ -89,14 +171,16 @@ def _reject_inverted(out, findings_section):
     col = out.get("column")
     if col is None:
         return out
-    drop = _temperature_inversion(col["T"])
-    if drop <= T_INVERSION_TOL:
+    # the step INTO a feed stage is the one that crosses that feed
+    feed_idx = [int(f) - 1 for f in out.get("feed_stages") or () if int(f) > 0]
+    ok, drop, where = _inversion_verdict(col["T"], feed_idx)
+    if ok:
         return out
     out["feasible"] = False
     out["findings"] = [Finding(
         "profile_inverted", findings_section,
-        f"assembled temperature falls {drop:.1f} K going down the column; the "
-        "junction joins sections that do not belong to one column")]
+        f"assembled temperature falls {drop:.1f} K {where} going down the "
+        "column; the junction joins sections that do not belong to one column")]
     out["N_total"] = None
     out["column"] = None
     out["feed_stages"] = []
@@ -111,7 +195,7 @@ def _base(prob, xD, xB, D, B, R):
             "lk": prob.lk, "hk": prob.hk, "feed_z": f / f.sum(),
             "R": R, "S": None, "EF": None, "R_min": None, "EF_min": None,
             "N_total": None, "feed_stages": [], "column": None,
-            "sections": {}, "profiles": {}, "connection": None}
+            "sections": {}, "profiles": {}, "connection": None, "junctions": []}
 
 
 def _dP(prob):
@@ -158,6 +242,33 @@ def _vanished_warning(name, conn, which):
         f"{conn.get('residual_vapour', float('nan')):.3g}.")
 
 
+def _junction_report(pairs, warnings):
+    """Record what each junction actually closed to, and say so when it is a miss.
+
+    `connect` returns `approximate` whenever it accepted a near miss rather than a
+    crossing, and until now nothing downstream carried that: the design said
+    `connected` and the panel drew a column, whether the two sections met at 1e-16
+    or at 0.289. Both numbers go into `design["junctions"]`, and an approximate one
+    also raises a warning, because a reader deciding whether to trust a stage count
+    needs to know which of those they are looking at.
+    """
+    rows = []
+    for name, conn in pairs:
+        if conn is None:
+            continue
+        rows.append({"pair": name, "dmin": conn["dmin"], "tol": conn["tol"],
+                     "approximate": bool(conn.get("approximate"))})
+        if conn.get("approximate"):
+            warnings.append(Finding(
+                "approximate_junction", name,
+                f"the two profiles do not cross here: closest approach "
+                f"{conn['dmin']:.3g} in liquid mole fraction, accepted because it "
+                f"is inside one stage of travel ({conn['tol']:.3g}). The feed "
+                f"location and the stage counts either side of it are only as good "
+                f"as that gap."))
+    return rows
+
+
 def _at_anchor(n):
     """True when a junction index sits exactly on its profile's first vertex.
 
@@ -176,6 +287,29 @@ def _at_anchor(n):
     return float(n) <= 1e-9
 
 
+def _degenerate(conn, n_used):
+    """A junction that closed on an anchor rather than on a profile.
+
+    Two things have to be true at once. The junction is a NEAR MISS -- `connect`
+    returned `approximate`, so the two curves never crossed and the match was
+    accepted only because it fits inside one stage of travel -- and the section
+    it bounds contributes essentially nothing.
+
+    Either alone is legitimate, which is why `_at_anchor` is not simply widened.
+    An exact crossing one stage above the reboiler is a real high-reflux column,
+    and an approximate junction in the middle of a long section is the ordinary
+    4-component case, where two curves in the (C-1)-simplex are over-determined
+    and cannot be asked to meet. Together they mean the match happened because an
+    anchor happens to sit near the other curve: the profile never travelled to
+    the junction, so the section either side of it needs infinitely many stages.
+
+    This is what the extractive body containing the x_B anchor produces -- a feed
+    stage right above the reboiler -- and it is the shape `docs/adr/0004` names as
+    the reason the region clip in `anchor._ray_end` cannot be relaxed.
+    """
+    return bool(conn.get("approximate")) and n_used <= 1
+
+
 def _section_report(profiles, assembled):
     """Per-section `n` = stages the assembled COLUMN uses; `n_marched` = how far
     the profile was traced.
@@ -185,9 +319,21 @@ def _section_report(profiles, assembled):
     marched length still matters for debugging (it says where the profile ended and
     why), so keep both rather than swapping one lie for another.
     """
-    return {k: {"n": assembled.get(k, v["n"]), "n_marched": v["n"],
-                "status": v["status"]}
-            for k, v in profiles.items()}
+    out = {}
+    for k, v in profiles.items():
+        row = {"n": assembled.get(k, v["n"]), "n_marched": v["n"],
+               "status": v["status"]}
+        # only an interior section has these: which of the three anchor methods
+        # built the curve, and which rectification body it turned at. Both are
+        # choices the design depends on and neither was visible in the result --
+        # `body_id` is the name RBM uses for the same body, so the two modules'
+        # answers can be compared instead of guessed at.
+        if v.get("anchor_method"):
+            row["anchor_method"] = v["anchor_method"]
+        if v.get("body_id"):
+            row["body_id"] = v["body_id"]
+        out[k] = row
+    return out
 
 
 def _size_two(prob, tp, rect, strip, xD, xB, P, out, forced=None):
@@ -210,8 +356,12 @@ def _size_two(prob, tp, rect, strip, xD, xB, P, out, forced=None):
     # every reflux, so there is no crossing to demand. Near-miss + `approximate`,
     # same as the interior-arm and C >= 4 paths (see connect.connect).
     strict = not isinstance(tp, reactive.ReactiveThermo)
+    # step_cap only where the near miss is a resolution problem. A reactive
+    # column's profiles are held apart by the transform itself, so capping the
+    # tolerance there does not sharpen the junction, it deletes it (see `connect`).
     conn = connect(rprof, sprof, rect, tp, P, eps_stage=prob.eps_stage,
-                   efficiency=prob.efficiency, strict=strict)
+                   efficiency=prob.efficiency, strict=strict,
+                   step_cap=None if not strict else CN.STEP_CAP)
     both_pinched = rprof["pinched"] and sprof["pinched"]
     side = side_draw_stage(sprof, prob.side_draws[0]) if prob.side_draws else None
     feasible, findings = classify(profiles, conn, both_pinched=both_pinched,
@@ -228,6 +378,9 @@ def _size_two(prob, tp, rect, strip, xD, xB, P, out, forced=None):
     if _at_anchor(conn["nB"]):
         out["warnings"].append(_vanished_warning("stripping", conn, "nB"))
     out["feasible"] = feasible; out["findings"] = findings
+    if feasible:
+        out["junctions"] = _junction_report([("rectifying/stripping", conn)],
+                                            out["warnings"])
     out["sections"] = _section_report(profiles, {"rectifying": top_n + 1,
                                                  "stripping": bot_n + 1}
                                       if feasible else {})
@@ -245,7 +398,8 @@ def _size_two(prob, tp, rect, strip, xD, xB, P, out, forced=None):
         out["side_draw_stage"] = feed_stage + 1 + side["stage"]
     out["column"] = {"x": x, "y": y, "T": T, "liquid_flow": L, "vapor_flow": V,
                      "feed_stage": feed_stage}
-    return _reject_inverted(out, "connection")
+    return _reject_oversized(_reject_inverted(out, "connection"), prob,
+                             "connection")
 
 
 def _both_orientations(mprof):
@@ -269,54 +423,205 @@ def _both_orientations(mprof):
     return [mprof, rev]
 
 
-def _interior_profiles(mid_sec, tp, P, prob, tprof, bprof):
+def _viable_bodies(prob, tp, top_sec, mid_sec, bot_sec, tprof, bprof, P_mid):
+    """Middle rectification bodies worth marching inside. Returns (bodies, pinches).
+
+    Bodies are cheap -- eigenvectors, two rays, a convex-hull distance -- and they
+    say which arm of which saddle can reach both neighbours without marching
+    anything. Each surviving body fixes a saddle and both arm signs, so
+    `interior_candidates` builds one curve per body instead of the eight it used
+    to enumerate per saddle.
+
+    They PRUNE rather than decide: the hull contains points no profile visits, so
+    several bodies routinely tie at a gap of zero, and among those the ordering
+    says nothing about which one MARCHES to a junction --
+    `bodies.winning_middle_body` records the measurement. What survives goes to
+    the junction test on the marched curve, which is the only thing that can tell
+    them apart.
+
+    An empty list means the section spans no body at all -- no ternary saddle, no
+    feasible extractive separation (paper p.84). The caller falls back to
+    enumerating saddles, which is what BVM did everywhere before this, so a
+    face-saddle section still gets its chance.
+    """
+    ps = pinch_points(mid_sec, tp, P_mid, down=True)
+    mids = middle_bodies(ps, mid_sec)
+    if not mids:
+        return [], ps
+    # the product-anchored neighbours: their profiles start AT the product, so
+    # the anchor is the composition already marched from.
+    tops = product_bodies(pinch_points(top_sec, tp, prob.pressure), tprof["X"][0])
+    bots = product_bodies(pinch_points(bot_sec, tp, _P_bot(prob)), bprof["X"][0])
+    return [mids[j] for j in viable_middle_bodies(tops, mids, bots)], ps
+
+
+def _launch_stages(mid_sec, src, body):
+    """Stages of a neighbouring profile a continuation anchor may start from.
+
+    With a middle rectification body given, the test is membership in THAT body:
+    the body is the hull of the limiting profile S -> x* -> E, so a stage outside
+    it is a stage the interior section does not run through, and continuing from
+    it builds a curve inside a different body than the one the junctions were
+    scored against. Which body is not a free choice -- `_viable_bodies` has
+    already pruned to the ones that reach both neighbours, and `bodies.
+    rank_middle_bodies` orders those by where the lower junction lands.
+
+    Without a body -- an ordinary multifeed intermediate has no saddle and so no
+    body at all -- it falls back to the section's own feasible region, the hard
+    balance constraint `sections.feasible_margin` describes.
+
+    The two tests are NOT interchangeable, and on an extractive section they are
+    very nearly complementary. On ipa/water/EG at r = 2.2, E/F = 0.750 the region
+    is x_EG >= 0.355 and the winning body is
+    x* = (0.0445, 0.5939, 0.3616) S- E+:
+
+        stripping stage 0 (reboiler)  x_EG 0.664   in region     0.374 from body
+        stripping stage 1             x_EG 0.282   out           0.054 from body
+        stripping stage 2             x_EG 0.246   out           INSIDE
+
+    So the region test admits exactly one stage, the reboiler, and it is the one
+    stage in the wrong body -- the anchor that puts the feed stage on top of the
+    reboiler, which `bodies.rank_middle_bodies` calls `anchor_w ~ 1` and exists to
+    disfavour. The body test admits stage 2 upward, the third stage up from the
+    reboiler, and the curve it launches closes the lower junction exactly (0.000
+    against the reboiler anchor's 0.353).
+
+    That the two disagree is the over-reach `docs/adr/0004` records: `bodies.
+    _to_edge` walks an arm to the edge of composition space, so a body legitimately
+    extends past the section's own balance. Intersecting the two tests here is not
+    a conservative middle course -- on this case it admits nothing at all.
+    """
+    # ponytail: dedupe by COMPOSITION, not by stage index. What over-counts is the
+    # pinch tail, where consecutive stages differ by ~0 and march to the same
+    # curve. 1e-3 in mole fraction; tighten only if a case wants two launches that
+    # close together.
+    seen = []
+    for k in range(src["n"]):
+        x0 = src["X"][k]
+        inside = (feasible(mid_sec, x0) if body is None else
+                  body_distance(body["vertices"], x0[None, :]) <= TOUCH_TOL)
+        if not inside:
+            continue
+        if any(np.linalg.norm(x0 - q) < 1e-3 for q in seen):
+            continue
+        seen.append(x0)
+    return seen
+
+
+def _interior_profiles(mid_sec, tp, P, prob, tprof, bprof, bodies=None,
+                       pinches=None):
     """Candidate interior-section curves, top -> bottom (Sec 6.3 then 6.2).
 
-    Saddle-anchored manifolds first -- that is the limiting profile of a strongly
-    pinched section and needs no arbitrary launch stage. If the section has no
-    saddle (an ordinary multifeed intermediate), fall back to continuation off the
-    neighbouring profiles, but only from switch stages that are actually *inside*
-    the interior section's feasible region: a liquid outside it cannot sit on any
-    stage of that section, so launching there was never meaningful.
+    Three ways to turn a section into a curve, chosen by `prob.anchor_method`:
+
+    `saddle`        the limiting profile of a strongly pinched section, built
+                    from the invariant manifolds through its saddle. Needs no
+                    arbitrary launch stage. The default and what BVM has always
+                    done.
+    `ray`           march inward from the far end of the saddle's stable ray --
+                    the body's S vertex. See `anchor.ray_end_candidates`.
+    `continuation`  Sec 6.2: the liquid composition is continuous across a feed,
+                    so launch from stages of the NEIGHBOURING profiles that lie
+                    inside a candidate middle rectification body. See
+                    `_launch_stages`.
+
+    A section with no saddle at all (an ordinary multifeed intermediate) gets
+    continuation whatever was asked for; the other two have nothing to anchor on.
+
+    Each launch is marched BOTH ways. `mid_sec.dir` is sign(Delta), which for a
+    middle section says nothing about the way its profile runs -- the trap
+    `anchor.ray_end_candidates` and `pinch.jacobian` document -- and a march that
+    cannot take a step in the direction offered is dropped by the `n >= 2` filter,
+    so the neighbour it came from contributed nothing at all. On ipa/water/EG,
+    where Delta_ext = D - E < 0, that silently reduced continuation to the
+    rectifying profile at every E/F >= 0.75: the stripping launch died at n = 1
+    forward and marched 15 stages backward, closing the worse junction to 0.124
+    against the 0.191 the rectifying side manages (R = 1.5, E/F = 2.0). Nor is the
+    live direction guessable from which end the stage came from -- here the
+    stripping-launched curve that survives is the DOWN-map one. `_both_orientations`
+    does not cover this: reversing the array re-reads the same curve, the inverse
+    map traces a different one.
     """
     E = prob.efficiency
-    cands = interior_candidates(mid_sec, tp, P, max_stages=prob.max_stages,
-                                efficiency=E)
+    method = getattr(prob, "anchor_method", "saddle") or "saddle"
+    build = {"saddle": interior_candidates,
+             "ray": ray_end_candidates}.get(method)
+    cands = []
+    if build is not None:
+        for body in (bodies or [None]):
+            cands += build(mid_sec, tp, P, max_stages=prob.max_stages,
+                           efficiency=E, pinches=pinches, body=body)
     if cands:
         return [p for c in cands for p in _both_orientations(c)]
+    if method not in ("continuation", "saddle", "ray"):
+        raise ValueError(f"unknown anchor_method {method!r}")
 
-    out = []
-    for src in (tprof, bprof):
-        for k in range(src["n"]):
-            x0 = src["X"][k]
-            if not feasible(mid_sec, x0):
-                continue
-            m = march_section(mid_sec, x0, tp, P, prob.max_stages, efficiency=E,
-                              dP=_dP(prob), P_lim=_P_bot(prob))
-            if m["n"] >= 2:
-                out.extend(_both_orientations(m))
-    return out
+    def _from(body):
+        out = []
+        for src in (tprof, bprof):
+            for x0 in _launch_stages(mid_sec, src, body):
+                for d in (mid_sec.dir, -mid_sec.dir):
+                    # `P_lim` is the pressure at the column's OTHER end and clamps
+                    # the ramp there (march.march_section), so it follows the
+                    # march, not the section: an up-march anchored at _P_mid with
+                    # the reboiler pressure would clamp to [P_mid, P_bot] and run
+                    # flat.
+                    m = march_section(mid_sec._replace(dir=d), x0, tp, P,
+                                      prob.max_stages, efficiency=E, dP=_dP(prob),
+                                      P_lim=_P_bot(prob) if d > 0 else prob.pressure)
+                    if m["n"] >= 2:
+                        m = {**m, "anchor_method": "continuation",
+                             "swapped_arms": False,
+                             "body_id": None if body is None else body.get("id")}
+                        out.extend(_both_orientations(m))
+        return out
+
+    out = [p for body in (bodies or [None]) for p in _from(body)]
+    # No neighbouring stage inside any body: fall back to the section's own
+    # region, which is what this did before the bodies were consulted. A
+    # continuation curve from the wrong set beats no curve at all -- the junction
+    # test still has to pass -- and without this a section whose bodies all sit
+    # off the neighbouring profiles reports `cannot_anchor` with nothing tried.
+    return out or (_from(None) if bodies else out)
 
 
 def _choose_interior(prob, tp, top_sec, mid_sec, bot_sec, tprof, bprof):
     """Pick the interior curve whose two junctions actually close (rule 5).
 
-    A saddle has four arm pairs and each can be read either way up, so there are
-    eight candidate curves and nothing local to the section distinguishes them --
-    Bruggemann & Marquardt keep the one whose body meets the rectifying AND the
-    stripping body, which is exactly the double-junction test below. Ranking the
-    arms by marched length instead (what this used to inherit from `anchor`) picks
-    whichever arm happens to survive longest, and that varies per case: the same
-    code drew the extractive elbow rotated a different way in each of three files.
+    The body chosen by `_winning_body` has already answered most of this: which
+    saddle, and which way each arm points. What is left is the reading that the
+    geometry cannot settle -- both eigendirection assignments and both ways up --
+    and the checks a polytope cannot make, which is why the junction test still
+    runs on the marched curve. Ranking the arms by marched length instead (what
+    this used to inherit from `anchor`) picks whichever arm happens to survive
+    longest, and that varies per case: the same code drew the extractive elbow
+    rotated a different way in each of three files.
 
-    Returns (best, rep, out_of_order) where best is (score, pieces) or None.
+    Returns (best, rep, blocked) where best is (score, pieces) or None, and
+    `blocked` is (rank, Finding) for the rejected candidate that got furthest --
+    the reason `_fail_three` should report.
     """
     E = prob.efficiency
     P_mid, P_bot = _P_mid(prob), _P_bot(prob)
     best = None             # (score, pieces dict), minimised over candidate curves
     rep = (None, None)      # a representative (mprof, conn) for diagnostics
-    out_of_order = None     # a candidate that met both ends but in the wrong order
-    for mprof in _interior_profiles(mid_sec, tp, P_mid, prob, tprof, bprof):
+    # How far the most promising REJECTED candidate got, as (rank, Finding).
+    # Every candidate that fails does so for its own reason, and reporting the
+    # wrong one is its own bug: this used to keep only the out-of-order case, so
+    # a design killed by the temperature check was reported as `junction_order`
+    # -- a message describing a different arm entirely, printed next to a crossing
+    # gap of 0.000. Ranks ascend with how much of the test the candidate passed,
+    # so the surviving reason is the informative one.
+    blocked = None
+    def _block(rank, cls, detail):
+        nonlocal blocked
+        if blocked is None or rank > blocked[0]:
+            blocked = (rank, Finding(cls, mid_sec.name, detail))
+
+    bodies, pinches = _viable_bodies(prob, tp, top_sec, mid_sec, bot_sec,
+                                     tprof, bprof, P_mid)
+    for mprof in _interior_profiles(mid_sec, tp, P_mid, prob, tprof, bprof,
+                                    bodies=bodies, pinches=pinches):
         # both junctions sit on the SAME interior curve; the interior stage count
         # is the arc length between them, so they must also be in top->bottom order.
         # strict=False: both junctions land on a saddle-launched manifold arm, not
@@ -326,16 +631,40 @@ def _choose_interior(prob, tp, top_sec, mid_sec, bot_sec, tprof, bprof):
                      eps_stage=prob.eps_stage, efficiency=E, strict=False)
         low = connect(mprof, bprof, mid_sec, tp, P_bot,
                       eps_stage=prob.eps_stage, efficiency=E, strict=False)
-        if rep[0] is None:
-            rep = (mprof, up if not up["connected"] else low)
+        # the representative is the candidate that came CLOSEST, not the first
+        # one tried. `_fail_three` quotes its gap as "how far off is this
+        # operating point", and the first candidate is an arbitrary answer to
+        # that -- on the paper's example at E/F = 0.750 the order of the arms
+        # decided whether the miss was reported as 0.054 or 0.248, for the same
+        # infeasible verdict.
+        miss = up if up["dmin"] >= low["dmin"] else low
+        if rep[0] is None or miss["dmin"] < rep[1]["dmin"]:
+            rep = (mprof, miss)
         if not (up["connected"] and low["connected"]):
+            miss = up if not up["connected"] else low
+            where = "upper (entrainer)" if not up["connected"] else "lower"
+            _block(1 if (up["connected"] or low["connected"]) else 0,
+                   "cannot_anchor",
+                   f"{where} junction does not close: gap {miss['dmin']:.3g} "
+                   f"> tol {miss['tol']:.3g}")
             continue
         # nB of the upper junction is the entrainer-feed stage (first interior
         # stage); nA of the lower junction is the last interior stage.
-        i_lo = int(np.floor(up["nB"])); i_hi = int(np.floor(low["nA"]))
+        #
+        # Both are clamped to the curve's TRAVELLING part. A saddle-launched arm
+        # spends its tail crawling into the pinch -- on ipa/water/EG the last ~50
+        # of 236 stages move ~0 -- and `connect` already trims that before it
+        # searches, so a junction index can legitimately come back pointing into
+        # a stretch the search never considered. Slicing there counted a hundred
+        # trays of standing still as column.
+        travel = CN.travel_end(mprof["X"])
+        i_lo = min(int(np.floor(up["nB"])), travel)
+        i_hi = min(int(np.floor(low["nA"])), travel)
         if i_hi < i_lo:                # lower junction is above the upper one
-            if out_of_order is None:
-                out_of_order = (mprof, up, low, i_lo, i_hi)
+            _block(2, "junction_order",
+                   f"lower feed lands at interior stage {i_hi} which is not below "
+                   f"the upper feed at {i_lo}; the interior section has no stages "
+                   "to occupy")
             continue
         upper_n = int(np.floor(up["nA"]))
         bot_n = int(np.floor(low["nB"]))
@@ -347,7 +676,32 @@ def _choose_interior(prob, tp, top_sec, mid_sec, bot_sec, tprof, bprof):
         # rather than the whole design dying on the first one that scored well.
         T = np.concatenate([tprof["T"][:upper_n + 1], mprof["T"][i_lo:i_hi + 1],
                             bprof["T"][:bot_n + 1][::-1]])
-        if _temperature_inversion(T) > T_INVERSION_TOL:
+        # the two steps that cross a feed: into the first interior stage, and out
+        # of the last one. Both are entitled to the looser allowance.
+        ok, drop, where = _inversion_verdict(T, (upper_n, upper_n + mid_n))
+        if not ok:
+            _block(3, "profile_inverted",
+                   f"both junctions close (gaps {up['dmin']:.3g} / "
+                   f"{low['dmin']:.3g}) but the assembled temperature falls "
+                   f"{drop:.1f} K {where} going down the column; the arm joins "
+                   "sections that do not belong to one column")
+            continue
+        # A near-miss junction bounding a section with no stages in it is not a
+        # design (`_degenerate`). Rejected HERE rather than at the end, so the
+        # next candidate gets its turn -- that is the whole difference from the
+        # blanket veto `_vanished_warning` argues against, which had nothing to
+        # fall through to.
+        deg = [(c, n, nm) for c, n, nm in ((up, upper_n, top_sec.name),
+                                           (low, bot_n, bot_sec.name))
+               if _degenerate(c, n)]
+        if deg:
+            conn, n_used, which = deg[0]
+            _block(4, "vanished_section",
+                   f"the {which} section gets {n_used} stage(s) and its junction "
+                   f"is a near miss ({conn['dmin']:.3g} against tol "
+                   f"{conn['tol']:.3g}), not a crossing: the profile does not "
+                   f"travel to the junction, so this arm needs infinitely many "
+                   f"stages to reach it")
             continue
         collapsed = _at_anchor(up["nA"]) or _at_anchor(low["nB"])
         # rank candidates by how exactly their junctions close, not by fewest
@@ -357,13 +711,19 @@ def _choose_interior(prob, tp, top_sec, mid_sec, bot_sec, tprof, bprof):
         # A candidate that collapses a section sorts behind every one that does
         # not, whatever its residual -- it is only taken when it is all there is,
         # and then `warnings` says so rather than the design passing as ordinary.
-        score = (collapsed, up["dmin"] + low["dmin"], upper_n + mid_n + bot_n)
+        # `swapped_arms` leads: pairing the saddle's two eigendirections to the
+        # two ends the other way round (anchor.interior_candidates, rule 5) is a
+        # fallback for a section the physical reading cannot make a column out of,
+        # so it must never outrank a candidate that reading produced -- otherwise
+        # a swapped arm's tighter junction quietly replaces the real design.
+        score = (mprof.get("swapped_arms", False), collapsed,
+                 up["dmin"] + low["dmin"], upper_n + mid_n + bot_n)
         if best is None or score < best[0]:
             best = (score, {"upper_n": upper_n, "mprof": mprof, "i_lo": i_lo,
                             "i_hi": i_hi, "mid_n": mid_n, "bot_n": bot_n,
                             "conn": low, "conn_upper": up,
                             "collapsed": collapsed})
-    return best, rep, out_of_order
+    return best, rep, blocked
 
 
 def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive,
@@ -400,19 +760,33 @@ def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive,
                                tprof, mprof, bprof, best[1], out, extractive,
                                forced=True)
 
-    best, rep, out_of_order = _choose_interior(prob, tp, top_sec, mid_sec, bot_sec,
-                                               tprof, bprof)
+    best, rep, blocked = _choose_interior(prob, tp, top_sec, mid_sec, bot_sec,
+                                          tprof, bprof)
     pieces = best[1] if best is not None else None
     if best is None:
         return _fail_three(out, top_sec, mid_sec, bot_sec, tprof, bprof, rep,
-                           out_of_order, extractive)
+                           blocked, extractive)
     return _assemble_three(prob, tp, P, top_sec, mid_sec, bot_sec,
                            tprof, pieces["mprof"], bprof, pieces, out, extractive)
 
 
-def _fail_three(out, top_sec, mid_sec, bot_sec, tprof, bprof, rep, out_of_order,
+def _fail_three(out, top_sec, mid_sec, bot_sec, tprof, bprof, rep, blocked,
                 extractive):
-    """Classified verdict when no candidate interior curve produced a column."""
+    """Classified verdict when no candidate interior curve produced a column.
+
+    `blocked` is (rank, Finding) for the rejected candidate that got furthest
+    (see `_choose_interior`). Which of the two accounts leads depends on how far
+    that candidate got:
+
+    rank >= 2  both junctions closed, and the candidate died on the ordering or
+               the temperature check. `classify` cannot see either -- it reads
+               the profiles and would say "pinched apart", which is simply untrue
+               of a pair that met at 1e-17. The specific reason leads.
+    rank <= 1  a junction genuinely failed to close, which is what `classify` is
+               for: it can tell an entrainer shortage from a reflux shortage from
+               a section that never reached its region. Its verdict leads and the
+               junction gap follows as context.
+    """
     mprof_rep, conn = rep
     if mprof_rep is None:
         mprof_rep = {"X": tprof["X"][:1], "Y": tprof["Y"][:1], "T": tprof["T"][:1],
@@ -421,15 +795,9 @@ def _fail_three(out, top_sec, mid_sec, bot_sec, tprof, bprof, rep, out_of_order,
     both_pinched = mprof_rep.get("pinched", False) and bprof["pinched"]
     _, findings = classify(profiles, conn, both_pinched=both_pinched,
                            extractive=extractive)
-    if out_of_order is not None and not findings:
-        # both junctions landed on the interior curve, but the lower one sits at or
-        # above the upper one -- the interior section would have to run backwards,
-        # so there is no column here even though every individual test "connected".
-        _, _, _, i_lo, i_hi = out_of_order
-        findings = [Finding("junction_order", mid_sec.name,
-                            f"lower feed lands at interior stage {i_hi} which is "
-                            f"not below the upper feed at {i_lo}; the interior "
-                            "section has no stages to occupy")]
+    if blocked is not None:
+        rank, finding = blocked
+        findings = ([finding] + findings) if rank >= 2 else (findings + [finding])
     if not findings:
         findings = [Finding("cannot_anchor", mid_sec.name,
                             "no interior profile reaches both feeds at this "
@@ -462,6 +830,9 @@ def _assemble_three(prob, tp, P, top_sec, mid_sec, bot_sec, tprof, mprof, bprof,
         out["warnings"].append(_vanished_warning(bot_sec.name, pieces["conn"], "nB"))
     out["feasible"] = True
     out["findings"] = []
+    out["junctions"] = _junction_report(
+        [(f"{top_sec.name}/{mid_sec.name}", up_conn),
+         (f"{mid_sec.name}/{bot_sec.name}", pieces.get("conn"))], out["warnings"])
     out["sections"] = _section_report(
         {top_sec.name: tprof,
          mid_sec.name: {**mprof, "status": mprof.get("status", "assembled")},
@@ -489,7 +860,8 @@ def _assemble_three(prob, tp, P, top_sec, mid_sec, bot_sec, tprof, mprof, bprof,
     out["N_total"] = len(x); out["feed_stages"] = [upper_feed, lower_feed]
     out["column"] = {"x": x, "y": y, "T": T, "liquid_flow": L, "vapor_flow": Vv,
                      "feed_stage": upper_feed, "feed_stages": [upper_feed, lower_feed]}
-    return _reject_inverted(out, mid_sec.name)
+    return _reject_oversized(_reject_inverted(out, mid_sec.name), prob,
+                             mid_sec.name)
 
 
 def size_column(prob, tp, R, S=None, EF=None):
@@ -921,20 +1293,28 @@ def r_min(prob, tp, R_hi=30.0, S=None, EF=None, tol=1e-3):
 
     `tol` is the bisection's own resolution in reflux units, tightened from 1e-2.
     """
-    def feasible(R):
-        return size_column(prob, tp, R, S=S, EF=EF)["feasible"]
-    return bisect_min(feasible, 0.05, R_hi, tol=tol)
+    return bisect_min(partial(_feasible_at_R, prob, tp, S, EF), 0.05, R_hi,
+                      tol=tol)
+
+
+def _feasible_at_R(prob, tp, S, EF, R):
+    """Is there a column at this reflux? A module-level function behind a
+    `partial`, not the closure it used to be, so `pinch.bisect_min` can hand the
+    whole pre-scan to a process pool (see `parallel.pmap`)."""
+    return size_column(prob, tp, float(R), S=S, EF=EF)["feasible"]
+
+
+def _feasible_at_EF(prob, tp, R, EF):
+    return size_column(prob, tp, R, EF=float(EF))["feasible"]
 
 
 def ef_min(prob, tp, R, EF_hi=5.0, tol=1e-2):
     """Minimum entrainer-to-feed ratio by bisection (extractive mode, Sec 8)."""
-    def feasible(EF):
-        return size_column(prob, tp, R, EF=EF)["feasible"]
-    return bisect_min(feasible, 0.0, EF_hi, tol=tol)
+    return bisect_min(partial(_feasible_at_EF, prob, tp, R), 0.0, EF_hi, tol=tol)
 
 
 def reflux_band(prob, tp, EF=None, S=None, r_lo=0.05, r_hi=30.0, n_scan=24,
-                tol=1e-3):
+                tol=1e-3, cancelled=None):
     """(R_min, R_max) at this operating point; R_max is None when the band is open.
 
     `r_min` bisects the lower edge only. That is the right shape for an ordinary
@@ -943,28 +1323,40 @@ def reflux_band(prob, tp, EF=None, S=None, r_lo=0.05, r_hi=30.0, n_scan=24,
     middle section and the separation stops working. This reports both edges so
     the GUI can draw the band rather than a half-line.
     """
-    def feasible_at(R):
-        return size_column(prob, tp, float(R), S=S, EF=EF)["feasible"]
-    return feasible_band(feasible_at, r_lo, r_hi, n_scan=n_scan, tol=tol)
+    return feasible_band(partial(_feasible_at_R, prob, tp, S, EF), r_lo, r_hi,
+                         n_scan=n_scan, tol=tol, cancelled=cancelled)
+
+
+def _band_at_EF(prob, tp, S, r_lo, r_hi, n_scan, ef):
+    return reflux_band(prob, tp, EF=float(ef), S=S, r_lo=r_lo, r_hi=r_hi,
+                       n_scan=n_scan)
 
 
 def operating_region(prob, tp, EF_grid=None, S=None, r_lo=0.05, r_hi=30.0,
-                     n_scan=16):
+                     n_scan=16, on_step=None, cancelled=None):
     """Feasible (E/F, R) region: the reflux band against entrainer flow.
 
     Same shape as `side_features.rbm.driver.operating_region`, deliberately, so
     the two panels can plot it with one piece of code. `EF_min` is the smallest
     sampled entrainer ratio that admits any reflux at all -- the nose where the
     two reflux bounds meet.
+
+    One entrainer ratio is a whole reflux band -- dozens of columns -- so the
+    ratios go to a process pool (`parallel.pmap`) and the bands inside them stay
+    serial. `on_step(done, total)` and `cancelled()` are the GUI's hooks; a
+    cancelled sweep keeps NaN for the ratios it never reached.
     """
     if EF_grid is None:
         EF_grid = np.linspace(0.2, 2.0, 10)
     EFs = np.atleast_1d(np.asarray(EF_grid, float))
     lo = np.full(len(EFs), np.nan)
     hi = np.full(len(EFs), np.nan)
-    for i, ef in enumerate(EFs):
-        a, b = reflux_band(prob, tp, EF=float(ef), S=S, r_lo=r_lo, r_hi=r_hi,
-                           n_scan=n_scan)
+    bands = pmap(partial(_band_at_EF, prob, tp, S, r_lo, r_hi, n_scan),
+                 [float(ef) for ef in EFs], on_step=on_step, cancelled=cancelled)
+    for i, band in enumerate(bands):
+        if band is None:                     # cancelled before reaching this one
+            continue
+        a, b = band
         if a is not None:
             lo[i] = a
             hi[i] = r_hi if b is None else b
@@ -975,11 +1367,22 @@ def operating_region(prob, tp, EF_grid=None, S=None, r_lo=0.05, r_hi=30.0,
             "operating": None}
 
 
-def feasibility_map(prob, tp, R_grid, S_grid=None, EF_grid=None):
+def _map_point(prob, tp, rse):
+    """One (R, S, E/F) grid point -> (feasible, stages). Returns the two numbers
+    rather than the design, so a process pool ships back 16 bytes and not a full
+    set of profiles."""
+    R, S, E = rse
+    d = size_column(prob, tp, R, S=S, EF=E)
+    return bool(d["feasible"]), int(d["N_total"]) if d["feasible"] else -1
+
+
+def feasibility_map(prob, tp, R_grid, S_grid=None, EF_grid=None,
+                    on_step=None, cancelled=None):
     """Sweep (R, S, EF) -> feasibility + stage-count grids (Sec 10).
 
     Returns dict(R, S, EF, feasible (bool grid), stages (int grid, -1 if not)).
     S_grid/EF_grid default to [None] (single value) so a plain R sweep is 1-D.
+    The grid points are independent, so they go to `parallel.pmap`.
     """
     Rs = np.atleast_1d(R_grid)
     Ss = np.atleast_1d(S_grid) if S_grid is not None else np.array([None])
@@ -987,15 +1390,15 @@ def feasibility_map(prob, tp, R_grid, S_grid=None, EF_grid=None):
     shape = (len(Rs), len(Ss), len(Es))
     feas = np.zeros(shape, bool)
     stages = np.full(shape, -1, int)
-    for i, R in enumerate(Rs):
-        for j, S in enumerate(Ss):
-            for k, E in enumerate(Es):
-                d = size_column(prob, tp, float(R),
-                                S=(None if S is None else float(S)),
-                                EF=(None if E is None else float(E)))
-                feas[i, j, k] = d["feasible"]
-                if d["feasible"]:
-                    stages[i, j, k] = d["N_total"]
+    points = [(float(R), None if S is None else float(S),
+               None if E is None else float(E))
+              for R in Rs for S in Ss for E in Es]
+    for (i, j, k), got in zip(np.ndindex(shape),
+                              pmap(partial(_map_point, prob, tp), points,
+                                   on_step=on_step, cancelled=cancelled)):
+        if got is None:                      # cancelled before reaching this one
+            continue
+        feas[i, j, k], stages[i, j, k] = got
     return {"R": Rs, "S": Ss, "EF": Es, "feasible": feas.squeeze(),
             "stages": stages.squeeze()}
 
@@ -1016,6 +1419,19 @@ def _demo():
     assert d["feasible"], d["findings"]
     col = d["column"]
     assert col["x"].shape[0] == d["N_total"]
+
+    # every feasible design says what its junctions actually closed to, and a
+    # crossing is reported as a crossing rather than as a tolerance (R4).
+    assert d["junctions"] and not d["junctions"][0]["approximate"]
+    assert d["junctions"][0]["dmin"] < 1e-9, d["junctions"]
+
+    # the economic gate: the same design, refused for being uneconomic, and the
+    # finding must name that rather than blame the geometry (R3).
+    tight = size_column(replace(prob, max_column_stages=d["N_total"] - 1), tp, R=4.0)
+    assert not tight["feasible"] and tight["N_total"] is None
+    assert tight["findings"][0].cls == "too_many_stages", tight["findings"]
+    assert size_column(replace(prob, max_column_stages=d["N_total"]), tp,
+                       R=4.0)["feasible"], "the budget is inclusive"
     assert np.allclose(col["x"][0], d["xD"], atol=1e-6), "stage 0 is the distillate"
     assert np.allclose(col["x"][-1], d["xB"], atol=1e-6), "last stage is the bottoms"
     assert col["T"][-1] > col["T"][0], "reboiler hotter than condenser"

@@ -52,6 +52,15 @@ pinches: two straight segments are a poor stand-in for two curves, and the
 result is a body gap that shrinks smoothly without reaching zero. When a verdict
 looks wrong, plot the pinches and count them before believing it.
 
+An EXTRACTIVE middle section has two more things to know about it. First it has
+no product to anchor on, so `sec.dir = sign(D - E)` is not the direction its
+profile runs and `driver.analyze` forces the down map -- without that, the same
+topology reads with stable and unstable swapped on either side of E = D. Second,
+its bodies come only from TERNARY saddles (`bodies.BRANCH_TOL`); no ternary
+saddle means no body and an infeasible verdict, which is the paper's own
+criterion (p.84) rather than a numerical failure. The panel says so when it
+happens.
+
 Module map:
     pinch      pinch equations, branch continuation in reflux, eigenstructure
     bodies     rectification-body construction + convex-hull distance
@@ -62,6 +71,15 @@ Sections, the difference-point algebra and the thermo adapter are shared with
 `side_features.bvm` rather than duplicated: the operating line y = a x + bvec is
 the same object in both methods, and RBM's contribution is the geometry built on
 top of it.
+
+So, now, are the pinches and the bodies. `rbm.pinch` and `rbm.bodies` are
+re-export shims over `bvm.pinch` and `bvm.bodies`; the dependency arrow still
+points rbm -> bvm and always did. BVM needs the same geometry to decide which
+body its interior section is going to march inside before it marches anything,
+and `bodies.winning_middle_body` is shared on purpose so the two modules cannot
+disagree about which body is active on a column they are both shown. Every body
+carries a `body_id` -- the saddle and the two arm signs -- which is the name to
+compare across the two panels.
 """
 
 __all__ = ["pinch", "bodies", "driver", "api"]

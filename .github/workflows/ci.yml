@@ -24,4 +24,4 @@ jobs:
       - name: Lint (pyflakes)
         run: pyflakes src/python/core src/python/gui src/python/tests
       - name: Test
-        run: python -m pytest src/python/tests/ src/side_features/bvm/tests/ -q
+        run: python -m pytest src/python/tests/ src/side_features/bvm/tests/ src/side_features/rbm/tests/ -q

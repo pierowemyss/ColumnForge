@@ -20,18 +20,24 @@ from side_features.bvm.sections import single_feed_chain
 from side_features.bvm.thermo_adapter import ColumnForgeThermo
 from side_features.rbm import bodies as B
 from side_features.rbm import pinch as P
-from side_features.rbm.driver import analyse, reflux_band
+from side_features.rbm.driver import analyze, reflux_band
 from side_features.rbm.pinch import pinch_points, solve_pinch
 
-BTX = np.array([(6.90565, 1211.033, 220.79),
-                (6.95464, 1344.8, 219.48),
-                (6.99052, 1453.43, 215.31)])
+BTX = np.array(
+    [(6.90565, 1211.033, 220.79), (6.95464, 1344.8, 219.48), (6.99052, 1453.43, 215.31)]
+)
 Z = np.array([0.4, 0.35, 0.25])
 
 
 def btx(**kw):
-    return build_problem(["benzene", "toluene", "xylene"], [(Z, 100.0, 1.0)],
-                         760.0, rec_lk=0.98, rec_hk=0.02, **kw)
+    return build_problem(
+        ["benzene", "toluene", "xylene"],
+        [(Z, 100.0, 1.0)],
+        760.0,
+        rec_lk=0.98,
+        rec_hk=0.02,
+        **kw,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -40,6 +46,7 @@ def tp():
 
 
 # -- 1. the geometry ------------------------------------------------------
+
 
 def test_hull_distance_is_a_real_distance():
     """Checked against answers that can be worked out by hand."""
@@ -58,14 +65,24 @@ def test_hull_distance_is_a_real_distance():
 
 def test_chains_are_strictly_monotone_and_maximal():
     def pk(n, kind, x):
-        return {"in_simplex": True, "n_stable": n, "kind": kind,
-                "x": np.array(x, float), "eigvals": np.ones(2),
-                "eigvecs": np.eye(2), "order": np.array([0, 1])}
+        return {
+            "in_simplex": True,
+            "n_stable": n,
+            "kind": kind,
+            "x": np.array(x, float),
+            "eigvals": np.ones(2),
+            "eigvecs": np.eye(2),
+            "order": np.array([0, 1]),
+        }
 
-    ps = [pk(0, "unstable_node", [1, 0, 0]), pk(1, "saddle", [0, 1, 0]),
-          pk(1, "saddle", [0, 0.5, 0.5]), pk(2, "stable_node", [0, 0, 1])]
+    ps = [
+        pk(0, "unstable_node", [1, 0, 0]),
+        pk(1, "saddle", [0, 1, 0]),
+        pk(1, "saddle", [0, 0.5, 0.5]),
+        pk(2, "stable_node", [0, 0, 1]),
+    ]
     chs = B.chains(ps)
-    assert len(chs) == 2                       # one per n_stable==1 alternative
+    assert len(chs) == 2  # one per n_stable==1 alternative
     for ch in chs:
         ns = [p["n_stable"] for p in ch]
         # strictly increasing and maximal -- but starting at 1, because a profile
@@ -75,16 +92,31 @@ def test_chains_are_strictly_monotone_and_maximal():
 
     # pinches outside the simplex are never used: a body has to live in
     # composition space to intersect another one there
-    out = pk(1, "saddle", [1.4, -0.4, 0.0]); out["in_simplex"] = False
+    out = pk(1, "saddle", [1.4, -0.4, 0.0])
+    out["in_simplex"] = False
     assert all(out not in ch for ch in B.chains(ps + [out]))
 
 
 def test_middle_bodies_follow_the_paper_eigenvector_rules():
-    """Paper p.100 rules 3-5: start along the most stable eigenvector, end along
-    the most unstable, both directions of each -> four bodies for one chain."""
-    saddle = {"in_simplex": True, "n_stable": 1, "kind": "saddle",
-              "x": np.array([0.3, 0.3, 0.4]), "eigvals": np.array([2.0, 0.5]),
-              "eigvecs": np.eye(2), "order": np.array([0, 1])}
+    """Paper p.100 rules 3-5: start along the STABLE eigenvector (the profile
+    arrives along it), end along the unstable one, both directions of each ->
+    four bodies for one chain.
+
+    |lambda| = (2.0, 0.5) on the identity basis, so the stable direction is the
+    second column and S must move in (0, 1, -1), E in (1, 0, -1). The paper words
+    rules 3-4 the other way round ("most stable (largest eigenvalue)"); that is a
+    different sign convention, not a different construction.
+    """
+    saddle = {
+        "in_simplex": True,
+        "n_stable": 1,
+        "kind": "saddle",
+        "k_gap": 0.0,
+        "x": np.array([0.3, 0.3, 0.4]),
+        "eigvals": np.array([2.0, 0.5]),
+        "eigvecs": np.eye(2),
+        "order": np.array([0, 1]),
+    }
     bs = B.middle_bodies([saddle])
     assert len(bs) == 4
     for b in bs:
@@ -92,9 +124,22 @@ def test_middle_bodies_follow_the_paper_eigenvector_rules():
         assert v.min() > -1e-9 and abs(v.sum(1) - 1.0).max() < 1e-6
         # the saddle itself is always a vertex, between its two extensions
         assert np.any(np.all(np.isclose(v, saddle["x"], atol=1e-9), axis=1))
+        for pt, want in ((b["start"], [0.0, 1.0, -1.0]), (b["end"], [1.0, 0.0, -1.0])):
+            d = pt - saddle["x"]
+            d = d / np.linalg.norm(d)
+            want = np.asarray(want, float)
+            want /= np.linalg.norm(want)
+            assert abs(abs(float(d @ want)) - 1.0) < 1e-9, (pt, want)
+
+    # a face saddle spans nothing, and a section with only face saddles gets no
+    # body at all -- no ternary saddle, no feasible extractive split (p.84)
+    face = dict(saddle, x=np.array([0.6, 0.005, 0.395]), k_gap=0.4)
+    assert B.middle_bodies([face]) == []
+    assert len(B.middle_bodies([saddle, face])) == 4
 
 
 # -- 2. cross-method ------------------------------------------------------
+
 
 def test_pinch_points_really_solve_the_pinch_equation(tp):
     """Every pinch is a solve -- and the one exception says how far off it is.
@@ -109,6 +154,7 @@ def test_pinch_points_really_solve_the_pinch_equation(tp):
     """
     from side_features.bvm.pinch import pinch_residual
     from side_features.bvm.problem import overall_balance
+
     prob = btx()
     xD, xB, D, Bt = overall_balance(prob)
     rect, strip = single_feed_chain(prob, 4.0, xD, xB, D, Bt)
@@ -140,6 +186,7 @@ def test_a_smeared_spec_still_spans_a_two_dimensional_body(tp):
     degenerate body turns into a wrong feasibility verdict.
     """
     from side_features.bvm.problem import overall_balance
+
     prob = btx()
     prob.trace_floor = prob.entrainer_trace = 0.0
     xD, xB, D, Bt = overall_balance(prob)
@@ -147,14 +194,17 @@ def test_a_smeared_spec_still_spans_a_two_dimensional_body(tp):
     # bvec has no zeros and there is no edge left for the bracketing to find
     assert xB.min() > 0.0, xB
 
-    for sec, x_prod in zip(single_feed_chain(prob, 4.0, xD, xB, D, Bt),
-                           (xD, xB)):
+    for sec, x_prod in zip(single_feed_chain(prob, 4.0, xD, xB, D, Bt), (xD, xB)):
         ps = pinch_points(sec, tp, 760.0)
-        assert sum(p["in_simplex"] for p in ps) >= 2, \
-            (sec.name, [np.round(p["x"], 4) for p in ps])
+        assert sum(p["in_simplex"] for p in ps) >= 2, (
+            sec.name,
+            [np.round(p["x"], 4) for p in ps],
+        )
         bs = B.product_bodies(ps, x_prod)
-        assert bs and max(len(b["vertices"]) for b in bs) >= 3, \
-            (sec.name, [np.round(b["vertices"], 4) for b in bs])
+        assert bs and max(len(b["vertices"]) for b in bs) >= 3, (
+            sec.name,
+            [np.round(b["vertices"], 4) for b in bs],
+        )
 
 
 def test_a_sharp_split_opens_the_pinch_ladder(tp):
@@ -164,12 +214,12 @@ def test_a_sharp_split_opens_the_pinch_ladder(tp):
     pinch: x_i (K_i - a) = (1-a) x_D,i forces every x_i > 0, which pins the
     temperature to a single root. Zero out a component and the edge families
     open, giving the unstable-node / saddle / stable-node ladder the body rules
-    chain along. That is why `driver.analyse` switches BVM's trace floors off.
+    chain along. That is why `driver.analyze` switches BVM's trace floors off.
     """
     from side_features.bvm.problem import overall_balance
+
     smeared = btx()
-    sharp = btx(xD=np.array([1.0, 0.0, 0.0]),
-                xB=np.array([0.0, 0.5838, 0.4162]))
+    sharp = btx(xD=np.array([1.0, 0.0, 0.0]), xB=np.array([0.0, 0.5838, 0.4162]))
 
     got = {}
     for name, prob in (("smeared", smeared), ("sharp", sharp)):
@@ -181,8 +231,9 @@ def test_a_sharp_split_opens_the_pinch_ladder(tp):
     # the sharp spec finds the extra pinch AT the product vertex -- the paper's
     # r0 -- which the smeared one cannot have, because x_D,i > 0 for every i
     # forces every pinch off the faces
-    assert len(got["sharp"]) > len(got["smeared"]), \
-        {k: [np.round(p["x"], 3) for p in v] for k, v in got.items()}
+    assert len(got["sharp"]) > len(got["smeared"]), {
+        k: [np.round(p["x"], 3) for p in v] for k, v in got.items()
+    }
     assert any(p["kind"] == "unstable_node" for p in got["sharp"])
     assert not any(p["kind"] == "unstable_node" for p in got["smeared"])
 
@@ -208,6 +259,7 @@ def test_rbm_minimum_reflux_matches_underwood(tp):
     pinned RBM to that bias.
     """
     from core.shortcut import underwood_min_reflux, underwood_roots
+
     from side_features.bvm.problem import overall_balance
 
     prob = btx()
@@ -233,8 +285,8 @@ def test_rbm_sizes_a_sharp_split_that_bvm_cannot(tp):
     take the exact zeros in their stride.
     """
     from side_features.bvm.driver import r_min as bvm_r_min
-    spec = dict(xD=np.array([1.0, 0.0, 0.0]),
-                xB=np.array([0.0, 0.5838, 0.4162]))
+
+    spec = dict(xD=np.array([1.0, 0.0, 0.0]), xB=np.array([0.0, 0.5838, 0.4162]))
     assert bvm_r_min(btx(**spec), tp) is None, "BVM unexpectedly solved this"
     rbm = reflux_band(btx(**spec), tp)[0]
     assert rbm is not None and 0.5 < rbm < 10.0, rbm
@@ -244,9 +296,9 @@ def test_the_body_gap_closes_as_reflux_rises(tp):
     """Below minimum reflux the bodies are apart and the gap shrinks toward it."""
     prob = btx()
     lo = reflux_band(prob, tp)[0]
-    gaps = [analyse(prob, tp, r=f * lo)["max_gap"] for f in (0.4, 0.6, 0.85)]
+    gaps = [analyze(prob, tp, r=f * lo)["max_gap"] for f in (0.4, 0.6, 0.85)]
     assert gaps == sorted(gaps, reverse=True), gaps
-    assert analyse(prob, tp, r=lo * 1.5)["max_gap"] < B.TOUCH_TOL
+    assert analyze(prob, tp, r=lo * 1.5)["max_gap"] < B.TOUCH_TOL
 
 
 def test_a_simple_column_has_no_maximum_reflux(tp):
@@ -262,8 +314,7 @@ def test_a_simple_column_has_no_maximum_reflux(tp):
     brackets them instead, and both specs now report the open band an ordinary
     column has.
     """
-    sharp = dict(xD=np.array([1.0, 0.0, 0.0]),
-                 xB=np.array([0.0, 0.5838, 0.4162]))
+    sharp = dict(xD=np.array([1.0, 0.0, 0.0]), xB=np.array([0.0, 0.5838, 0.4162]))
     lo, hi = reflux_band(btx(**sharp), tp)
     assert lo is not None and hi is None, (lo, hi)
 
@@ -274,7 +325,7 @@ def test_a_simple_column_has_no_maximum_reflux(tp):
 def test_body_gap_is_reported_even_where_the_verdict_is_coarse(tp):
     """Whatever the verdict, the distance behind it is a real number the caller
     can inspect -- there is no hidden tolerance deciding feasibility on its own."""
-    a = analyse(btx(), tp, r=0.5)
+    a = analyze(btx(), tp, r=0.5)
     assert not a["feasible"] and np.isfinite(a["max_gap"]) and a["max_gap"] > 0
     assert all(np.isfinite(g["distance"]) for g in a["gaps"])
     assert all(g["active"][0] is not None for g in a["gaps"])
@@ -289,19 +340,29 @@ _PWG = "docs/examples/extractive_ipa_water_eg.colx"
 def pwg():
     from gui.state import persistence
     from gui.state.window_state import WindowState
+
     ws = WindowState()
     ws.load_from_dict(persistence.load_colx(_PWG))
     order = ws.get_species_names()
     assert order == ["2-propanol", "water", "ethylene glycol"], order
     P = ws.thermodynamics_config.pressure_in_psat_unit(ws.pressure)
-    provider = ColumnForgeThermo(ws.thermodynamics_config.psat_params(order),
-                                 gamma_fn=ws.build_gamma_fn(order),
-                                 phi_fn=ws.build_phi_fn(order))
-    prob = build_problem(comps=order,
-                         feeds=[(np.array([0.62, 0.38, 0.0]), 100.0, 1.0)],
-                         pressure=P, lk=0, hk=1, rec_lk=0.999, rec_hk=1e-6,
-                         x_E=np.array([0.0, 0.0, 1.0]), extractive=True,
-                         max_stages=300)
+    provider = ColumnForgeThermo(
+        ws.thermodynamics_config.psat_params(order),
+        gamma_fn=ws.build_gamma_fn(order),
+        phi_fn=ws.build_phi_fn(order),
+    )
+    prob = build_problem(
+        comps=order,
+        feeds=[(np.array([0.62, 0.38, 0.0]), 100.0, 1.0)],
+        pressure=P,
+        lk=0,
+        hk=1,
+        rec_lk=0.999,
+        rec_hk=1e-6,
+        x_E=np.array([0.0, 0.0, 1.0]),
+        extractive=True,
+        max_stages=300,
+    )
     return prob, provider
 
 
@@ -319,38 +380,155 @@ def test_pwg_matches_the_paper_structurally(pwg):
       * the design is feasible at the paper's operating point.
 
     WHAT DOES NOT -- and is deliberately not asserted: the paper's numbers,
-    (E/F)_min = 0.649, r_min = 2.042, r_max = 4.084. Ours are well below these
-    (r_min ~ 0.5 at E/F = 0.750), for two reasons stated in the module docs
-    rather than papered over. First thermodynamics: the paper uses Wilson with
-    parameters from Aspen, this repo has no Wilson binaries for the glycol pairs
-    and falls back to UNIFAC, and a pinch map's bifurcation structure is exactly
-    what is sensitive to that. Second the flow model: `sections` assumes constant
-    molar overflow while the paper's pinch equations carry the energy balance
-    (their eq. 6). The SHAPE of the operating region is what carries over, and
+    (E/F)_min = 0.649, r_min = 2.042, r_max = 4.084. Ours are well below these,
+    for two reasons, both measured in docs/adr/0004 rather than papered over.
+
+    First the FLOW model. `sections` assumes constant molar overflow, so a
+    saturated-liquid entrainer carries the rectifying section's vapour straight
+    through and V_ext = 188.4 where the paper's own saddle position implies ~126.
+    Every extractive pinch sits at x_EG ~ E/L, so that single number is most of
+    the positional error; `sections.entrainer_q` measures the energy-balanced
+    value (their eqs. 6 and 9) and closes ~40% of it.
+
+    Second THERMODYNAMICS, which is what the topology turns on: the extractive
+    pinch map exchanges stability at a branching point in K_water/a on the
+    isopropanol/glycol edge. Ours reads 1.12-1.25 there after the 2026-07-30
+    refit of the glycol binaries (1.30-1.40 before it); the paper's Wilson/Aspen
+    model must read below 1, and no fit to the available data gets there.
+
+    The SHAPE of the operating region is what carries over, and
     `test_pwg_reflux_band_closes_as_entrainer_falls` is where that is checked.
     """
     prob, provider = pwg
-    a = analyse(prob, provider, r=2.042, EF=0.750)
+    a = analyze(prob, provider, r=2.042, EF=0.750)
 
-    assert [s["name"] for s in a["sections"]] == \
-        ["rectifying", "extractive", "stripping"]
+    assert [s["name"] for s in a["sections"]] == [
+        "rectifying",
+        "extractive",
+        "stripping",
+    ]
     # near-sharp distillate: the keys' recoveries put water at 1e-6, glycol is
     # exactly absent because it is fed below the rectifying section
     assert a["xD"][0] > 0.999 and a["xD"][1] < 1e-5, a["xD"]
     assert a["xD"][2] == 0.0, a["xD"]
-    assert a["xB"][2] > 0.5, a["xB"]              # glycol leaves in the bottoms
+    assert a["xB"][2] > 0.5, a["xB"]  # glycol leaves in the bottoms
 
     ext = next(s for s in a["sections"] if s["name"] == "extractive")
     saddles = [p for p in ext["pinches"] if p["kind"] == "saddle"]
     assert saddles, [p["kind"] for p in ext["pinches"]]
     assert all(p["in_simplex"] for p in saddles)
-    assert len(ext["bodies"]) == 4 * len(saddles)   # rule 5
+    # rule 5, over the TERNARY saddles only. The face saddle on the water-free
+    # side is a real solution and is still reported here; it just spans no body
+    # (`bodies.BRANCH_TOL`).
+    ternary = [p for p in saddles if p["k_gap"] <= B.BRANCH_TOL]
+    assert 0 < len(ternary) < len(saddles), [
+        (np.round(p["x"], 4), round(p["k_gap"], 4)) for p in saddles
+    ]
+    assert len(ext["bodies"]) == 4 * len(ternary)
 
     rect = next(s for s in a["sections"] if s["name"] == "rectifying")
     face = rect["bodies"][0]["vertices"]
     assert np.allclose(face[:, 1] * face[:, 2], 0.0, atol=1e-6), face
 
     assert a["feasible"], [(g["pair"], g["distance"]) for g in a["gaps"]]
+
+
+def test_middle_section_pinch_types_match_the_paper_on_both_sides_of_E_equals_D(pwg):
+    """The paper's Figure 4 (left) node types, and the same ones at every E/F.
+
+    A middle section has no product to anchor on, so its Delta = D - E flips sign
+    as the entrainer flow crosses the distillate rate -- here at E/F ~ 0.62, with
+    D = 61.8. `pinch.jacobian` used to take its direction from sign(Delta), so the
+    SAME topology came back with stable and unstable swapped on either side of
+    that crossing, and r_min/r_max were discontinuous there. The profile runs
+    top-to-bottom regardless, so `driver.analyze` forces the down map.
+
+    Checked against the paper rather than against the old behaviour: p.72 reports
+    a stable node close to the glycol vertex and (at higher reflux) an unstable
+    node moving into the ternary space. Both must read the same way at E/F = 0.40
+    (Delta > 0) and E/F = 0.75 (Delta < 0).
+    """
+    prob, provider = pwg
+    kinds = {}
+    for ef in (0.40, 0.75):
+        a = analyze(prob, provider, r=2.2, EF=ef)
+        ext = next(s for s in a["sections"] if s["name"] == "extractive")
+        assert (ext["section"].Delta > 0) == (ef == 0.40), ext["section"].Delta
+
+        near_glycol = max(ext["pinches"], key=lambda p: p["x"][2])
+        assert near_glycol["x"][2] > 0.9, near_glycol["x"]
+        assert near_glycol["kind"] == "stable_node", (ef, near_glycol["kind"])
+
+        interior = [p for p in ext["pinches"] if p["x"].min() > 0.05]
+        assert any(p["kind"] == "unstable_node" for p in interior), (
+            ef,
+            [(np.round(p["x"], 3), p["kind"]) for p in interior],
+        )
+        kinds[ef] = sorted(p["kind"] for p in ext["pinches"])
+    assert kinds[0.40] == kinds[0.75], kinds
+
+
+def test_the_middle_body_starts_where_the_rectifying_profile_ends(pwg):
+    """Rules 3-4: S is on the STABLE eigendirection, and it is where the column
+    arrives from.
+
+    The paper's parentheticals ("most stable (largest eigenvalue)") are in the
+    opposite sign convention to this module's |lambda| < 1, and the code followed
+    the words rather than the physics, so S and E were swapped. On PWG at
+    r = 2.2, E/F = 0.75 the corrected S1 is (0.646, 0, 0.354) and the rectifying
+    section's own body reaches (0.63, 0, 0.37) -- which is the whole point: the
+    middle profile begins where the one above it ends.
+    """
+    prob, provider = pwg
+    a = analyze(prob, provider, r=2.2, EF=0.750)
+    ext = next(s for s in a["sections"] if s["name"] == "extractive")
+    sad = next(
+        p
+        for p in ext["pinches"]
+        if p["kind"] == "saddle" and p["k_gap"] <= B.BRANCH_TOL
+    )
+
+    stable = B.lift_direction(
+        sad["eigvecs"][:, sad["order"][-1]], len(sad["x"]), sad.get("drop")
+    )
+    stable = stable - stable.mean()
+    stable /= np.linalg.norm(stable)
+    assert np.abs(sad["eigvals"][sad["order"][-1]]) < 1.0, sad["eigvals"]
+
+    for body in ext["bodies"]:
+        d = body["start"] - sad["x"]
+        n = np.linalg.norm(d)
+        if n < 1e-9:  # the saddle already sits on that face
+            continue
+        assert abs(abs(float(d / n @ stable)) - 1.0) < 1e-6, body["start"]
+
+    # and one of the two S ends lands ON the rectifying body -- which here is the
+    # paper's Figure 5 (left) line along the alcohol/glycol face, so this is a
+    # point-to-segment distance, not a point-to-vertex one
+    rect = next(s for s in a["sections"] if s["name"] == "rectifying")
+    reach = min(
+        B.body_distance(np.atleast_2d(b["start"]), rb["vertices"])
+        for b in ext["bodies"]
+        for rb in rect["bodies"]
+    )
+    assert reach < 1e-3, reach
+
+
+def test_one_middle_body_carries_both_junctions(pwg):
+    """Figure 7: the middle section has ONE active body, not one per junction.
+
+    The body is the hull of a single polyline S -> x* -> E; a column runs down an
+    arm of it or turns the elbow, so it cannot be two bodies. Scored separately,
+    the upper junction used to pick the face saddle's body and the lower the
+    ternary saddle's.
+    """
+    prob, provider = pwg
+    a = analyze(prob, provider, r=2.2, EF=0.750)
+    upper, lower = a["gaps"]
+    assert upper["pair"] == ("rectifying", "extractive")
+    assert lower["pair"] == ("extractive", "stripping")
+    assert upper["active"][1] is not None
+    assert upper["active"][1] == lower["active"][0], (upper, lower)
 
 
 def test_the_rectifying_body_runs_to_the_glycol_vertex_not_the_water_one(pwg):
@@ -372,27 +550,37 @@ def test_the_rectifying_body_runs_to_the_glycol_vertex_not_the_water_one(pwg):
     exact zeros put the pinches ON the edges where the bracketing finds them.
     """
     prob, provider = pwg
-    smeared = build_problem(comps=list(prob.comps),
-                            feeds=[(np.array([0.62, 0.38, 0.0]), 100.0, 1.0)],
-                            pressure=prob.pressure, lk=0, hk=1,
-                            rec_lk=0.98, rec_hk=0.02,
-                            x_E=np.array([0.0, 0.0, 1.0]), extractive=True,
-                            max_stages=300)
-    a = analyse(smeared, provider, r=3.0, EF=0.750)
+    smeared = build_problem(
+        comps=list(prob.comps),
+        feeds=[(np.array([0.62, 0.38, 0.0]), 100.0, 1.0)],
+        pressure=prob.pressure,
+        lk=0,
+        hk=1,
+        rec_lk=0.98,
+        rec_hk=0.02,
+        x_E=np.array([0.0, 0.0, 1.0]),
+        extractive=True,
+        max_stages=300,
+    )
+    a = analyze(smeared, provider, r=3.0, EF=0.750)
     rect = next(s for s in a["sections"] if s["name"] == "rectifying")
 
-    assert len(rect["bodies"]) == 1, \
-        [np.round(b["vertices"], 4) for b in rect["bodies"]]
+    assert len(rect["bodies"]) == 1, [
+        np.round(b["vertices"], 4) for b in rect["bodies"]
+    ]
     V = rect["bodies"][0]["vertices"]
-    assert V[:, 2].max() > 0.9, V        # reaches the glycol vertex
-    assert V[:, 1].max() < 0.05, V       # and never the water one
+    assert V[:, 2].max() > 0.9, V  # reaches the glycol vertex
+    assert V[:, 1].max() < 0.05, V  # and never the water one
 
 
-@pytest.mark.xfail(reason="extractive middle section pinches on the water-free "
-                          "face instead of at a ternary saddle; open, see the "
-                          "docstring", strict=True)
+@pytest.mark.xfail(
+    reason="no maximum reflux: the ternary saddle and the ternary "
+    "unstable node are born together here, so the paper's "
+    "feasible window never opens; see the docstring",
+    strict=True,
+)
 def test_pwg_reflux_band_closes_as_entrainer_falls(pwg):
-    """The shape of the paper's Figure 9, which is what does carry over.
+    """The shape of the paper's Figure 9, which is what should carry over.
 
     An extractive column has a MAXIMUM reflux as well as a minimum -- too much
     reflux dilutes the entrainer out of the middle section -- and the band
@@ -400,54 +588,126 @@ def test_pwg_reflux_band_closes_as_entrainer_falls(pwg):
     Here: no upper edge below the ceiling at E/F = 0.75, an upper edge at 0.40,
     and a much tighter one at 0.10.
 
-    XFAIL, and deliberately not repaired by loosening the claim, because the
-    claim is right and the method is not yet meeting it. What is known:
+    XFAIL on the UPPER edge only, and deliberately not repaired by loosening the
+    claim. The lower edge now behaves: restricting rule 1 to ternary saddles
+    (`bodies.BRANCH_TOL`) moved r_min from a flat 0.628 at every entrainer ratio
+    to 1.47 / 2.00 / 1.74 at E/F = 0.10 / 0.40 / 0.75, against the paper's 2.042
+    at 0.750. It is `r_max` that is still missing at every ratio.
 
-    * The only saddle the extractive section reports is on the WATER-FREE face,
-      e.g. (0.756, 0, 0.244) at E/F = 0.40. The paper's is a ternary saddle
-      (p.72, p.116) and its being ternary is the stated reason the middle section
-      can join the other two. A face saddle exists mathematically here because
-      x_D carries essentially no water, so the middle section's `bvec` water
-      component is zero and the water-free face is invariant.
-    * Rules 3-4 then walk that saddle's eigenvectors along its own face, so the
-      bodies run from the pure-IPA vertex clear across to the far edge. Bodies
-      that large intersect at every reflux, which is why no upper edge appears
-      and why r_min stops responding to entrainer flow (0.1 and 0.4 give the
-      same 0.628).
-    * Filtering the middle section to ternary pinches is NOT the fix: there is
-      then no saddle at all in this model, the middle section gets no body, and
-      the paper's own operating point (E/F = 0.750, r = 2.042) reads infeasible.
+    What is known about why, measured on the middle section's own pinch map with
+    the down map `driver.analyze` now forces:
 
-    So the open question is whether the ternary saddle is genuinely absent under
-    this repo's UNIFAC + constant-molar-overflow model -- the fixture already
-    documents that the paper's Wilson + energy-balance numbers are not
-    reproduced, r_min coming out near 0.5 against their 2.042 -- or whether it
-    exists and is being missed. Denser interior seeding does not find one.
+    * The paper's mechanism for r_max is topological (p.84): raising the reflux
+      pushes an unstable node off the azeotrope branch into the ternary interior,
+      a continuous distillation boundary appears, and the sections can no longer
+      be joined. Their window is r = 2.042 (ternary saddle present) to r = 4.084
+      (ternary unstable node arrives).
+    * Here the two are born TOGETHER. At E/F = 0.750 neither exists at r = 1.5;
+      by r = 2.042 both do -- an unstable node at (0.420, 0.203, 0.377) alongside
+      the ternary saddle at (0.050, 0.571, 0.380) -- and both persist to r = 10.
+      There is no reflux at which the saddle exists without the node, so no
+      window for RBM's bodies to close.
+    * That is a thermodynamics gap, not a method one, and docs/adr/0004 pins the
+      number it lives in: the paper's structure needs K_water/L·V^-1 below 1 on
+      the isopropanol/glycol edge, ours reads 1.12-1.25 after the glycol binaries
+      were refitted against Zhang's water-trace slice (1.30-1.40 before). Cutting
+      gamma_water a further 25% reproduces their three pinches exactly; no fit to
+      the available data does. The paper uses Wilson with Aspen parameters.
 
-    This test DID pass before the `pinch.jacobian` boundary fix, and that is not
-    evidence it was right: every PWG pinch sits on a face, the old derivative
-    differenced across the simplex boundary there, and the upper edge it produced
-    came out of stability labels computed from non-physical compositions.
+    Adding the paper's topological gate on top -- ternary unstable node implies
+    infeasible -- is NOT the fix: here it would make PWG read infeasible at every
+    reflux, since the node is present wherever the saddle is. The fix is a model
+    that puts water below the operating line in glycol, at which point delete
+    this marker and check the numbers against Table 1.
     """
     prob, provider = pwg
-    # coarse on purpose: each band is ~20 pinch-map solves through UNIFAC, and
+    # coarse on purpose: each band is ~20 pinch-map solves, and
     # this test is about the ORDERING of the upper edges, not their precision
-    bands = {ef: reflux_band(prob, provider, EF=ef, r_lo=0.5, r_hi=10.0,
-                             n_scan=6, tol=0.05)
-             for ef in (0.10, 0.40, 0.75)}
+    bands = {
+        ef: reflux_band(prob, provider, EF=ef, r_lo=0.5, r_hi=10.0, n_scan=6, tol=0.05)
+        for ef in (0.10, 0.40, 0.75)
+    }
     for ef, (lo, hi) in bands.items():
         assert lo is not None, (ef, bands)
 
-    assert bands[0.75][1] is None, bands            # open at generous entrainer
-    assert bands[0.40][1] is not None, bands        # closes as it falls
+    assert bands[0.75][1] is None, bands  # open at generous entrainer
+    assert bands[0.40][1] is not None, bands  # closes as it falls
     assert bands[0.10][1] is not None, bands
-    assert bands[0.10][1] < bands[0.40][1], bands   # and keeps closing
+    assert bands[0.10][1] < bands[0.40][1], bands  # and keeps closing
 
     for ef, (lo, hi) in bands.items():
         if hi is not None:
             assert hi > lo, (ef, lo, hi)
 
 
+def test_the_entrainer_flashes_and_that_moves_every_extractive_pinch(pwg):
+    """`sections.entrainer_q`: the CMO assumption is what puts our extractive
+    pinches at the wrong glycol level, and the energy balance is the reason.
+
+    Every extractive pinch satisfies x_EG = (E/V) / (a - K_EG) with K_EG ~ 0.02,
+    so x_EG ~ E/L -- a pure FLOW quantity, nothing to do with the pinch solver.
+    Ours sits at 0.372, the paper's at ~0.55. Feeding pure glycol at its own
+    bubble point (197 C) into a section running at 95 C is not a saturated-liquid
+    feed at the tray: the balance says q = 0.69, the flash cuts V from 188.4 to
+    164.8 and moves the level to 0.421. Precool the entrainer to the distillate
+    temperature instead and it goes the other way, q = 1.12, because now the cold
+    liquid condenses vapour.
+
+    Default `q_E = 1.0` is byte-identical to CMO, which is why every other number
+    in this file is unchanged.
+    """
+    import json
+
+    from core.enthalpy import enthalpy_fns
+    from side_features.bvm.problem import overall_balance
+    from side_features.bvm.sections import entrainer_q, extractive_chain
+
+    prob, provider = pwg
+    raw = json.load(open(_PWG))["cases"][0]["state"]
+    order = prob.comps
+    hL, hV = enthalpy_fns(
+        [raw["species"][n]["cp"] for n in order],
+        [raw["species"][n]["hvap_tb"] for n in order],
+        [raw["species"][n]["tb"] for n in order],
+        [raw["thermodynamics_config"]["component_params"][n]["tc"] for n in order],
+    )
+    P, r, EF = prob.pressure, 2.042, 0.750
+    xD, xB, D, Bq = overall_balance(prob, EF)
+    E = EF * prob.feeds[0].F
+
+    def level(q):
+        prob.q_E = q
+        try:
+            ext = extractive_chain(prob, r, EF, xD, xB, D, Bq)[1]
+            return ext.V, E / ext.L
+        finally:
+            prob.q_E = 1.0
+
+    V_cmo, lvl_cmo = level(1.0)
+    assert abs(V_cmo - (r + 1.0) * D) < 1e-9, V_cmo  # CMO carries V through
+    assert abs(lvl_cmo - 0.372) < 5e-3, lvl_cmo
+
+    T_E = provider.bubble(prob.x_E, P)[1] + 273.15
+    assert T_E > 460.0, T_E  # pure glycol boils near 197 C
+    q_hot = entrainer_q(prob, provider, P, r, EF, xD, D, hL, hV, T_E)
+    assert 0.6 < q_hot < 0.75, q_hot
+    V_hot, lvl_hot = level(q_hot)
+    assert V_hot < V_cmo and abs(V_hot - 164.8) < 1.0, V_hot
+    assert lvl_hot > lvl_cmo and abs(lvl_hot - 0.421) < 5e-3, lvl_hot
+
+    T_D = provider.bubble(xD, P)[1] + 273.15
+    q_cold = entrainer_q(prob, provider, P, r, EF, xD, D, hL, hV, T_D)
+    assert q_cold > 1.0, q_cold
+    V_cold, lvl_cold = level(q_cold)
+    assert V_cold > V_cmo and lvl_cold < lvl_cmo, (V_cold, lvl_cold)
+
+    # the glycol level is a flow statement: it tracks E/L and nothing else
+    for q, (Vq, lvl) in ((q_hot, (V_hot, lvl_hot)), (q_cold, (V_cold, lvl_cold))):
+        assert abs(Vq - (V_cmo - (1.0 - q) * E)) < 1e-9, (q, Vq)
+        assert abs(lvl - E / (Vq - (D - E))) < 1e-12, (q, lvl)
+
+
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-v"]))

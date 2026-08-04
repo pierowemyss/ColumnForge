@@ -257,20 +257,20 @@
         "modules": {
           "C4 stripper": {
             "module_type": "Side Stripper",
-            "stage": 18,
-            "num_stages": 4,
-            "boilup_ratio": 1.2,
+            "stage": 10,
+            "num_stages": 8,
+            "boilup_ratio": 1.5,
             "reflux_ratio": null,
             "duty": null,
-            "return_stage": 17,
-            "rate": 25.0
+            "return_stage": 9,
+            "rate": 100.0
           }
         },
         "bvm_params": {},
         "specs": [
           {
             "kind": "Reflux ratio",
-            "value": 2.5,
+            "value": 5.0,
             "unit_ref": "column",
             "component": -1
           },

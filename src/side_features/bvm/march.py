@@ -141,6 +141,25 @@ def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0
         P_lo, P_hi = sorted((float(P), float(P_lim)))
     Ps = [float(P)]
 
+    # Marching DOWN, `_dew_eff` returns the next stage's liquid *and its* bubble
+    # point, so the temperature it hands back describes X[k+1], not X[k]. Stage
+    # k's own temperature is the one the previous pass produced, so carry it
+    # forward and seed it from the anchor. Appending Tn directly put the whole
+    # profile one stage out -- invisible in X and Y, and it survived because both
+    # consumers read T without ever comparing it to the liquid beside it:
+    # `driver._temperature_inversion`, which judges a design on the size of the
+    # steps in this array, and `handoff`'s T0, which hands it to MESH as the
+    # warm-start temperature for stages it does not describe. The tell was the
+    # last two entries coming out bit-identical, because the padding block below
+    # wrote the correct final temperature into an otherwise shifted array.
+    # The UP branch computes T from x itself and was always aligned.
+    T_cur = None
+    if down:
+        try:
+            T_cur = float(tp.bubble_T(X[0], float(P)))
+        except (ValueError, FloatingPointError):
+            T_cur = None                   # filled from the first step below
+
     for _ in range(max_stages):
         x = X[-1]
         Pk = Ps[-1]
@@ -172,7 +191,12 @@ def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0
             # thermo has no saturation root here -- the march ran off the
             # physical region (heavy-corner blow-up); stop as if it left.
             status = "simplex"; break
-        Y.append(y); T.append(Tn)
+        Y.append(y)
+        if down:
+            T.append(Tn if T_cur is None else T_cur)
+            T_cur = Tn
+        else:
+            T.append(Tn)
 
         xn, xmin = _clean(xn)
         # one step further down (or up) the ramp, held inside the column's ends
@@ -196,12 +220,16 @@ def march_section(sec, x0, tp, P, max_stages=200, eps_pinch=1e-6, efficiency=1.0
                 raise ValueError
             if down:
                 yl = np.clip(sec.a * X[-1] + sec.bvec, 0, None); yl /= yl.sum()
-                _, Tl = tp.dew(yl, Ps[len(X) - 1], X[-1])
+                # X[-1]'s OWN temperature is already in hand -- it is what the
+                # last step computed. Taking the dew point of yl here would name
+                # the stage after this one, which is the same off-by-one again.
+                Tl = T_cur if T_cur is not None else tp.dew(yl, Ps[len(X) - 1], X[-1])[1]
             else:
                 yl, Tl = tp.bubble(X[-1], Ps[len(X) - 1])
         except (ValueError, FloatingPointError):
             yl = Y[-1] if Y else X[-1]
-            Tl = T[-1] if T else 0.0
+            Tl = (T_cur if down and T_cur is not None
+                  else (T[-1] if T else 0.0))
         Y.append(yl); T.append(Tl)
 
     return {"X": np.array(X), "Y": np.array(Y), "T": np.array(T),
@@ -239,6 +267,14 @@ def _demo():
         assert np.allclose(prof["X"].sum(axis=1), 1.0, atol=1e-6)
     # temperature rises from condenser (rect top) toward the reboiler (strip top)
     assert r["T"][0] < s["T"][0], "distillate cooler than bottoms"
+
+    # T[k] is stage k's temperature -- the bubble point of X[k], not of the stage
+    # after it. The down-march used to be one out here (it recorded the dew-step
+    # product's temperature), which nothing in X or Y could show.
+    for prof, name in ((r, "down"), (s, "up")):
+        Tb = np.array([tp.bubble_T(x, P) for x, P in zip(prof["X"], prof["P"])])
+        worst = float(np.abs(Tb - prof["T"]).max())
+        assert worst < 0.5, f"{name}-march T misaligned with X by up to {worst:.2f} K"
 
     # dP ramps the pressure the right way from each anchor, and a hotter column
     # is what a real pressure drop buys you

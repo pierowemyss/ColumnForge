@@ -13,7 +13,11 @@ from PySide6.QtWidgets import (
     QCheckBox
 )
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import QToolTip
 
+from gui.table_edit import parse_number, fmt_number
+from gui.panels.reactions_panel import ReactionsPanel
 from gui.panels.sub_tab_bar import SubTabBar
 from gui.panels.species_properties_panel import SpeciesPropertiesPanel
 from gui.state.window_state import Species, ThermodynamicsConfig
@@ -70,6 +74,7 @@ class InitializationTab(QWidget):
         self.sub_tab_bar = SubTabBar(self)
         self.sub_tab_bar.addTab("Chemical Species")
         self.sub_tab_bar.addTab("Thermodynamics")
+        self.sub_tab_bar.addTab("Reactions")
         self.sub_tab_bar.tabClicked.connect(self._on_sub_tab_changed)
         main_layout.addWidget(self.sub_tab_bar)
 
@@ -82,6 +87,14 @@ class InitializationTab(QWidget):
         # Thermodynamics page (Index 1 now)
         self.thermo_page = self._create_thermodynamics_page()
         self.stack.addWidget(self.thermo_page)
+
+        # Reactions (Index 2). A reaction describes the CHEMISTRY, so it belongs
+        # beside the species and the thermo models rather than inside one sizing
+        # module's panel -- see `panels/reactions_panel.py`, which also records
+        # that BVM is the only thing consuming it today.
+        self.reactions_page = ReactionsPanel(self)
+        self.reactions_page.changed.connect(self._on_reactions_changed)
+        self.stack.addWidget(self.reactions_page)
 
         main_layout.addWidget(self.stack)
 
@@ -344,7 +357,19 @@ class InitializationTab(QWidget):
         self.load_interaction_parameters()
 
     def _on_table_cell_changed(self, row, col):
-        """Handle change in table cell - save to window_state."""
+        """Persist a cell edit — or bounce it if it isn't a number.
+
+        Nothing silently ignored: text that won't parse used to be dropped on
+        the floor and the cell blanked itself on the next reload, which reads
+        as "my parameter got deleted".
+        """
+        item = self.interaction_table.item(row, col)
+        text = item.text().strip() if item else ""
+        if text and parse_number(text) is None:
+            QToolTip.showText(QCursor.pos(),
+                              f"'{text}' is not a number — entry discarded.")
+            self.load_interaction_parameters()   # repaint from stored values
+            return
         self.save_interaction_parameters()
 
     def _create_species_page(self):
@@ -571,19 +596,18 @@ class InitializationTab(QWidget):
         }
 
     def get_interaction_parameters(self) -> list:
-        """Get binary interaction parameters from table."""
+        """Get the parameter grid as a list of rows of float-or-None.
+
+        None means "the cell is empty" and the caller clears the stored value —
+        text that isn't a number never gets this far (_on_table_cell_changed
+        bounces it), so a blank cell can only ever mean the user emptied it.
+        """
         params = []
         for row in range(self.interaction_table.rowCount()):
             row_data = []
             for col in range(self.interaction_table.columnCount()):
                 item = self.interaction_table.item(row, col)
-                if item and item.text():
-                    try:
-                        row_data.append(float(item.text()))
-                    except ValueError:
-                        row_data.append(None)
-                else:
-                    row_data.append(None)
+                row_data.append(parse_number(item.text()) if item else None)
             params.append(row_data)
         return params
 
@@ -601,7 +625,9 @@ class InitializationTab(QWidget):
             # Same key map load_interaction_parameters reads back, so every
             # implemented Psat model round-trips without a per-model branch.
             keys = _PURE_PSAT_KEYS.get(param_model)
-            if keys and params:
+            # Shape guard: a grid that isn't this model's yet (mid-rebuild)
+            # would null out the columns it doesn't have.
+            if keys and params and all(len(r) == len(keys) for r in params):
                 for i, name in enumerate(species):
                     if i >= len(params):
                         continue
@@ -611,13 +637,11 @@ class InitializationTab(QWidget):
 
         elif param_type == "EOS":
             params = self.get_interaction_parameters()
-            if params:
+            if params and all(len(r) == 3 for r in params):   # Tc, Pc, ω
                 for i, name in enumerate(species):
                     if i < len(params):
                         comp_params = self.window_state.thermodynamics_config.get_component_params(name)
-                        comp_params.tc = params[i][0] if params[i][0] is not None else None
-                        comp_params.pc = params[i][1] if params[i][1] is not None else None
-                        comp_params.omega = params[i][2] if params[i][2] is not None else None
+                        comp_params.tc, comp_params.pc, comp_params.omega = params[i]
         
         elif param_type == "Activity":
             table_type = self.table_selection_combo.currentText()
@@ -636,40 +660,29 @@ class InitializationTab(QWidget):
                 self.window_state.is_modified = True
                 return
 
-            if param_model == "NRTL":
-                param_dict = getattr(binary, f"nrtl_{table_type}", {})
-                for i, name_i in enumerate(species):
-                    for j, name_j in enumerate(species):
-                        if i < len(params) and j < len(params[i]):
-                            if params[i][j] is not None:
-                                param_dict[(name_i, name_j)] = params[i][j]
-                if table_type == "aij":
-                    binary.nrtl_aij = param_dict
-                elif table_type == "bij":
-                    binary.nrtl_bij = param_dict
-                elif table_type == "cij":
-                    binary.nrtl_cij = param_dict
-            
-            elif param_model in ["UNIQUAC", "Wilson", "Margules"]:
-                param_dict = getattr(binary, f"{param_model.lower()}_{table_type}", {})
-                for i, name_i in enumerate(species):
-                    for j, name_j in enumerate(species):
-                        if i < len(params) and j < len(params[i]):
-                            if params[i][j] is not None:
-                                param_dict[(name_i, name_j)] = params[i][j]
-                if param_model == "UNIQUAC":
-                    if table_type == "aij":
-                        binary.uniquac_aij = param_dict
-                    elif table_type == "bij":
-                        binary.uniquac_bij = param_dict
-                elif param_model == "Wilson":
-                    if table_type == "aij":
-                        binary.wilson_aij = param_dict
-                    elif table_type == "bij":
-                        binary.wilson_bij = param_dict
-                elif param_model == "Margules":
-                    binary.margules_aij = param_dict
-        
+            # One attribute name per (model, table) — the same map
+            # get_binary_param_dict reads back, so an unknown table_type writes
+            # nowhere instead of into a throwaway dict.
+            attr = {"NRTL": f"nrtl_{table_type}",
+                    "UNIQUAC": f"uniquac_{table_type}",
+                    "Wilson": f"wilson_{table_type}",
+                    "Margules": "margules_aij"}.get(param_model)
+            if not attr or not hasattr(binary, attr):
+                return
+            param_dict = getattr(binary, attr)
+            # Only trust blanks-mean-delete when the grid really is the current
+            # species matrix; a half-built table must never wipe stored pairs.
+            grid_is_current = (len(params) == len(species)
+                               and all(len(r) == len(species) for r in params))
+            for i, name_i in enumerate(species):
+                for j, name_j in enumerate(species):
+                    if i < len(params) and j < len(params[i]):
+                        value = params[i][j]
+                        if value is not None:
+                            param_dict[(name_i, name_j)] = value
+                        elif grid_is_current:
+                            param_dict.pop((name_i, name_j), None)
+
         self.window_state.is_modified = True
 
     def load_interaction_parameters(self):
@@ -688,7 +701,9 @@ class InitializationTab(QWidget):
         thermo = self.window_state.thermodynamics_config
 
         def put(r, c, val):
-            tbl.setItem(r, c, QTableWidgetItem("" if val is None else f"{val:g}"))
+            # fmt_number, not "%g": %g showed 1234.56789 as 1234.57 and the next
+            # edit in the table wrote that rounded number back over the real one.
+            tbl.setItem(r, c, QTableWidgetItem(fmt_number(val)))
 
         pure_keys = _PURE_PSAT_KEYS
 
@@ -724,7 +739,17 @@ class InitializationTab(QWidget):
         """Set the window state object and initialize UI from it."""
         self.window_state = window_state
         self.species_props.set_window_state(window_state)
+        self.reactions_page.set_window_state(window_state)
         self._load_from_state()
+
+    def _on_reactions_changed(self):
+        """The panel has already mirrored itself onto `window_state.reactions`,
+        and the modules read that at run time, so there is nothing to push --
+        only the dirty flag. Deliberately NOT `speciesChanged`: that signal makes
+        three other tabs rebuild their species lists, and a Keq coefficient is
+        not a species edit."""
+        if self.window_state:
+            self.window_state.is_modified = True
 
     def _load_from_state(self):
         """Initialize UI components from the window state."""

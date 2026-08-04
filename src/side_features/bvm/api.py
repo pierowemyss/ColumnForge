@@ -51,9 +51,12 @@ def spectrum(prob, provider, R, omega_grid, EF=None):
     return _spectrum(prob, provider, R, omega_grid, EF=EF)
 
 
-def feasibility_map(prob, provider, R_grid, S_grid=None, EF_grid=None):
-    """Feasibility + stage-count grids over the swept operating parameters."""
-    return _fmap(prob, provider, R_grid, S_grid=S_grid, EF_grid=EF_grid)
+def feasibility_map(prob, provider, R_grid, S_grid=None, EF_grid=None, **kw):
+    """Feasibility + stage-count grids over the swept operating parameters.
+
+    `on_step` / `cancelled` pass through to the driver's parallel sweep.
+    """
+    return _fmap(prob, provider, R_grid, S_grid=S_grid, EF_grid=EF_grid, **kw)
 
 
 def r_min(prob, provider, **kw):

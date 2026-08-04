@@ -87,6 +87,22 @@ def test_example_solves(path):
     assert np.all(np.isfinite(T))
     assert T[0] < T[-1] + 1e-6, "column runs cold at the bottom"
 
+    # A side stripper/rectifier hung on the wrong side of the feed still solves
+    # — it just makes a second copy of a product you already have. Both bundled
+    # examples shipped that way: the "toluene rectifier" drew benzene-rich vapour
+    # above the feed and made 98% benzene next to a 99.9% benzene distillate, and
+    # the "C4 stripper" drew below the feed and made bottoms. A side product is an
+    # INTERMEDIATE product or it is nothing, so pin that, and pin the recycle
+    # actually converging (the BTX one ran out of passes and said nothing).
+    for ss in prof.get("side_sections", []):
+        assert prof["side_tear_residual"] < 1e-4, (
+            _name(path), ss["id"], prof["side_tear_residual"])
+        top = int(np.asarray(ss["comp"], float).argmax())
+        assert top != int(np.asarray(prof["xD"], float).argmax()), (
+            f"{_name(path)}: {ss['id']} makes a second distillate")
+        assert top != int(np.asarray(prof["xB"], float).argmax()), (
+            f"{_name(path)}: {ss['id']} makes a second bottoms")
+
 
 # Both reactive examples size at the reflux stored in their .colx. That is not
 # free: under the honest junction test feasibility is a band in R, so an example

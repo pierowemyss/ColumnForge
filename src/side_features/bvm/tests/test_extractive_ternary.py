@@ -30,7 +30,8 @@ from side_features.bvm.problem import build_problem
 from side_features.bvm.sections import (extractive_chain, feasible,
                                         feasible_margin, region_center)
 from side_features.bvm.march import march_section
-from side_features.bvm.pinch import pinch_solve, jacobian_G, classify_pinch
+from side_features.bvm.anchor import _classify
+from side_features.bvm.pinch import pinch_solve
 from side_features.bvm.problem import overall_balance
 from side_features.bvm.thermo_adapter import ColumnForgeThermo
 from gui.state.window_state import WindowState
@@ -117,7 +118,10 @@ def test_extractive_pinch_is_a_saddle_on_the_region_boundary(case):
     xstar = ps["xstar"]
     assert np.isclose(xstar[2], -ext.bvec[2] / ext.a, atol=5e-3), xstar
 
-    cl = classify_pinch(jacobian_G(ext, xstar, tp, P))
+    # `down=True`: a middle section's profile runs top-to-bottom whatever
+    # sign(Delta) says, and reading the up map instead reports the reciprocal
+    # eigenvalues -- see `pinch.jacobian`.
+    cl = _classify(ext, xstar, tp, P, down=True)
     assert cl["saddle"], (cl["kind"], np.abs(cl["eigvals"]))
     mag = np.sort(np.abs(cl["eigvals"]))
     assert mag[0] < 1.0 < mag[-1], mag

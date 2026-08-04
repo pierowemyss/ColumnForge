@@ -46,6 +46,26 @@ class Problem:
     xD: np.ndarray = None             # explicit distillate comp (overrides recoveries)
     xB: np.ndarray = None             # explicit bottoms comp
     x_E: np.ndarray = None            # entrainer composition (extractive mode)
+    q_E: float = 1.0                  # entrainer feed thermal quality, same meaning
+                                      # as `Feed.q`. 1.0 = saturated liquid AT THE
+                                      # TRAY, which is what CMO assumes and what
+                                      # every result before this field was computed
+                                      # with. A heavy entrainer fed at its own
+                                      # bubble point is far hotter than the tray it
+                                      # lands on and flashes: on ipa/water/EG at
+                                      # 197 C into a 95 C section the energy balance
+                                      # puts it at q = 0.61, which drops V in the
+                                      # extractive section from 188 to 159 and moves
+                                      # every extractive pinch from x_EG = 0.373 to
+                                      # 0.442 (the paper's is 0.55). Set it from
+                                      # `sections.entrainer_q`; left at 1.0 nothing
+                                      # in the module changes. See docs/adr/0004.
+    q_E_fn: object = None             # callable(R, EF, xD, D) -> q_E, overriding
+                                      # the constant above. The energy balance is
+                                      # not a constant: q_E depends on the reflux
+                                      # and entrainer ratio, which every band /
+                                      # region scan varies. `sections.entrainer_q_fn`
+                                      # builds one; None = use `q_E` (CMO default).
     extractive: bool = False
     side_draws: list = field(default_factory=list)   # list[SideDraw]
     dP: float = 0.0                   # per-stage pressure drop (Psat unit)
@@ -56,7 +76,30 @@ class Problem:
     eps_stage: float = 1e-2           # junction tolerance floor (connect.connect)
     reactions: object = None          # Reactions (reactive.py) or None
     max_stages: int = 200             # per-section marching cap
+    max_column_stages: int = None     # economic cap on the ASSEMBLED column; None
+                                      # = `max_stages`. A design needing more than
+                                      # this is reported infeasible with a
+                                      # `too_many_stages` finding rather than
+                                      # returned: profiles that only meet after
+                                      # hundreds of trays are sitting on top of
+                                      # R_min, and no such column gets built. This
+                                      # is a separate verdict from the geometric
+                                      # one, and the finding says which it is.
     efficiency: float = 1.0           # Murphree vapour efficiency (1 = ideal stages)
+    anchor_method: str = "saddle"     # how an INTERIOR section is started:
+                                      #   saddle       invariant manifolds through
+                                      #                the section's saddle pinch
+                                      #   ray          march inward from the far
+                                      #                end of the stable ray (the
+                                      #                body's S vertex)
+                                      #   continuation launch from stages of the
+                                      #                neighbouring profiles that
+                                      #                lie inside this section
+                                      # No "auto": which one is right is a design
+                                      # judgement, and the three do not agree on
+                                      # r_max (docs/adr/0004). Two-section columns
+                                      # ignore this -- there is no interior section
+                                      # to anchor. See `driver._interior_profiles`.
     balance_residual: float = 0.0     # E13: unclosed |f - (D xD + B xB)|/F, explicit path
     trace_floor: float = 1e-4         # starting-guess floor on every product split
     entrainer_trace: float = 1e-6     # ...and a smaller one for the entrainer

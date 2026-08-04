@@ -23,9 +23,16 @@ Three places where this goes beyond what textbook ternary BVM needs:
 1. **Connection** is a liquid-profile intersection in full `R^(C-1)`, not a
    planar curve crossing (which only exists at `C = 3`). See `connect.py` and
    [Section connection](#section-connection-the-junction-test) below.
-2. **Interior sections** (`S > 2`) have no product anchor; they are anchored by
-   continuation or, when strongly pinched, at a **saddle pinch** via its
-   invariant manifolds. See `anchor.py`.
+2. **Interior sections** (`S > 2`) have no product anchor. There are three ways
+   to start one, chosen by `Problem.anchor_method` (the panel's "Interior
+   anchor" combo — there is no `auto`, because they do not agree on `r_max`):
+   `saddle` (the invariant manifolds through the section's **saddle pinch**, the
+   default), `ray` (march inward from the far end of the stable eigendirection,
+   the rectification body's S vertex) and `continuation` (launch from stages of
+   the neighbouring profiles that lie inside this section). See `anchor.py`.
+   Which arm of which saddle is narrowed first by `bodies.py`, geometrically and
+   without marching — but only narrowed: a convex hull ties too often, and its
+   ranking can invert against the marched answer (`docs/adr/0004`).
 3. **Feed / draw placement** is an operating-line crossover / purity target,
    computed, not guessed. See `place.py`.
 
@@ -40,10 +47,11 @@ stage map, not by the block matrix of a rigorous MESH solve.
 | `thermo_adapter.py` | the `ThermoProvider` interface + `ColumnForgeThermo` wrapper                           |
 | `sections.py`       | the difference-point chain `(Δ_k, δ_k)` + operating-line coeffs                        |
 | `march.py`          | equilibrium + operating-line stepping, stable-direction selection, Murphree efficiency |
-| `anchor.py`         | product ends, continuation, saddle-pinch manifold launch                               |
+| `anchor.py`         | product ends, and the three ways to start an interior section (`Problem.anchor_method`) |
 | `connect.py`        | liquid-profile intersection in full `R^(C-1)` → stage counts (see below)               |
 | `place.py`          | feed operating-line crossover, side-draw purity target                                 |
 | `pinch.py`          | fixed-point + eigenvalue classification → `R_min`, min `E/F`                           |
+| `bodies.py`         | rectification bodies + hull distance; shared with RBM, used here to **prune** which arm of which saddle an interior section can be on |
 | `reactive.py`       | reactive columns: transformed compositions + the reaction-equilibrium stage closure     |
 | `diagnostics.py`    | classified infeasibility (names the offending section/pinch)                           |
 | `driver.py`         | size a column, sweep `(R, S, E/F)`, build the design map                               |
@@ -92,7 +100,7 @@ reflux tested.
 
 **How it is located.**
 
-0. Trim each profile's **pinch tail** (`_travel_end`). A profile that has stopped
+0. Trim each profile's **pinch tail** (`travel_end`). A profile that has stopped
    moving needs infinite stages to get anywhere, so its crawl is not somewhere a
    feed can be placed; trimming also stops the scan matching against a pile-up of
    near-coincident points. The cut is where the per-stage step falls below the

@@ -5,7 +5,7 @@
     {
       "name": "ColumnForge Configuration",
       "state": {
-        "num_stages": 38,
+        "num_stages": 41,
         "pressure": 1.0,
         "pressure_drop": 0.0,
         "stage_efficiency": 0.5,
@@ -69,7 +69,7 @@
           "Feed": {
             "id": "Feed",
             "stream_type": "Feed",
-            "stage": 35,
+            "stage": 38,
             "temperature": 336.82259999999997,
             "flow": 1510.0,
             "composition": {
@@ -88,10 +88,10 @@
             "stream_type": "Distillate",
             "stage": 46,
             "temperature": null,
-            "flow": 1345.13216,
+            "flow": 1357.4265799999998,
             "composition": {
-              "MEOH": 0.9979142718586105,
-              "DMC": 0.0020857281413894694,
+              "MEOH": 0.9989665813085817,
+              "DMC": 0.0010334186914182876,
               "2ME": 0.0,
               "EG": 0.0,
               "EC": 0.0,
@@ -120,7 +120,7 @@
           "Entrainer": {
             "id": "Entrainer",
             "stream_type": "Feed",
-            "stage": 15,
+            "stage": 18,
             "temperature": 456.746,
             "flow": 1510.0,
             "composition": {
@@ -149,7 +149,7 @@
         "thermodynamics_config": {
           "vle_model": "PLXANT",
           "activity_model": "NRTL",
-          "eos_model": "SRK",
+          "eos_model": "Ideal Gas",
           "energy_balance": false,
           "component_params": {
             "MEOH": {
@@ -757,8 +757,8 @@
         },
         "modules": {},
         "bvm_params": {
-          "rec_lk": 0.98,
-          "rec_hk": 0.02,
+          "rec_lk": 0.99,
+          "rec_hk": 0.009999999999999997,
           "r_spin": 2.0,
           "q_spin": 1.0,
           "eff_spin": 0.5,
@@ -773,34 +773,22 @@
           "lk": "MEOH",
           "hk": "DMC",
           "extractive": true,
+          "entrainer_eb": false,
           "entrainer": "AN",
-          "omega": null,
-          "reaction": {
-            "on": false,
-            "nu": {
-              "MEOH": 0.0,
-              "DMC": 0.0,
-              "2ME": 0.0,
-              "EG": 0.0,
-              "EC": 0.0,
-              "AN": 0.0
-            },
-            "ref": "AN",
-            "keq_a": 2.303,
-            "keq_b": 0.0
-          }
+          "anchor_method": "saddle"
         },
         "rbm_params": {
-          "lk": "2-propanol",
-          "hk": "water",
+          "lk": "MEOH",
+          "hk": "DMC",
           "rec_lk": 0.99,
           "rec_hk": 0.01,
           "q_spin": 1.0,
           "sharp": false,
-          "r_spin": 3.0,
+          "r_spin": 2.0,
           "extractive": true,
-          "entrainer": "ethylene glycol",
-          "ef_spin": 0.75,
+          "entrainer_eb": false,
+          "entrainer": "AN",
+          "ef_spin": 1.0,
           "r_hi": 30.0,
           "n_scan": 12,
           "ef_lo": 0.2,
@@ -808,10 +796,24 @@
           "ef_pts": 10,
           "view": 0
         },
+        "reactions": {
+          "on": false,
+          "nu": {
+            "MEOH": 0.0,
+            "DMC": 0.0,
+            "2ME": 0.0,
+            "EG": 0.0,
+            "EC": 0.0,
+            "AN": 0.0
+          },
+          "ref": "AN",
+          "keq_a": 2.303,
+          "keq_b": 0.0
+        },
         "specs": [
           {
             "kind": "Light-key recovery",
-            "value": 0.98,
+            "value": 0.99,
             "unit_ref": "LK_RECOVERY",
             "component": -1
           },

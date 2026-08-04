@@ -35,7 +35,9 @@ _TYPES = {
                    "num_stages": "Stripper stages:",
                    "ratio": "Boilup ratio (V/B):"},
         "hint": "Liquid drawn to a reboiled side column: its bottoms is a side "
-                "product, its overhead vapour returns above the draw.",
+                "product, its overhead vapour returns above the draw. Draw "
+                "ABOVE the feed — below it the liquid is already bottoms and "
+                "the side product is a copy of it.",
     },
     "Side Rectifier": {
         "rows": ("stage", "return_stage", "rate", "num_stages", "ratio"),
@@ -45,7 +47,9 @@ _TYPES = {
                    "num_stages": "Rectifier stages:",
                    "ratio": "Reflux ratio (L/D):"},
         "hint": "Vapour drawn to a condensed side column: its distillate is a "
-                "side product, its liquid returns below the draw.",
+                "side product, its liquid returns below the draw. Draw BELOW "
+                "the feed — above it the vapour is already distillate and the "
+                "side product is a copy of it.",
     },
 }
 

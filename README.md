@@ -463,7 +463,7 @@ columnForge/
 
 ## Testing
 
-The solver and state layers are Qt-free and self-checking. 239 tests, headless:
+The solver and state layers are Qt-free and self-checking. 278 tests, headless:
 
 ```bash
 QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/bvm/tests/ src/side_features/rbm/tests/

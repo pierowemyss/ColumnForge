@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal
 
 from .unit_combo_box import UnitComboBox
+from ..table_edit import parse_number, fmt_number
 from ..theme import set_state
 
 
@@ -317,23 +318,15 @@ class StreamConfigPanel(QWidget):
         values = []
 
         for row in range(self.comp_table.rowCount()):
-            try:
-                item = self.comp_table.item(row, 1)
-                if item is None or not item.text():
-                    value = 0.0
-                else:
-                    value = float(item.text())
-                value = max(0, min(1, value))
-                item = self.comp_table.item(row, 1)
-                if item is not None:
-                    item.setText(f"{value:.4f}")
-                values.append(value)
-                total += value
-            except ValueError:
-                item = self.comp_table.item(row, 1)
-                if item is not None:
-                    item.setText("0.0000")
-                values.append(0)
+            item = self.comp_table.item(row, 1)
+            # parse_number/fmt_number, not float()/"%.4f": a pasted unicode
+            # minus used to zero the cell, and 4 decimals rounded a 5e-6 trace
+            # component away to nothing.
+            value = max(0.0, min(1.0, parse_number(item.text() if item else "", 0.0)))
+            if item is not None:
+                item.setText(fmt_number(value))
+            values.append(value)
+            total += value
         # ponytail: no auto-normalize; sum is shown by _update_comp_sum, enforced at solve time
 
     def _avg_mw(self):
@@ -346,10 +339,7 @@ class StreamConfigPanel(QWidget):
         for row in range(self.comp_table.rowCount()):
             name_item = self.comp_table.item(row, 0)
             val_item = self.comp_table.item(row, 1)
-            try:
-                frac = float(val_item.text()) if val_item and val_item.text() else 0.0
-            except ValueError:
-                frac = 0.0
+            frac = parse_number(val_item.text() if val_item else "", 0.0)
             if frac <= 0.0:
                 continue
             sp = self.window_state.species.get(name_item.text()) if name_item else None
@@ -363,12 +353,8 @@ class StreamConfigPanel(QWidget):
         """Update the composition sum label."""
         total = 0.0
         for row in range(self.comp_table.rowCount()):
-            try:
-                item = self.comp_table.item(row, 1)
-                if item and item.text():
-                    total += float(item.text())
-            except ValueError:
-                pass
+            item = self.comp_table.item(row, 1)
+            total += parse_number(item.text() if item else "", 0.0)
 
         self.comp_sum_label.setText(f"Sum: {total:.4f}")
         set_state(self.comp_sum_label,
@@ -385,11 +371,8 @@ class StreamConfigPanel(QWidget):
             species_item = self.comp_table.item(row, 0)
             value_item = self.comp_table.item(row, 1)
             if species_item and species_item.text():
-                species = species_item.text()
-                try:
-                    composition[species] = float(value_item.text()) if value_item and value_item.text() else 0.0
-                except ValueError:
-                    composition[species] = 0.0
+                composition[species_item.text()] = parse_number(
+                    value_item.text() if value_item else "", 0.0)
 
         return {
             "id": self.current_stream_id,

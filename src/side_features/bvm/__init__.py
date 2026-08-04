@@ -19,10 +19,17 @@ Module map (blueprint Sec 18):
     thermo_adapter ThermoProvider interface + ColumnForge wrapper
     sections       difference-point chain (Delta_k, delta_k) + operating lines
     march          equilibrium + operating-line stepping, stable-direction
-    anchor         product ends, continuation, saddle-pinch manifold launch
+    anchor         product ends, and the three ways to start an INTERIOR section
+                   (`Problem.anchor_method`): saddle manifolds, the saddle's ray
+                   end, or continuation off a neighbour
     connect        closest-approach connection in full R^(C-1) -> stage counts
     place          feed operating-line crossover, side-draw purity target
     pinch          fixed-point + eigen classification -> R_min, min E/F
+    bodies         rectification bodies + hull distance. Shared with RBM (which
+                   re-exports it) and used here to PRUNE which arm of which
+                   saddle an interior section can be on before anything is
+                   marched -- the hull is an over-approximation, so it cannot
+                   choose, only rule out
     reactive       reaction-invariant transformed-composition marching
     diagnostics    classified infeasibility
     driver         sweep (R,S,E/F), build the design map, size a column
@@ -36,5 +43,6 @@ Module map (blueprint Sec 18):
 
 __all__ = [
     "problem", "thermo_adapter", "sections", "march", "anchor", "connect",
-    "place", "pinch", "reactive", "diagnostics", "driver", "handoff", "api",
+    "place", "pinch", "bodies", "reactive", "diagnostics", "driver", "handoff",
+    "api",
 ]

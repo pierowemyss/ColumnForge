@@ -149,6 +149,27 @@ def test_side_stripper_runs_through_the_gui_path():
         w._solve_bubble_point()
 
 
+def test_side_section_solves_on_the_threaded_job_path():
+    """The Run button does not call _solve_*: it builds a job that warm-starts
+    the final solve from the operating-point resolve. That extra x0/T0 collided
+    with the one the tear passes on every pass after the first — "got multiple
+    values for keyword argument 'x0'" — so every side-section column died on the
+    only path a user can actually reach."""
+    from gui.state.window_state import ModuleConfig, ModuleType
+
+    w, ws = _configured_window()
+    ws.add_module("Side Stripper 1",
+                  ModuleConfig(module_type=ModuleType.SIDE_STRIPPER, stage=12,
+                               return_stage=11, rate=25.0, boilup_ratio=1.5,
+                               num_stages=4))
+    for method in ("Bubble-Point", "Inside-Out (HYSIM)"):
+        prof = w._make_solver_job(method)(lambda *a, **k: None, lambda: False)
+        assert prof["found"], (method, prof.get("message"))
+        assert prof["side_tear_residual"] < 1e-4, (method,
+                                                   prof["side_tear_residual"])
+        assert "NOT converged" not in prof["message"], (method, prof["message"])
+
+
 def test_gather_rejects_bad_composition_and_stage():
     import pytest
     w, ws = _configured_window()

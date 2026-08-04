@@ -30,7 +30,7 @@ from side_features.bvm.driver import r_min as bvm_r_min
 from side_features.bvm.problem import build_problem
 from side_features.bvm.thermo_adapter import ColumnForgeThermo
 from side_features.rbm import bodies as B
-from side_features.rbm.driver import analyse, reflux_band
+from side_features.rbm.driver import analyze, reflux_band
 
 _C2C4 = "docs/examples/c2-c4.colx"
 
@@ -55,20 +55,32 @@ def _c2c4_problem(sharp=True):
     assert order == ["ethane", "propane", "n-butane"], order
 
     P = ws.thermodynamics_config.pressure_in_psat_unit(ws.pressure)
-    provider = ColumnForgeThermo(ws.thermodynamics_config.psat_params(order),
-                                 gamma_fn=ws.build_gamma_fn(order),
-                                 phi_fn=ws.build_phi_fn(order))
+    provider = ColumnForgeThermo(
+        ws.thermodynamics_config.psat_params(order),
+        gamma_fn=ws.build_gamma_fn(order),
+        phi_fn=ws.build_phi_fn(order),
+    )
     z = np.array([0.5, 0.25, 0.25])
     lk, hk = 0, 1
 
     kw = {}
     if sharp:
-        xD = np.zeros(3); xD[lk] = 1.0
-        xB = z.copy(); xB[lk] = 0.0
+        xD = np.zeros(3)
+        xD[lk] = 1.0
+        xB = z.copy()
+        xB[lk] = 0.0
         kw = {"xD": xD, "xB": xB / xB.sum()}
 
-    prob = build_problem(comps=order, feeds=[(z, 100.0, 1.0)], pressure=P,
-                         lk=lk, hk=hk, rec_lk=0.99, rec_hk=0.01, **kw)
+    prob = build_problem(
+        comps=order,
+        feeds=[(z, 100.0, 1.0)],
+        pressure=P,
+        lk=lk,
+        hk=hk,
+        rec_lk=0.99,
+        rec_hk=0.01,
+        **kw,
+    )
     return prob, provider, z
 
 
@@ -133,8 +145,8 @@ def test_the_bodies_actually_touch_at_the_reported_rmin(c2c4):
     prob, tp, _ = c2c4
     lo = reflux_band(prob, tp)[0]
     assert lo is not None
-    assert analyse(prob, tp, r=lo)["max_gap"] <= B.TOUCH_TOL, "bodies apart at r_min"
-    below = analyse(prob, tp, r=0.95 * lo)["max_gap"]
+    assert analyze(prob, tp, r=lo)["max_gap"] <= B.TOUCH_TOL, "bodies apart at r_min"
+    below = analyze(prob, tp, r=0.95 * lo)["max_gap"]
     assert below > B.TOUCH_TOL, f"still touching 5% below r_min ({below:.3g})"
 
 
@@ -150,14 +162,19 @@ def test_the_stripping_stable_node_lands_on_the_rectifying_body(c2c4):
     """
     prob, tp, _ = c2c4
     lo = reflux_band(prob, tp)[0]
-    res = analyse(prob, tp, r=lo)
+    res = analyze(prob, tp, r=lo)
     secs = {s["name"]: s for s in res["sections"]}
     rect = np.vstack([b["vertices"] for b in secs["rectifying"]["bodies"]])
-    nodes = [p["x"] for p in secs["stripping"]["pinches"]
-             if p["in_simplex"] and p["kind"] == "stable_node"]
+    nodes = [
+        p["x"]
+        for p in secs["stripping"]["pinches"]
+        if p["in_simplex"] and p["kind"] == "stable_node"
+    ]
     assert nodes, "the stripping section has no stable node in the simplex"
     d = min(B.body_distance(np.atleast_2d(n), rect) for n in nodes)
-    assert d <= B.TOUCH_TOL, f"stripping stable node sits {d:.3g} off the rectifying body"
+    assert (
+        d <= B.TOUCH_TOL
+    ), f"stripping stable node sits {d:.3g} off the rectifying body"
 
 
 def _report():
@@ -174,23 +191,31 @@ def _report():
     t_bvm = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    res = analyse(prob, tp, r=lo) if lo else None
+    res = analyze(prob, tp, r=lo) if lo else None
     t_one = time.perf_counter() - t0
 
     print(f"\nc2-c4  (sharp split, ethane/propane over n-butane)")
     print(f"  Underwood r_min   {ref:.4f}")
-    print(f"  BVM       r_min   {bvm if bvm is None else f'{bvm:.4f}'}"
-          f"   [{t_bvm:.1f} s]")
-    print(f"  RBM       r_min   {lo if lo is None else f'{lo:.4f}'}"
-          f"   r_max {hi}   [{t_rbm:.1f} s]")
+    print(
+        f"  BVM       r_min   {bvm if bvm is None else f'{bvm:.4f}'}"
+        f"   [{t_bvm:.1f} s]"
+    )
+    print(
+        f"  RBM       r_min   {lo if lo is None else f'{lo:.4f}'}"
+        f"   r_max {hi}   [{t_rbm:.1f} s]"
+    )
     if res is not None:
-        print(f"  body gap at RBM r_min   {res['max_gap']:.3g}"
-              f"   (touching if <= {B.TOUCH_TOL:g})")
+        print(
+            f"  body gap at RBM r_min   {res['max_gap']:.3g}"
+            f"   (touching if <= {B.TOUCH_TOL:g})"
+        )
         for s in res["sections"]:
             kinds = [p["kind"] for p in s["pinches"] if p["in_simplex"]]
-            print(f"    {s['name']:<11} {len(s['bodies'])} bodies, "
-                  f"{len(kinds)} pinches in simplex: {kinds}")
-        print(f"  one analyse()   [{t_one:.2f} s]")
+            print(
+                f"    {s['name']:<11} {len(s['bodies'])} bodies, "
+                f"{len(kinds)} pinches in simplex: {kinds}"
+            )
+        print(f"  one analyze()   [{t_one:.2f} s]")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """RBM design driver: feasibility, minimum/maximum reflux, minimum entrainer.
 
-`analyse(prob, tp, r, EF)` is the single operating-point call. It builds the
+`analyze(prob, tp, r, EF)` is the single operating-point call. It builds the
 section chain, solves each section's pinch points, spans them into rectification
 bodies, and reports the closest approach between adjacent sections' bodies. Zero
 closest approach means the sections can be joined by a real column profile, so
@@ -25,13 +25,17 @@ RBM gives no stage count -- a body approximates a profile, it is not one. Feed
 the operating point it finds to BVM to size the column there.
 """
 
+from functools import partial
+
 import numpy as np
 
-from side_features.bvm.problem import overall_balance
+from side_features.bvm.parallel import pmap
 from side_features.bvm.pinch import feasible_band
-from side_features.bvm.sections import single_feed_chain, extractive_chain
+from side_features.bvm.problem import overall_balance
+from side_features.bvm.sections import extractive_chain, single_feed_chain
 
-from .bodies import TOUCH_TOL, middle_bodies, product_bodies, sets_distance
+from .bodies import (TOUCH_TOL, middle_bodies, product_bodies, sets_distance,
+                     winning_middle_body)
 from .pinch import pinch_points
 
 #: Operational constraints from the paper (p.146): a design wants headroom, not
@@ -50,7 +54,41 @@ def _chain(prob, r, EF, xD, xB, D, B):
     return [rect, strip], None
 
 
-def analyse(prob, tp, r, EF=None):
+def _gap(info, k):
+    d, ia, ib = sets_distance(info[k]["bodies"], info[k + 1]["bodies"])
+    return {
+        "pair": (info[k]["name"], info[k + 1]["name"]),
+        "distance": d,
+        "active": (ia, ib),
+    }
+
+
+def _middle_gaps(info):
+    """Both junctions of an extractive column, through ONE middle body.
+
+    The rule and its argument live in `bodies.winning_middle_body`, because
+    `bvm.driver` has to make the identical choice before it marches the interior
+    section and the two must not disagree. All this adds is the naming: which
+    body index each junction is drawn against, and the body's `id`, so the same
+    body is recognisable in the BVM panel.
+    """
+    top, mid, bot = info
+    pairs = [(top["name"], mid["name"]), (mid["name"], bot["name"])]
+    got = winning_middle_body(top["bodies"], mid["bodies"], bot["bodies"])
+    if got is None:  # no middle body: nothing can join
+        return [
+            {"pair": p, "distance": float("inf"), "active": (None, None),
+             "body_id": None} for p in pairs
+        ]
+    j, d_up, d_lo, i_top, i_bot = got
+    bid = mid["bodies"][j].get("id")
+    return [
+        {"pair": pairs[0], "distance": d_up, "active": (i_top, j), "body_id": bid},
+        {"pair": pairs[1], "distance": d_lo, "active": (j, i_bot), "body_id": bid},
+    ]
+
+
+def analyze(prob, tp, r, EF=None):
     """Pinches, bodies and body gaps for one operating point.
 
     Returns dict(feasible, gaps, sections, r, EF, ...) where `sections` carries,
@@ -80,40 +118,52 @@ def analyse(prob, tp, r, EF=None):
 
     info = []
     for k, sec in enumerate(secs):
-        ps = pinch_points(sec, tp, P)
+        # A middle section's profile runs top-to-bottom whatever sign(D - E) is,
+        # so it cannot take the direction from `sec.dir` -- see `pinch.jacobian`.
+        ps = pinch_points(sec, tp, P, down=True if k == mid else None)
         if k == mid:
-            bs = middle_bodies(ps)
+            bs = middle_bodies(ps, sec)
         else:
             bs = product_bodies(ps, prods[k])
-        info.append({"name": sec.name, "section": sec, "pinches": ps,
-                     "bodies": bs})
+        info.append({"name": sec.name, "section": sec, "pinches": ps, "bodies": bs})
 
-    gaps = []
-    for k in range(len(info) - 1):
-        d, ia, ib = sets_distance(info[k]["bodies"], info[k + 1]["bodies"])
-        gaps.append({"pair": (info[k]["name"], info[k + 1]["name"]),
-                     "distance": d, "active": (ia, ib)})
+    gaps = (
+        _middle_gaps(info)
+        if mid is not None
+        else [_gap(info, k) for k in range(len(info) - 1)]
+    )
 
     feasible = bool(gaps) and all(g["distance"] <= TOUCH_TOL for g in gaps)
-    return {"feasible": feasible, "gaps": gaps, "sections": info,
-            "r": float(r), "EF": None if EF is None else float(EF),
-            # carried out so a caller can SAY that an explicit xD/xB does not
-            # close the balance. `overall_balance` only warns, and a warning
-            # raised on a solver thread reaches nobody.
-            "balance_residual": float(prob.balance_residual),
-            "xD": xD, "xB": xB, "D": D, "B": B,
-            "comps": list(prob.comps), "lk": prob.lk, "hk": prob.hk,
-            "max_gap": max((g["distance"] for g in gaps), default=float("inf"))}
+    return {
+        "feasible": feasible,
+        "gaps": gaps,
+        "sections": info,
+        "r": float(r),
+        "EF": None if EF is None else float(EF),
+        # carried out so a caller can SAY that an explicit xD/xB does not
+        # close the balance. `overall_balance` only warns, and a warning
+        # raised on a solver thread reaches nobody.
+        "balance_residual": float(prob.balance_residual),
+        "xD": xD,
+        "xB": xB,
+        "D": D,
+        "B": B,
+        "comps": list(prob.comps),
+        "lk": prob.lk,
+        "hk": prob.hk,
+        "max_gap": max((g["distance"] for g in gaps), default=float("inf")),
+    }
 
 
 def _feasible_at(prob, tp, r, EF):
     try:
-        return analyse(prob, tp, r, EF)["feasible"]
+        return analyze(prob, tp, r, EF)["feasible"]
     except (ValueError, FloatingPointError, np.linalg.LinAlgError):
         return False
 
 
-def reflux_band(prob, tp, EF=None, r_lo=0.05, r_hi=30.0, n_scan=24, tol=1e-3):
+def reflux_band(prob, tp, EF=None, r_lo=0.05, r_hi=30.0, n_scan=24, tol=1e-3,
+                cancelled=None):
     """(r_min, r_max) at this entrainer ratio, or (None, None) if nothing works.
 
     Scanned first, then bisected at each end -- see `bvm.pinch.feasible_band`,
@@ -121,8 +171,20 @@ def reflux_band(prob, tp, EF=None, r_lo=0.05, r_hi=30.0, n_scan=24, tol=1e-3):
     reading the same kind of number. A simple column's band runs to the scan
     ceiling and `r_max` comes back None.
     """
-    return feasible_band(lambda r: _feasible_at(prob, tp, float(r), EF),
-                         r_lo, r_hi, n_scan=n_scan, tol=tol)
+    return feasible_band(
+        partial(_feasible_at_r, prob, tp, EF),
+        r_lo,
+        r_hi,
+        n_scan=n_scan,
+        tol=tol,
+        cancelled=cancelled,
+    )
+
+
+def _feasible_at_r(prob, tp, EF, r):
+    """`_feasible_at` with the reflux last, behind a `partial` -- a module-level
+    callable is what `bvm.parallel.pmap` needs to put the scan on a pool."""
+    return _feasible_at(prob, tp, float(r), EF)
 
 
 def r_min(prob, tp, EF=None, r_hi=30.0):
@@ -135,8 +197,13 @@ def r_max(prob, tp, EF=None, r_hi=30.0):
     return reflux_band(prob, tp, EF=EF, r_hi=r_hi)[1]
 
 
-def operating_region(prob, tp, EF_grid=None, r_hi=30.0, n_scan=24,
-                     on_step=None, cancelled=None):
+def _band_at_EF(prob, tp, r_hi, n_scan, ef):
+    return reflux_band(prob, tp, EF=ef, r_hi=r_hi, n_scan=n_scan)
+
+
+def operating_region(
+    prob, tp, EF_grid=None, r_hi=30.0, n_scan=24, on_step=None, cancelled=None
+):
     """The feasible (E/F, r) region -- the paper's Figure 9.
 
     Returns dict(EF, r_min, r_max, EF_min, r_at_EF_min, operating). Entries are
@@ -157,15 +224,15 @@ def operating_region(prob, tp, EF_grid=None, r_hi=30.0, n_scan=24,
     EFs = np.atleast_1d(np.asarray(EF_grid, float))
     lo = np.full(len(EFs), np.nan)
     hi = np.full(len(EFs), np.nan)
-    for i, ef in enumerate(EFs):
-        if cancelled is not None and cancelled():
-            break
-        a, b = reflux_band(prob, tp, EF=float(ef), r_hi=r_hi, n_scan=n_scan)
+    for i, band in enumerate(pmap(partial(_band_at_EF, prob, tp, r_hi, n_scan),
+                                  [float(ef) for ef in EFs],
+                                  on_step=on_step, cancelled=cancelled)):
+        if band is None:                  # cancelled before reaching this ratio
+            continue
+        a, b = band
         if a is not None:
             lo[i] = a
             hi[i] = r_hi if b is None else b
-        if on_step is not None:
-            on_step(i + 1, len(EFs))
 
     feasible_idx = np.flatnonzero(np.isfinite(lo))
     ef_min = float(EFs[feasible_idx[0]]) if len(feasible_idx) else None
@@ -177,30 +244,44 @@ def operating_region(prob, tp, EF_grid=None, r_hi=30.0, n_scan=24,
             continue
         if np.isfinite(hi[i]) and hi[i] < PI_R_MIN * lo[i]:
             continue
-        operating = {"EF": float(EFs[i]), "r_min": float(lo[i]),
-                     "r_max": float(hi[i])}
+        operating = {"EF": float(EFs[i]), "r_min": float(lo[i]), "r_max": float(hi[i])}
         break
 
-    return {"EF": EFs, "r_min": lo, "r_max": hi, "EF_min": ef_min,
-            "r_at_EF_min": r_at, "operating": operating}
+    return {
+        "EF": EFs,
+        "r_min": lo,
+        "r_max": hi,
+        "EF_min": ef_min,
+        "r_at_EF_min": r_at,
+        "operating": operating,
+    }
 
 
 def _demo():
     from side_features.bvm.problem import build_problem
     from side_features.bvm.thermo_adapter import ColumnForgeThermo
 
-    abc = np.array([(6.90565, 1211.033, 220.79),
-                    (6.95464, 1344.8, 219.48),
-                    (6.99052, 1453.43, 215.31)])
+    abc = np.array(
+        [
+            (6.90565, 1211.033, 220.79),
+            (6.95464, 1344.8, 219.48),
+            (6.99052, 1453.43, 215.31),
+        ]
+    )
     tp = ColumnForgeThermo(abc)
     z = np.array([0.4, 0.35, 0.25])
-    prob = build_problem(["b", "t", "x"], [(z, 100.0, 1.0)], 760.0,
-                         rec_lk=0.98, rec_hk=0.02,
-                         xD=np.array([1.0, 0.0, 0.0]),
-                         xB=np.array([0.0, 0.5838, 0.4162]))
+    prob = build_problem(
+        ["b", "t", "x"],
+        [(z, 100.0, 1.0)],
+        760.0,
+        rec_lk=0.98,
+        rec_hk=0.02,
+        xD=np.array([1.0, 0.0, 0.0]),
+        xB=np.array([0.0, 0.5838, 0.4162]),
+    )
 
     # one operating point: every section gets pinches and at least one body
-    a = analyse(prob, tp, r=4.0)
+    a = analyze(prob, tp, r=4.0)
     assert [s["name"] for s in a["sections"]] == ["rectifying", "stripping"]
     assert all(s["pinches"] for s in a["sections"]), "a section found no pinch"
     assert all(s["bodies"] for s in a["sections"])
@@ -220,11 +301,13 @@ def _demo():
     assert not _feasible_at(prob, tp, lo * 0.5, None), "below it must fail"
 
     # the body gap is a real distance: it shrinks as reflux approaches r_min
-    far = analyse(prob, tp, r=lo * 0.5)["max_gap"]
-    near = analyse(prob, tp, r=lo * 0.95)["max_gap"]
+    far = analyze(prob, tp, r=lo * 0.5)["max_gap"]
+    near = analyze(prob, tp, r=lo * 0.95)["max_gap"]
     assert near < far, (near, far)
-    print(f"rbm.driver self-check OK  r_min={lo:.3f} (r_max={hi})  "
-          f"gap {far:.3g} -> {near:.3g} approaching it")
+    print(
+        f"rbm.driver self-check OK  r_min={lo:.3f} (r_max={hi})  "
+        f"gap {far:.3g} -> {near:.3g} approaching it"
+    )
 
 
 if __name__ == "__main__":

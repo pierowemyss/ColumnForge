@@ -43,10 +43,12 @@ import numpy as np
 #: orders of margin on both sides, so this is not a tuning knob.
 CROSS_TOL = 1e-6
 
-#: Largest one-stage step that still counts as a junction at C >= 4, where an
-#: exact crossing provably does not exist (see `connect`). Caps a stiff section's
-#: first step -- the C=6 reference column moves 0.46 in one stage near the
-#: distillate -- so the near-miss allowance cannot swallow half the simplex.
+#: Largest one-stage step that still counts as a junction on either near-miss
+#: path -- C >= 4, where an exact crossing provably does not exist, and a
+#: saddle-launched interior arm (see `connect`). Caps a stiff section's step --
+#: the C=6 reference column moves 0.46 in one stage near the distillate, and an
+#: extractive column's rectifying section moves 0.75 -- so the near-miss
+#: allowance cannot swallow half the simplex.
 STEP_CAP = 0.05
 
 
@@ -88,7 +90,60 @@ def _seg_seg(p1, p2, q1, q2):
     return float(np.linalg.norm(cp - cq)), float(s), float(t), 0.5 * (cp + cq)
 
 
-def _travel_end(X, tol=CROSS_TOL):
+def _closest_pair(XA, kA, XB, kB):
+    """(i, j, dist, s, t, midpoint) for the closest of all kA*kB segment pairs.
+
+    The same clamped formulation as `_seg_seg`, run over every pair at once.
+    Ties break to the lowest (i, j) exactly as the scalar loop did, because
+    `argmin` on a C-ordered (kA, kB) grid scans in that order.
+
+    ponytail: materialises a (kA, kB, C) difference array. Profiles are bounded
+    by `Problem.max_column_stages` (~100s of stages, C <= ~6), so that is a few
+    MB; chunk over i if a column ever gets big enough to matter.
+    """
+    P1, D1 = XA[:kA], XA[1:kA + 1] - XA[:kA]
+    Q1, D2 = XB[:kB], XB[1:kB + 1] - XB[:kB]
+    a = np.einsum("ik,ik->i", D1, D1)                    # (kA,)
+    e = np.einsum("jk,jk->j", D2, D2)                    # (kB,)
+    r = P1[:, None, :] - Q1[None, :, :]                  # (kA, kB, C)
+    f = np.einsum("jk,ijk->ij", D2, r)
+    c = np.einsum("ik,ijk->ij", D1, r)
+    b = D1 @ D2.T
+
+    tiny = 1e-30
+    a_ok, e_ok = a[:, None] > tiny, e[None, :] > tiny
+    a_safe = np.where(a_ok, a[:, None], 1.0)
+    e_safe = np.where(e_ok, e[None, :], 1.0)
+    denom = a[:, None] * e[None, :] - b * b
+    denom_ok = denom > tiny
+
+    # general case, both segments non-degenerate
+    s = np.where(denom_ok,
+                 np.clip((b * f - c * e[None, :]) / np.where(denom_ok, denom, 1.0),
+                         0.0, 1.0), 0.0)
+    t = (b * s + f) / e_safe
+    # t off either end pins that segment and re-solves for s
+    s = np.where(t < 0.0, np.clip(-c / a_safe, 0.0, 1.0),
+                 np.where(t > 1.0, np.clip((b - c) / a_safe, 0.0, 1.0), s))
+    t = np.clip(t, 0.0, 1.0)
+
+    # degenerate segments (a marched profile can repeat a point once it pinches)
+    s = np.where(a_ok, s, 0.0)
+    t = np.where(a_ok | ~e_ok, t, np.clip(f / e_safe, 0.0, 1.0))   # point vs segment
+    s = np.where(e_ok | ~a_ok, s, np.clip(-c / a_safe, 0.0, 1.0))  # segment vs point
+    t = np.where(e_ok, t, 0.0)
+
+    cp = P1[:, None, :] + s[..., None] * D1[:, None, :]
+    cq = Q1[None, :, :] + t[..., None] * D2[None, :, :]
+    diff = cp - cq
+    dist = np.sqrt(np.einsum("ijk,ijk->ij", diff, diff))
+    flat = int(np.argmin(dist))
+    i, j = divmod(flat, kB)
+    return (i, j, float(dist[i, j]), float(s[i, j]), float(t[i, j]),
+            0.5 * (cp[i, j] + cq[i, j]))
+
+
+def travel_end(X, tol=CROSS_TOL):
     """Number of leading segments that still travel -- the pinch-tail onset.
 
     Criteria doc Sec 6: a profile that has stopped moving needs infinite stages
@@ -126,7 +181,7 @@ def _no_connection(XA, XB, eps_stage):
 
 
 def connect(profA, profB, secA, tp, P, eps_stage=1e-2, efficiency=1.0,
-            strict=True):
+            strict=True, step_cap=STEP_CAP):
     """Feed-stage junction test between the section above a feed and the one below.
 
     Locates the intersection (X) of the two marched liquid profiles by an
@@ -162,27 +217,38 @@ def connect(profA, profB, secA, tp, P, eps_stage=1e-2, efficiency=1.0,
 
     `efficiency` no longer widens the tolerance at C <= 3 -- it used to divide it,
     doubling the accepted gap at E=0.5, which is half of why R_min came out low.
-    It still does on the C >= 4 near-miss path, where there is no crossing to
-    tighten onto.
+    It still does on the near-miss paths, where there is no crossing to tighten
+    onto.
 
-    ponytail: O(N*M) scan. Profiles are a few hundred points and the marching,
-    not this, is what costs; the criteria doc's two-pointer walk is the upgrade
-    path if that ever stops being true.
+    `step_cap` bounds that local step so the near-miss allowance cannot swallow
+    half the simplex, and it now applies to the INTERIOR path as well as C >= 4.
+    An extractive column's rectifying section amplifies the entrainer ~45x per
+    stage, so on ipa/water/EG its marched segments are 0.586 and 0.751 long, and
+    the uncapped rule handed the interior junction a tolerance of 0.130-1.209 --
+    larger than most distances in the simplex. Every arm of the saddle then
+    "connected" at the upper junction at every reflux tested, so that junction
+    stopped discriminating between them and a 0.289 miss read as a connection. A
+    junction located on a 0.6-long chord is uncertain to +/-0.3 and is not a
+    junction.
+
+    Pass `step_cap=None` where the near miss is known to be structural rather than
+    a resolution problem. `driver._size_two` does exactly that for a REACTIVE
+    column: in transformed coordinates the reduced non-key split pins the
+    rectifying profile on a face of the reduced simplex, so MTBE's two profiles
+    stay 0.22 apart at every reflux and there is no crossing to find at any
+    tolerance. Capping there just deletes the column.
+
+    ponytail: still an O(N*M) scan, but vectorised (`_closest_pair`) -- it was
+    44% of an extractive `size_column` as a Python double loop. The criteria
+    doc's two-pointer walk is the upgrade path if N*M ever stops fitting in
+    memory.
     """
     XA, XB = profA["X"], profB["X"]
     if len(XA) < 2 or len(XB) < 2:
         return _no_connection(XA, XB, eps_stage)
 
-    kA, kB = _travel_end(XA), _travel_end(XB)
-    best = (np.inf, 0.0, 0.0, XA[0])
-    bi = bj = 0
-    for i in range(kA):
-        for j in range(kB):
-            d, s, t, mid = _seg_seg(XA[i], XA[i + 1], XB[j], XB[j + 1])
-            if d < best[0]:
-                best = (d, s, t, mid)
-                bi, bj = i, j
-    dmin, s, t, mid = best
+    kA, kB = travel_end(XA), travel_end(XB)
+    bi, bj, dmin, s, t, mid = _closest_pair(XA, kA, XB, kB)
 
     # criteria doc Sec 4/5: the crossing index on the UPPER profile is the feed
     # stage, because that is the liquid both sections share. The last stage above
@@ -203,10 +269,8 @@ def connect(profA, profB, secA, tp, P, eps_stage=1e-2, efficiency=1.0,
         locA = float(np.linalg.norm(XA[bi + 1] - XA[bi]))
         locB = float(np.linalg.norm(XB[bj + 1] - XB[bj]))
         loc = max(locA, locB)
-        if strict:
-            # C >= 4: cap a stiff section's first step (the C=6 reference column
-            # moves 1.36 in one stage) so the test cannot go vacuous.
-            loc = min(loc, STEP_CAP)
+        if step_cap is not None:
+            loc = min(loc, float(step_cap))
         tol = max(float(eps_stage), loc / max(float(efficiency), 1e-6))
     in_simplex = bool(mid.min() > -1e-6 and mid.max() < 1.0 + 1e-6)
     connected = bool(dmin <= tol and in_simplex)
@@ -301,7 +365,7 @@ def _demo():
     # pinch tails are trimmed off the search (criteria doc Step 0)
     crawl = np.vstack([np.linspace([0.9, 0.1, 0.0], [0.4, 0.5, 0.1], 6),
                        np.full((20, 3), [0.4, 0.5, 0.1])])
-    assert _travel_end(crawl) == 5, _travel_end(crawl)
+    assert travel_end(crawl) == 5, travel_end(crawl)
 
     # segment-segment sanity: two crossing unit segments meet at the origin
     d, ss, tt, mid = _seg_seg(
@@ -311,6 +375,27 @@ def _demo():
         np.array([0, 1.0, 0]),
     )
     assert d < 1e-9 and np.allclose(mid, 0.0)
+
+    # the vectorised all-pairs scan must agree with the scalar kernel it replaced,
+    # degenerate (repeated-point) segments included -- that is the whole contract.
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        A = rng.normal(size=(7, 3))
+        B = rng.normal(size=(5, 3))
+        A[3] = A[2]                       # a pinched stage on each side
+        B[1] = B[0]
+        kA, kB = len(A) - 1, len(B) - 1
+        best, bij = (np.inf, 0.0, 0.0, None), (0, 0)
+        for i in range(kA):
+            for j in range(kB):
+                got = _seg_seg(A[i], A[i + 1], B[j], B[j + 1])
+                if got[0] < best[0]:
+                    best, bij = got, (i, j)
+        vi, vj, vd, vs, vt, vmid = _closest_pair(A, kA, B, kB)
+        assert (vi, vj) == bij and abs(vd - best[0]) < 1e-12, ((vi, vj), bij, vd)
+        assert abs(vs - best[1]) < 1e-9 and abs(vt - best[2]) < 1e-9
+        assert np.allclose(vmid, best[3], atol=1e-12)
+
     print(f"connect self-check OK  dmin={c['dmin']:.3g} nA={c['nA']:.2f} "
           f"nB={c['nB']:.2f}  N~{N}")
 

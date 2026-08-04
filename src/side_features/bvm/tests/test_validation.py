@@ -191,7 +191,33 @@ def test_extractive_chain_and_feasible_band():
     """Extractive mode with an NRTL entrainer: the three-section chain builds,
     the interior section is routed through, and feasibility depends on E/F.
     ponytail: exact literature stage counts need rigorous saddle-manifold
-    tracing; asserted here is the method behaviour, not a three-digit number."""
+    tracing; asserted here is the method behaviour, not a three-digit number.
+
+    Currently xfails on the E/F dependence, and the reason is now measured rather
+    than open. It used to report feasible at E/F = 0.6 and 1.2, but only because
+    the interior junction tolerance was the local step: the two profiles there are
+    0.158 apart at the upper feed and 0.214 at the lower, and both were accepted.
+    With `connect.STEP_CAP` applied to the interior path (0.05) they are correctly
+    refused. The chain-construction half of the test still holds and is asserted
+    above the sweep.
+
+    It xfails a different way since the anchoring started enumerating all of the
+    section's saddles (rule 1, `docs/adr/0004-...`): every E/F in the sample now
+    "connects", and every one of those designs is degenerate -- a 1-stage
+    extractive section and a 1-stage stripping section, with the reboiler 15 K
+    COLDER than the tray above it, which `_inversion_verdict` allows only because
+    that step crosses a feed. E/F = 0.05 is essentially no entrainer and should not
+    size at all. The swapped-arm pairing is ranked behind the physical one so it
+    cannot displace a real design, and with the physical reading alone E/F = 1.2
+    is refused -- but the three below it still pass, degenerately.
+
+    That is a real gap in the method, not a bad tolerance: a junction is allowed to
+    sit where BOTH profiles have pinched, which needs infinitely many stages, and
+    `driver._at_anchor` only warns about it. Fixing that is the same change that
+    would give the extractive column its maximum reflux -- see
+    `docs/adr/0004-extractive-anchoring-and-the-r-max-gap.md`. It is also the same
+    shape as ipa/water/EG: a saddle-launched arm has to stand in for a profile the
+    free distillate splits were never solved for, see `driver.solve_omega`."""
     from core.thermodynamics import nrtl_gamma_fn
     from side_features.bvm.sections import extractive_chain
     from side_features.bvm.problem import overall_balance
@@ -252,7 +278,18 @@ def test_warm_start_beats_cold_start():
     assert warm["found"] and cold["found"]
     # both reach the same column (same distillate)
     assert np.allclose(warm["x"][0], cold["x"][0], atol=1e-3)
-    assert warm["iterations"] <= cold["iterations"]
+
+    # NOT `warm["iterations"] <= cold["iterations"]`, which this test asserted
+    # until the march's temperature array was realigned with its own liquid
+    # (T[k] used to be the bubble point of X[k+1] on a down-march). That made the
+    # handed-over T0 about 3.2 K hot, and on BTX a hot start is worth ~9
+    # iterations -- but so is *any* offset in that range: +0 K takes 31 passes,
+    # +1 K 22, +2 K 22, +3 K 25, +5 K 23, +8 K 31, with no trend. The count is
+    # measuring the solver's convergence path, not the quality of the guess, and
+    # the old assertion passed on that noise. Cold start takes 29 here, and x0
+    # alone (no T0) also takes 29. Keep a loose guard that the warm start is not
+    # catastrophically worse, and assert the real claim below.
+    assert warm["iterations"] <= 2 * cold["iterations"]
 
     # The real warm-start win is GUESS QUALITY, not the iteration tail (which is
     # dominated by the solver's own convergence): the BVM handoff must land the
@@ -266,6 +303,24 @@ def test_warm_start_beats_cold_start():
     assert warm_gap < 0.5 * cold_gap, (warm_gap, cold_gap)  # real margin over cold
     # temperatures too: handoff T0 within ~15 K of the converged column
     assert np.abs(np.asarray(init["T0"]) - np.asarray(warm["T"])).max() < 15.0
+
+    # T0 must describe the SAME stages as x0 -- the handoff hands both to MESH as
+    # one profile, so an offset between them is a silent corruption of the warm
+    # start. Cheap to state, and it is exactly what went wrong: T0[k] was the
+    # bubble point of x0[k+1].
+    Tb = np.array([tp.bubble_T(x, 760.0) for x in x0])
+    assert np.abs(Tb - np.asarray(init["T0"])).max() < 1e-6
+
+    # and stage-for-stage, lag 0 is the best alignment against the converged
+    # column -- the check that says the profile is not merely self-consistent but
+    # sitting on the right stages.
+    T0, Tsol, N = np.asarray(init["T0"]), np.asarray(warm["T"]), len(xsol)
+    def _lag_rms(lag):
+        a, b = ((T0[:N - lag], Tsol[lag:]) if lag >= 0
+                else (T0[-lag:], Tsol[:N + lag]))
+        return float(np.sqrt(np.mean((a - b) ** 2)))
+    assert _lag_rms(0) < min(_lag_rms(-1), _lag_rms(1)), [
+        _lag_rms(l) for l in (-1, 0, 1)]
 
 
 def test_solved_split_beats_the_trace_floor_as_a_warm_start():
