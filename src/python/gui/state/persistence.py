@@ -6,6 +6,15 @@ to dicts, enums to their ``.value``, the tuple-keyed binary-interaction dicts to
 ``[i, j, value]`` triples. Language-neutral, versioned, inspectable — the format
 a future native build reads. Pickle is gone.
 
+Since v3 a ``state`` holds a *flowsheet*: ``columns`` (id -> the per-column dict
+a v2 state used to be) plus ``connections`` between them, with species,
+thermodynamics and display units left at the top because every column shares
+them. ``_migrate_v2_flowsheet`` wraps an old flat state as ``columns["C1"]``, so
+every file saved by an earlier build keeps loading.
+
+Note ``cases`` is unrelated: a Case is an *alternative scenario* of the whole
+flowsheet, not one of its units.
+
 ``to_dict()`` / ``load_from_dict()`` still produce/consume *live* objects;
 ``encode_state`` / ``decode_state`` are the primitive boundary used only at file
 I/O. Decoders take fields by ``.get(...)`` with defaults, so a schema that gains
@@ -20,14 +29,16 @@ from dataclasses import fields
 
 from core.data_structures import SolverMode
 from core.dof import Spec, SpecKind
+from core.flowsheet import Connection
 
 from .window_state import (
-    Species, Stream, StreamType, CondenserConfig, CondenserType,
+    ColumnState, Species, Stream, StreamType, CondenserConfig, CondenserType,
     ReboilerConfig, ReboilerType, ModuleConfig, ModuleType,
     ThermodynamicsConfig, ComponentThermoParams, BinaryInteractionParams,
 )
 
-SCHEMA_VERSION = 2   # v2: stages are 0-based from the top (0 = distillate)
+SCHEMA_VERSION = 3   # v3: a flowsheet of columns + the connections between them
+                     # v2: stages are 0-based from the top (0 = distillate)
 
 _BINARY_DICTS = ("nrtl_aij", "nrtl_bij", "nrtl_cij", "uniquac_aij",
                  "uniquac_bij", "wilson_aij", "wilson_bij", "margules_aij")
@@ -95,18 +106,43 @@ def _enc_spec(sp: Spec) -> dict:
             "unit_ref": sp.unit_ref, "component": sp.component}
 
 
+def _enc_connection(c: Connection) -> dict:
+    return {"id": c.id, "src": c.src, "port": c.port, "dst": c.dst,
+            "stage": c.stage, "split_fraction": c.split_fraction, "q": c.q}
+
+
+def _enc_column(col: ColumnState) -> dict:
+    """One Column's whole configuration — the shape a v2 `state` used to have."""
+    return {
+        "num_stages": col.num_stages, "pressure": col.pressure,
+        "pressure_drop": col.pressure_drop,
+        "stage_efficiency": col.stage_efficiency,
+        "streams": {n: _enc_stream(s) for n, s in col.streams.items()},
+        "condenser_config": _enc_condenser(col.condenser_config),
+        "reboiler_config": _enc_reboiler(col.reboiler_config),
+        "modules": {n: _enc_module(m) for n, m in col.modules.items()},
+        "specs": [_enc_spec(sp) for sp in col.specs],
+        "light_key_index": col.light_key_index,
+        "heavy_key_index": col.heavy_key_index,
+        "method": col.method,
+        "node_pos": list(col.node_pos) if col.node_pos is not None else None,
+    }
+
+
 def encode_state(state: dict) -> dict:
-    """Primitive projection of a live WindowState.to_dict() snapshot."""
-    e = dict(state)   # scalars (num_stages, feed_stage, pressure, pressure_drop,
-                      # bvm_params, light/heavy_key_index) pass through. The
-                      # energy-balance flag rides on thermodynamics_config.
+    """Primitive projection of a live WindowState.to_dict() snapshot.
+
+    v3 shape: the flowsheet-global things (species, thermodynamics, display
+    units, the BVM/RBM panel knobs) sit at the top; every per-column field lives
+    under `columns[id]`, which is exactly the dict a v2 `state` was.
+    """
+    e = dict(state)   # bvm_params / rbm_params / reactions / active_column_id /
+                      # default_method are already primitives and pass through.
+                      # The energy-balance flag rides on thermodynamics_config.
     e["species"] = {n: _enc_species(s) for n, s in state["species"].items()}
-    e["streams"] = {n: _enc_stream(s) for n, s in state["streams"].items()}
-    e["condenser_config"] = _enc_condenser(state["condenser_config"])
-    e["reboiler_config"] = _enc_reboiler(state["reboiler_config"])
     e["thermodynamics_config"] = _enc_thermo(state["thermodynamics_config"])
-    e["modules"] = {n: _enc_module(m) for n, m in state["modules"].items()}
-    e["specs"] = [_enc_spec(sp) for sp in state["specs"]]
+    e["columns"] = {cid: _enc_column(c) for cid, c in state["columns"].items()}
+    e["connections"] = [_enc_connection(c) for c in state.get("connections", [])]
     du = state.get("display_units")
     if du is not None:
         e["display_units"] = {f.name: getattr(du, f.name) for f in fields(du)}
@@ -184,16 +220,39 @@ def _dec_spec(d: dict) -> Spec:
                 component=d.get("component", -1))
 
 
+def _dec_connection(d: dict) -> Connection:
+    return Connection(
+        id=d["id"], src=d["src"], port=d["port"], dst=d["dst"],
+        stage=int(d["stage"]),
+        split_fraction=float(d.get("split_fraction", 1.0)),
+        q=d.get("q"))
+
+
+def _dec_column(d: dict) -> ColumnState:
+    pos = d.get("node_pos")
+    return ColumnState(
+        num_stages=d.get("num_stages", 20),
+        pressure=d.get("pressure", 1.0),
+        pressure_drop=d.get("pressure_drop", 0.0),
+        stage_efficiency=d.get("stage_efficiency", 1.0),
+        streams={n: _dec_stream(x) for n, x in d.get("streams", {}).items()},
+        condenser_config=_dec_condenser(d.get("condenser_config", {})),
+        reboiler_config=_dec_reboiler(d.get("reboiler_config", {})),
+        modules={n: _dec_module(x) for n, x in d.get("modules", {}).items()},
+        specs=[_dec_spec(x) for x in d.get("specs", [])],
+        light_key_index=d.get("light_key_index", 0),
+        heavy_key_index=d.get("heavy_key_index"),
+        method=d.get("method"),
+        node_pos=tuple(pos) if pos is not None else None)
+
+
 def decode_state(e: dict) -> dict:
     """Live-object state dict, ready for WindowState.load_from_dict()."""
     s = dict(e)
     s["species"] = {n: _dec_species(d) for n, d in e.get("species", {}).items()}
-    s["streams"] = {n: _dec_stream(d) for n, d in e.get("streams", {}).items()}
-    s["condenser_config"] = _dec_condenser(e.get("condenser_config", {}))
-    s["reboiler_config"] = _dec_reboiler(e.get("reboiler_config", {}))
     s["thermodynamics_config"] = _dec_thermo(e.get("thermodynamics_config", {}))
-    s["modules"] = {n: _dec_module(d) for n, d in e.get("modules", {}).items()}
-    s["specs"] = [_dec_spec(d) for d in e.get("specs", [])]
+    s["columns"] = {cid: _dec_column(d) for cid, d in e.get("columns", {}).items()}
+    s["connections"] = [_dec_connection(d) for d in e.get("connections", [])]
     if e.get("display_units") is not None:
         from core.units import DisplayUnits
         s["display_units"] = DisplayUnits(**_only(DisplayUnits, e["display_units"]))
@@ -229,6 +288,9 @@ def load_colx(path: str) -> dict:
     if ver == 1:
         state = _migrate_v1_stages(state)   # v1 counted stages 0 = bottoms
         ver = 2
+    if ver == 2:
+        state = _migrate_v2_flowsheet(state)   # v2 was one flat column
+        ver = 3
     if ver != SCHEMA_VERSION:
         raise ValueError(f"Unsupported .colx schema_version {ver} "
                          f"(this build reads {SCHEMA_VERSION}).")
@@ -244,3 +306,29 @@ def _migrate_v1_stages(state: dict) -> dict:
             if d.get("stage") is not None:
                 d["stage"] = max(0, N - 1 - int(d["stage"]))
     return state
+
+
+#: Per-column keys of a v2 state. Everything else there was already global.
+_V2_COLUMN_KEYS = ("num_stages", "pressure", "pressure_drop", "stage_efficiency",
+                   "streams", "condenser_config", "reboiler_config", "modules",
+                   "specs", "light_key_index", "heavy_key_index")
+
+
+def _migrate_v2_flowsheet(state: dict) -> dict:
+    """v2 -> v3: a flat single column becomes a one-column flowsheet.
+
+    Every shipped example and every file a user has saved is v2, so this is the
+    load path for essentially all existing data — it has to be exactly
+    lossless. The per-column keys move down into columns["C1"] unchanged;
+    species/thermodynamics/display units stay at the top, where they now belong
+    to the flowsheet rather than to the column.
+    """
+    out = {k: v for k, v in state.items() if k not in _V2_COLUMN_KEYS}
+    column = {k: state[k] for k in _V2_COLUMN_KEYS if k in state}
+    column.setdefault("method", None)
+    column.setdefault("node_pos", None)
+    out["columns"] = {"C1": column}
+    out["active_column_id"] = "C1"
+    out["connections"] = []                  # a v2 file had nothing to connect
+    out.setdefault("default_method", "Inside-Out")
+    return out

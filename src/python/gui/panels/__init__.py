@@ -5,7 +5,8 @@ from .stream_config_panel import StreamConfigPanel
 from .condenser_config_panel import CondenserConfigPanel
 from .reboiler_config_panel import ReboilerConfigPanel
 from .module_config_panel import ModuleConfigPanel
-from .column_overview_panel import ColumnOverviewCanvas
+from .connection_config_panel import ConnectionConfigPanel
+from .flowsheet_canvas import FlowsheetScene, FlowsheetView
 
 __all__ = [
     'SubTabBar',
@@ -15,5 +16,7 @@ __all__ = [
     'CondenserConfigPanel',
     'ReboilerConfigPanel',
     'ModuleConfigPanel',
-    'ColumnOverviewCanvas'
+    'ConnectionConfigPanel',
+    'FlowsheetScene',
+    'FlowsheetView',
 ]

@@ -132,10 +132,13 @@ class ResultsTab(QWidget):
 
         self.window_state = None
         self._tern_ctx = None            # (P, antoine, gamma_fn) for click-to-plot
+        self._unit_id = None             # which column the views are showing
+        self._fs_result = None           # last core.flowsheet.FlowsheetResult
         self._setup_ui()
         self._setup_styles()
         self.view_combo.currentTextChanged.connect(self._on_view_changed)
         self.data_combo.currentTextChanged.connect(lambda _: self._draw_plot())
+        self.unit_combo.currentTextChanged.connect(self._on_unit_changed)
         for combo in (self.temp_unit_combo, self.flow_unit_combo, self.duty_unit_combo):
             combo.currentTextChanged.connect(lambda _=None: self._on_units_changed())
         self.canvas.mpl_connect("button_press_event", self._on_plot_click)
@@ -143,6 +146,50 @@ class ResultsTab(QWidget):
 
     def set_window_state(self, window_state):
         self.window_state = window_state
+
+    # --- flowsheet -------------------------------------------------------
+
+    def set_flowsheet_result(self, result):
+        """Take the whole run: which columns exist, and the streams between them.
+
+        Every existing view still renders exactly one profile — the unit combo
+        just decides which. `stream_summary`, `profile_to_csv_rows`,
+        `_draw_ternary` and `_draw_mccabe` already take a profile argument, so
+        they needed no change at all.
+        """
+        from gui.app_settings import beta_enabled
+        self._fs_result = result
+        ids = list(result.units) if result is not None else []
+        # Beta only, and only when there is genuinely more than one column: a
+        # single-column run has exactly the Results tab it always had.
+        multi = len(ids) > 1 and beta_enabled()
+        self.unit_label.setVisible(multi)
+        self.unit_combo.setVisible(multi)
+        self.sub_tab_bar.setTabVisible(3, multi)
+        self.unit_combo.blockSignals(True)
+        self.unit_combo.clear()
+        self.unit_combo.addItems(ids)
+        if self._unit_id not in ids:
+            self._unit_id = ids[0] if ids else None
+        if self._unit_id:
+            self.unit_combo.setCurrentText(self._unit_id)
+        self.unit_combo.blockSignals(False)
+        self._fill_flowsheet_table()
+
+    def refresh_beta(self):
+        """Re-apply the beta gate to the unit selector and Flowsheet page."""
+        self.set_flowsheet_result(self._fs_result)
+
+    def _on_unit_changed(self, unit_id: str):
+        if not unit_id or unit_id == self._unit_id:
+            return
+        self._unit_id = unit_id
+        self._sync_unit_combos()
+        self._update_data_choices()
+        self._fill_table()
+        self._fill_stream_summary()
+        self._fill_performance()
+        self._draw_plot()
 
     def _setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -154,6 +201,8 @@ class ResultsTab(QWidget):
         self.sub_tab_bar.addTab("View")
         self.sub_tab_bar.addTab("Streams")
         self.sub_tab_bar.addTab("Performance")
+        self.sub_tab_bar.addTab("Flowsheet")
+        self.sub_tab_bar.setTabVisible(3, False)   # single-column runs have none
         self.sub_tab_bar.tabClicked.connect(self._on_sub_tab_changed)
         main_layout.addWidget(self.sub_tab_bar)
 
@@ -167,6 +216,15 @@ class ResultsTab(QWidget):
 
         # Control Row (Dropdowns)
         control_layout = QHBoxLayout()
+
+        # Which column's results are on screen. Hidden for a single-column run
+        # so nothing changes for the case that has only ever had one answer.
+        self.unit_label = QLabel("Column:")
+        control_layout.addWidget(self.unit_label)
+        self.unit_combo = QComboBox(self)
+        control_layout.addWidget(self.unit_combo)
+        self.unit_label.setVisible(False)
+        self.unit_combo.setVisible(False)
 
         # View type dropdown
         control_layout.addWidget(QLabel("Display:"))
@@ -259,7 +317,86 @@ class ResultsTab(QWidget):
         self.stack.addWidget(view_page)
         self.stack.addWidget(self._build_streams_page())
         self.stack.addWidget(self._build_performance_page())
+        self.stack.addWidget(self._build_flowsheet_page())
         main_layout.addWidget(self.stack)
+
+    def _build_flowsheet_page(self):
+        """Every stream in the flowsheet: what comes in from outside, what runs
+        between columns, and what leaves. The per-column Streams page cannot show
+        this — its `feed_totals` knows only its own column's external feeds."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        grp = QGroupBox("Flowsheet streams")
+        g = QVBoxLayout(grp)
+        self.fs_table = QTableWidget(0, 5)
+        self.fs_table.setHorizontalHeaderLabels(
+            ["Stream", "Kind", "From → To", "Flow", "Composition"])
+        self.fs_table.horizontalHeader().setStretchLastSection(True)
+        self.fs_table.verticalHeader().setVisible(False)
+        g.addWidget(self.fs_table)
+        lay.addWidget(grp, 3)
+
+        self.fs_label = QLabel("Run a simulation to see flowsheet streams.")
+        self.fs_label.setProperty("mono", True)
+        self.fs_label.setWordWrap(True)
+        lay.addWidget(self.fs_label)
+        return page
+
+    def _fill_flowsheet_table(self):
+        """External feeds in, inter-unit streams (recycles marked), external
+        products out — plus the system-wide closure and the tear residual."""
+        if not hasattr(self, "fs_table"):
+            return
+        res = self._fs_result
+        if res is None:
+            self.fs_table.setRowCount(0)
+            self.fs_label.setText("Run a simulation to see flowsheet streams.")
+            return
+
+        u = self._units()
+        comps = []
+        for ur in res.units.values():
+            comps = list(ur.profile.get("comps", []))
+            break
+
+        def comp_text(vec):
+            import numpy as np
+            v = np.asarray(vec, float)
+            pairs = sorted(zip(comps, v), key=lambda t: -t[1])[:3]
+            return ", ".join(f"{n} {x:.3f}" for n, x in pairs if x > 5e-4)
+
+        rows = []
+        import numpy as np
+        tot = float(np.sum(res.feed_totals))
+        if tot > 0:
+            rows.append(("External feed", "feed", "→ flowsheet", tot,
+                         comp_text(res.feed_totals / tot)))
+        for cid, st in sorted(res.streams.items()):
+            rows.append((st.conn_id, "recycle" if st.torn else "internal",
+                         f"{st.src}.{st.port} → {st.dst} @{st.stage}",
+                         st.flow, comp_text(st.comp)))
+        for p in res.products:
+            rows.append((f"{p['unit']}.{p['port']}",
+                         "purge" if p.get("purge") else "product",
+                         f"{p['unit']} →", p["flow"], comp_text(p["comp"])))
+
+        self.fs_table.setRowCount(len(rows))
+        for r, (name, kind, path, flow, comp) in enumerate(rows):
+            vals = (name, kind, path, f"{u.F(flow):.4g} {u.f_label}", comp)
+            for c, v in enumerate(vals):
+                self.fs_table.setItem(r, c, QTableWidgetItem(str(v)))
+
+        bits = [f"Component closure (external in − out): {res.closure:.3e}"]
+        if res.tear_ids:
+            state = "converged" if res.tear_converged else "NOT CONVERGED"
+            bits.append(f"Recycle tear {state}: {res.tear_residual:.2e} after "
+                        f"{res.tear_passes} passes (tol {res.tol_used:g}); "
+                        f"torn: {', '.join(res.tear_ids)}")
+        bits.append(res.message)
+        self.fs_label.setText("\n".join(bits))
 
     def _build_streams_page(self):
         """Stream Summary sub-view: product table, terminal duties (kW),
@@ -479,7 +616,18 @@ class ResultsTab(QWidget):
                 self.spec_table.setItem(r, c, QTableWidgetItem(v))
 
     def _profile(self):
-        return getattr(self.window_state, "results", None) if self.window_state else None
+        """The one profile every view renders: the selected column's.
+
+        `window_state.results` is {column_id: profile} since the flowsheet
+        landed. A single-column run has exactly one entry, so this is the same
+        dict it always was, reached one key deeper.
+        """
+        results = getattr(self.window_state, "results", None) if self.window_state else None
+        if not results:
+            return None
+        if self._unit_id in results:
+            return results[self._unit_id]
+        return next(iter(results.values()), None)
 
     def _units(self):
         """Current DisplayUnits (from window_state, defaults if absent)."""

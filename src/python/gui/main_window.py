@@ -7,14 +7,14 @@ Tabbed interface with comprehensive simulation workflow
 Author: Piero Wemyss
 """
 
-import math
 import sys
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QTabWidget,
-    QMessageBox, QFileDialog, QInputDialog
+    QMessageBox, QFileDialog
 )
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QAction, QDesktopServices
 
 from .tabs.initialization_tab import InitializationTab
 from .tabs.specifications_tab import SpecificationsTab
@@ -23,15 +23,6 @@ from .tabs.results_tab import ResultsTab
 from .tabs.modules_tab import ModulesTab
 from .state.window_state import WindowState
 from .state.persistence import save_colx, load_colx
-
-
-class _AbortedResolve(Exception):
-    """A trial solve inside the operating-point root-find was cancelled.
-    Carries that solve's (partial) profile so the run finishes as an abort."""
-
-    def __init__(self, profile):
-        super().__init__("Aborted.")
-        self.profile = profile
 
 
 class MainWindow(QMainWindow):
@@ -78,6 +69,9 @@ class MainWindow(QMainWindow):
 
         # Connect species changes to refresh specs tab
         self.init_tab.speciesChanged.connect(self.specs_tab.refresh)
+        # The Specifications tab owns which column is active; the Simulation
+        # tab's per-column method override has to follow it.
+        self.specs_tab.specsChanged.connect(self.sim_tab.refresh_columns)
 
         # Keep the Simulation tab's mirror thermo combos in lock-step with the
         # Initialization tab's (both write the same window_state config).
@@ -269,9 +263,15 @@ class MainWindow(QMainWindow):
             )
 
     def export_results(self):
-        """Export simulation results to CSV"""
-        profile = self.window_state.results
-        if not profile:
+        """Export simulation results to CSV.
+
+        With more than one column every profile goes into the one file, each
+        block preceded by its column id — a per-column file set would leave the
+        user reassembling a flowsheet by hand.
+        """
+        ws = self.window_state
+        results = ws.results or {}
+        if not results:
             QMessageBox.information(
                 self, "Export Results",
                 "No results yet — run a simulation first."
@@ -290,12 +290,18 @@ class MainWindow(QMainWindow):
             try:
                 import csv
                 from .tabs.results_tab import profile_to_csv_rows
-                ws = self.window_state
-                mws = [getattr(ws.species.get(c), "mw", None)
-                       for c in profile.get("comps", [])]
+                units = getattr(ws, "display_units", None)
+                rows = []
+                for cid, profile in results.items():
+                    mws = [getattr(ws.species.get(c), "mw", None)
+                           for c in profile.get("comps", [])]
+                    if len(results) > 1:
+                        if rows:
+                            rows.append([])
+                        rows.append([f"Column: {cid}"])
+                    rows.extend(profile_to_csv_rows(profile, units=units, mws=mws))
                 with open(filename, 'w', newline='') as f:
-                    csv.writer(f).writerows(profile_to_csv_rows(
-                        profile, units=getattr(ws, "display_units", None), mws=mws))
+                    csv.writer(f).writerows(rows)
                 self.statusBar().showMessage(f"Results exported to {filename}")
             except Exception as e:
                 QMessageBox.critical(
@@ -342,52 +348,20 @@ class MainWindow(QMainWindow):
         All Qt widget access happens in here, on the GUI thread. Only the two
         rigorous MESH solvers are dispatched here; BVM/FUG live in Modules."""
         if method == "Bubble-Point" or "Inside-Out" in method:
-            from core.column_solvers import solve_bubble_point, solve_inside_out
-            solver = (solve_bubble_point if method == "Bubble-Point"
-                      else solve_inside_out)
             cfg = self.sim_tab.get_solver_config()      # the only widget reads
 
             def job(report, cancel):
-                # Gather (incl. the operating-point root-find, which re-solves
-                # the column for every purity/recovery spec) runs here, off the
-                # GUI thread — it used to block the UI for minutes. report/cancel
-                # go in too, so the root-find's trial solves drive the progress
-                # bar and honour Abort instead of looking hung.
+                # The gather AND every column's operating-point root-find run
+                # here, off the GUI thread — they used to block the UI for
+                # minutes. report/cancel go in too, so a long solve shows
+                # progress and honours Abort instead of looking hung.
                 #
-                # Progress is reported in *work units*: the resolve's trial-solve
-                # budget, then the final solve. One monotonic sweep either way —
-                # reporting the trial solves' own iteration counts made the bar
-                # loop 0-100% once per trial.
-                stats = {}
-                try:
-                    si, knobs = self._gather_rigorous_inputs(
-                        cfg=cfg, method=method, report=report, cancel=cancel,
-                        stats=stats)
-                except _AbortedResolve as ab:
-                    return ab.profile
-                base = stats.get("budget", 0)          # 0 when no column solves
-                span = int(knobs["max_iter"])
-                total = base + span
-                tol = float(knobs["tol"])
-                seen = {}
-
-                def final_report(it, res):
-                    # Iteration count alone is a bad ruler: both solvers converge
-                    # well short of max_iter, so the bar would stall at whatever
-                    # fraction they happened to need and then snap to 100. They
-                    # converge geometrically, so the *log* residual closing on tol
-                    # is the honest measure of how far along we are.
-                    r0 = seen.setdefault("r0", max(res, tol * 10.0))
-                    frac = 0.0
-                    if res > 0.0 and r0 > tol:
-                        frac = math.log(r0 / max(res, tol)) / math.log(r0 / tol)
-                    done = base + max(it, int(span * min(1.0, max(0.0, frac))))
-                    report(min(done, total), total, res)
-
-                warm = stats.get("warm", {})   # last trial's profile, if any
-                run = stats.get("solver", solver)   # side-section wrapper, if any
-                return run(si, cancel=cancel, report=final_report,
-                           x0=warm.get("x"), T0=warm.get("T"), **knobs)
+                # Progress is one work unit per unit-solve, one monotonic sweep
+                # over the whole flowsheet. Per-MESH-iteration ticks are
+                # deliberately not forwarded: doing that swept the bar 0-100%
+                # once per trial and queued thousands of cross-thread signals.
+                return self._solve_flowsheet(cfg=cfg, method=method,
+                                             report=report, cancel=cancel)
             return job
         raise ValueError(
             f"{method} is not implemented yet — choose Bubble-Point or "
@@ -438,22 +412,34 @@ class MainWindow(QMainWindow):
         self._solver_pct = pct
         self.sim_tab.set_progress(pct, done, self._elapsed())
 
-    def _on_solver_finished(self, profile):
+    def _on_solver_finished(self, result):
+        """`result` is a core.flowsheet.FlowsheetResult — one entry per column."""
         self._elapsed_timer.stop()
-        self.window_state.results = profile
+        ws = self.window_state
+        ws.results = {cid: ur.profile for cid, ur in result.units.items()}
+        ws.flowsheet_result = result          # streams, products, tear residual
+        profile = self._active_profile(result)
         self.sim_tab.set_running(False)
         self.sim_tab.set_progress(100, profile.get("iterations",
                                                    self._solver_iters),
                                   self._elapsed())
-        self.sim_tab.set_status(profile.get("message", "Solved"))
+        self.sim_tab.set_status(result.message or profile.get("message", "Solved"))
         warns = self._antoine_range_warnings(profile)
         summary = self._normalize_results(profile)
+        summary["status"] = result.message or summary["status"]
         if warns:
             summary["status"] += "  |  WARNING: " + "; ".join(warns)
+        self.results_tab.set_flowsheet_result(result)
         self.results_tab.update_results(summary)
         self.tab_widget.setCurrentIndex(3)
-        msg = (f"Solved: {profile['n_stages']} stages, "
-               f"feed at stage {profile['feed_stage']}.")
+        if len(result.units) > 1:
+            msg = (f"Solved {len(result.units)} columns"
+                   + (f", recycle tear {result.tear_residual:.1e} after "
+                      f"{result.tear_passes} passes" if result.tear_ids else "")
+                   + ".")
+        else:
+            msg = (f"Solved: {profile['n_stages']} stages, "
+                   f"feed at stage {profile['feed_stage']}.")
         if warns:
             msg += "  ⚠ Antoine fit used outside its range — see Results status."
         self.statusBar().showMessage(msg)
@@ -514,31 +500,37 @@ class MainWindow(QMainWindow):
             "data": rows,
         }
 
-    def _gather_rigorous_inputs(self, cfg=None, method=None,
-                                report=None, cancel=None, stats=None):
-        """Build the canonical SolverInput for the rigorous solvers from
-        window_state + the Simulation tab (Phase 0: one config path).
+    def _gather_flowsheet(self, cfg=None, method=None):
+        """Project window_state onto a core.flowsheet.Flowsheet. No solves.
+
+        This is pure translation: every column becomes a Unit, every
+        ws.connections entry a Connection, and the flowsheet-global species and
+        thermodynamics become the closures every Unit shares. The
+        operating-point root-find that used to live here now runs inside
+        `core.flowsheet.solve_flowsheet`, once per unit per tear pass, because a
+        column's inlet — and therefore the (R, D) that meets its specs — moves
+        while a recycle converges.
+
+        Splitting it that way also makes the gather headlessly testable, which
+        it was not while it took dozens of column solves to return.
 
         `cfg`/`method` are the Simulation tab's knobs; pass them in (read on the
-        GUI thread) to run this whole gather — including the operating-point
-        root-find, which can cost dozens of column solves — on a worker thread.
-        Omit them and they're read from the widgets here, for headless callers.
-        `report`/`cancel` are the worker's hooks: the root-find ticks `report`
-        once per trial solve (so a long resolve shows progress) and raises
-        _AbortedResolve when a trial is cancelled. `stats`, if given, comes back
-        carrying the resolve's progress budget so the caller can continue the
-        same monotonic sweep through the final solve — and `stats["solver"]`, the
-        solver callable the final run must use (the plain solver, or one wrapped
-        to converge the side-section tear).
+        GUI thread) so the solve can run on a worker thread. Omit them and
+        they're read from the widgets here, for headless callers.
 
         Every configurable value flows through here: all feed streams (stage,
         flow, composition, thermal quality from the entered temperature), side
         draws, the pressure profile from top pressure + per-stage drop, the
         condenser type, and the activity model. Raises ValueError (with a
         user-facing message) when the setup is incomplete.
-        Returns (solver_input, solver_knobs_dict).
+        Returns (flowsheet, solver_knobs_dict).
         """
         import numpy as np
+        from core.flowsheet import Flowsheet, Unit
+        from core.dof import OPERATING_KINDS, SpecKind, ENERGY_ONLY
+        from core.side_sections import SideSection
+        from core.thermodynamics import KJH_TO_KW
+        from dataclasses import replace as _replace
         from .state.window_state import StreamType, CondenserType
 
         ws = self.window_state
@@ -546,246 +538,209 @@ class MainWindow(QMainWindow):
         if len(order) < 2:
             raise ValueError("Need at least 2 species (Initialization tab).")
 
-        N = int(ws.num_stages)
-
-        def _stage_internal(gui_stage, what):
-            """GUI stages are 0-based from the top; solvers count 1=top."""
-            s = int(gui_stage)
-            if not (0 <= s <= N - 1):
-                raise ValueError(
-                    f"{what} stage {s} is outside the column (0..{N - 1}, "
-                    "0 = distillate).")
-            return s + 1
-
-        feeds = []
-        for s in ws.streams.values():
-            if s.stream_type != StreamType.FEED:
-                continue
-            if not s.flow or not s.composition:
-                raise ValueError(f"Feed '{s.id}' needs a flow rate and composition.")
-            z = np.array([s.composition.get(nm, 0.0) for nm in order], float)
-            if abs(z.sum() - 1.0) > 0.05 or z.sum() <= 0.0:
-                raise ValueError(
-                    f"Feed '{s.id}' composition sums to {z.sum():.4f}, not 1 — "
-                    "fix it on the Streams page.")
-            if abs(z.sum() - 1.0) > 1e-6:
-                # normalize-on-solve for near-1 sums, and say so
-                self.statusBar().showMessage(
-                    f"Feed '{s.id}' composition summed to {z.sum():.4f}; "
-                    "normalized to 1 for this run.")
-                z = z / z.sum()
-            q = ws.feed_quality(s, order)
-            feeds.append((_stage_internal(s.stage if s.stage is not None else 10,
-                                          f"Feed '{s.id}'"),
-                          float(s.flow), z, q))
-        if not feeds:
-            raise ValueError("At least one feed stream is required.")
-
-        draws = []
-        for s in ws.streams.values():
-            if s.stream_type == StreamType.SIDESTREAM and s.flow:
-                stage = _stage_internal(s.stage if s.stage is not None else 10,
-                                        f"Side draw '{s.id}'")
-                flow = float(s.flow)
-                if getattr(s, "phase", "liquid") == "vapor":
-                    draws.append((stage, 0.0, flow))
-                else:
-                    draws.append((stage, flow, 0.0))
-        W = sum(d[1] + d[2] for d in draws)
-
         antoine = ws.thermodynamics_config.psat_params(order)
-        # window_state pressures are bar; the thermo layer works in the Psat
-        # fit's unit. pressure_drop is per stage, growing top -> bottom, and the
-        # returned profile is 1=top .. N=bottom (solver-internal ordering).
-        to_unit = ws.thermodynamics_config.pressure_in_psat_unit
-        P_top = to_unit(ws.pressure)
-        dP = to_unit(ws.pressure_drop) if ws.pressure_drop else 0.0
-        pressure = P_top + dP * np.arange(N)
-
         gamma_fn = ws.build_gamma_fn(order)
         phi_fn = ws.build_phi_fn(order)
         flows_hook = ws.build_energy_hook(order)   # None unless energy_balance on
-        condenser = ws.condenser_config.condenser_type.value.lower()
-        fixed_R = 0.0 if ws.condenser_config.condenser_type == CondenserType.NONE else None
+        to_unit = ws.thermodynamics_config.pressure_in_psat_unit
 
-        # Resolve the operating specs the user set (reflux, boilup, rates, a
-        # product purity, a key recovery, ...) down to (R, D) — Aspen-style.
-        # Side-draw rates are their own answer and don't enter the root-find.
-        from core.operating_specs import resolve_operating_point
-        from core.dof import OPERATING_KINDS, SpecKind
-        from core.column_solvers import solve_bubble_point, solve_inside_out
-        from core.solver_input import build_solver_input
-        ops = [s for s in ws.collect_specs() if s.kind in OPERATING_KINDS
-               or s.kind == SpecKind.SIDEDRAW_RATE]
-        # Duty specs are entered in kW; the resolver compares them to the energy
-        # balance's kJ/h duties — convert (kJ/h = kW / KJH_TO_KW).
-        from dataclasses import replace as _replace
-        from core.thermodynamics import KJH_TO_KW
-        from core.dof import ENERGY_ONLY
-        ops = [_replace(s, value=s.value / KJH_TO_KW) if s.kind in ENERGY_ONLY else s
-               for s in ops]
-        n_free = 1 if fixed_R is not None else 2
-        n_ops = sum(1 for s in ops if s.kind != SpecKind.SIDEDRAW_RATE)
-        if n_ops != n_free:
-            raise ValueError(
-                f"This column needs exactly {n_free} operating spec(s) besides "
-                "side-draw rates (e.g. reflux ratio + a distillate rate, purity, "
-                f"or recovery). You have {n_ops} — see the Specifications DoF "
-                "status.")
+        # Which columns are fed by another column: a brand-new column's empty
+        # default Feed stream is not an error if a connection supplies it.
+        fed_by = {c.dst for c in ws.connections}
 
-        # Subcooling ΔT (total condenser) — only the energy balance consumes it;
-        # a delta, so °C/K units coincide (see condenser panel note).
-        subcool = float(ws.condenser_config.subcooling_temp or 0.0)
+        units = {}
+        for cid, col in ws.columns.items():
+            N = int(col.num_stages)
 
-        # Interheater/intercooler modules → per-stage duty (kW entered → kJ/h).
-        # These are known heat terms in the energy balance (si.duty[]); ignored
-        # under CMO, so require the energy balance rather than silently drop them.
-        duties = [(_stage_internal(gs, "Interheater"), q_kw / KJH_TO_KW)
-                  for gs, q_kw in ws.interheater_duties()]
-        if duties and flows_hook is None:
-            raise ValueError(
-                "Interheater/intercooler duties need the energy balance "
-                "(Initialization → Flow Model). Under constant molar overflow "
-                "they would be silently ignored.")
+            def _stage_internal(gui_stage, what, _N=N, _cid=cid):
+                """GUI stages are 0-based from the top; solvers count 1=top."""
+                s = int(gui_stage)
+                if not (0 <= s <= _N - 1):
+                    raise ValueError(
+                        f"{_cid}: {what} stage {s} is outside the column "
+                        f"(0..{_N - 1}, 0 = distillate).")
+                return s + 1
 
-        # Pumparounds: (draw, return, rate, duty). Stages GUI 0-based -> solver
-        # 1-based; duty kW -> kJ/h. The cooling is an energy-balance term (folded
-        # into si.duty at build), so it needs the energy balance like interheaters.
-        pumparounds = [(_stage_internal(ds, "Pumparound draw"),
-                        _stage_internal(rs, "Pumparound return"),
-                        rate, q_kw / KJH_TO_KW)
-                       for ds, rs, rate, q_kw in ws.pumparounds()]
-        if pumparounds and flows_hook is None:
-            raise ValueError(
-                "Pumparound cooling needs the energy balance (Initialization → "
-                "Flow Model). Under constant molar overflow the duty is ignored.")
-
-        # Side strippers/rectifiers: a real draw plus a torn return feed. They
-        # work under CMO (their ratio spec sets the split), so no energy-balance
-        # guard. F_total/z_mixed below stay the *external* feed — the return is a
-        # recycle and must not enter a recovery/purity denominator.
-        from core.side_sections import SideSection, make_side_solver
-        sections = [
-            SideSection(id=mid, kind=kind,
-                        draw_stage=_stage_internal(ds, f"'{mid}' draw"),
-                        return_stage=_stage_internal(rs, f"'{mid}' return"),
-                        rate=rate, ratio=ratio, n_stages=nst)
-            for mid, kind, ds, rs, rate, ratio, nst in ws.side_sections()]
-        for s in sections:
-            # Both ends must be real trays: stage 1 is the condenser and stage N
-            # the reboiler, neither of which can host a section draw or return.
-            if not (2 <= s.draw_stage <= N - 1 and 2 <= s.return_stage <= N - 1):
+            feeds = []
+            for s in col.streams.values():
+                if s.stream_type != StreamType.FEED:
+                    continue
+                if not s.flow and not s.composition and cid in fed_by:
+                    continue          # supplied by a connection, not by hand
+                if not s.flow or not s.composition:
+                    raise ValueError(
+                        f"{cid}: feed '{s.id}' needs a flow rate and composition.")
+                z = np.array([s.composition.get(nm, 0.0) for nm in order], float)
+                if abs(z.sum() - 1.0) > 0.05 or z.sum() <= 0.0:
+                    raise ValueError(
+                        f"{cid}: feed '{s.id}' composition sums to {z.sum():.4f}, "
+                        "not 1 — fix it on the Streams page.")
+                if abs(z.sum() - 1.0) > 1e-6:
+                    # normalize-on-solve for near-1 sums, and say so
+                    self.statusBar().showMessage(
+                        f"Feed '{s.id}' composition summed to {z.sum():.4f}; "
+                        "normalized to 1 for this run.")
+                    z = z / z.sum()
+                q = ws.feed_quality(s, order, col=col)
+                feeds.append((_stage_internal(s.stage if s.stage is not None else 10,
+                                              f"feed '{s.id}'"),
+                              float(s.flow), z, q))
+            if not feeds and cid not in fed_by:
                 raise ValueError(
-                    f"'{s.id}': draw and return stages must be interior trays "
-                    f"(1 to {N - 2} in Stage-0-is-distillate numbering).")
+                    f"{cid}: at least one feed stream is required (or a "
+                    "connection from another column).")
 
-        F_total = sum(f[1] for f in feeds)
-        z_mixed = sum(f[1] * f[2] for f in feeds) / F_total
-        # Section draw leaves the column, section return comes back in: the net
-        # removal is the side product, so B = F_external - D - W still closes.
-        W += sum(s.product_flow for s in sections)
+            # Side draws keep their stream id as their flowsheet port key, so a
+            # connection drawn from one survives the stream being renamed.
+            draws = []
+            for s in col.streams.values():
+                if s.stream_type == StreamType.SIDESTREAM and s.flow:
+                    stage = _stage_internal(s.stage if s.stage is not None else 10,
+                                            f"side draw '{s.id}'")
+                    flow = float(s.flow)
+                    if getattr(s, "phase", "liquid") == "vapor":
+                        draws.append((s.id, stage, 0.0, flow))
+                    else:
+                        draws.append((s.id, stage, flow, 0.0))
 
-        def _build_si(R, D):
-            si_feeds = list(feeds) + [
-                (s.return_stage, s.return_flow, s.return_comp, s.return_q)
-                for s in sections if s.return_comp is not None]
-            si_draws = list(draws) + [(s.draw_stage, *s.draw_rates())
-                                      for s in sections]
-            return build_solver_input(
-                n_stages=N, comps=order, feeds=si_feeds, draws=si_draws,
-                duties=duties,
-                pumparounds=pumparounds, R=R, D=D, pressure=pressure,
-                antoine=antoine, gamma_fn=gamma_fn, phi_fn=phi_fn,
-                condenser=condenser, subcooling=subcool)
+            # window_state pressures are bar; the thermo layer works in the Psat
+            # fit's unit. pressure_drop is per stage, growing top -> bottom, and
+            # the profile is 1=top .. N=bottom (solver-internal ordering).
+            P_top = to_unit(col.pressure)
+            dP = to_unit(col.pressure_drop) if col.pressure_drop else 0.0
+            pressure = P_top + dP * np.arange(N)
+
+            # Interheater/intercooler modules → per-stage duty (kW → kJ/h).
+            # These are known heat terms in the energy balance (si.duty[]);
+            # ignored under CMO, so require the energy balance rather than
+            # silently drop them.
+            duties = [(_stage_internal(gs, "interheater"), q_kw / KJH_TO_KW)
+                      for gs, q_kw in col.interheater_duties()]
+            if duties and flows_hook is None:
+                raise ValueError(
+                    f"{cid}: interheater/intercooler duties need the energy "
+                    "balance (Initialization → Flow Model). Under constant "
+                    "molar overflow they would be silently ignored.")
+
+            # Pumparounds: (draw, return, rate, duty). Stages GUI 0-based ->
+            # solver 1-based; duty kW -> kJ/h. The cooling is an energy-balance
+            # term (folded into si.duty at build), so it needs the energy
+            # balance like interheaters.
+            pumparounds = [(_stage_internal(ds, "pumparound draw"),
+                            _stage_internal(rs, "pumparound return"),
+                            rate, q_kw / KJH_TO_KW)
+                           for ds, rs, rate, q_kw in col.pumparounds()]
+            if pumparounds and flows_hook is None:
+                raise ValueError(
+                    f"{cid}: pumparound cooling needs the energy balance "
+                    "(Initialization → Flow Model). Under constant molar "
+                    "overflow the duty is ignored.")
+
+            # Side strippers/rectifiers: a real draw plus a torn return feed.
+            # They work under CMO (their ratio spec sets the split), so no
+            # energy-balance guard. Their tear nests inside the flowsheet's.
+            sections = [
+                SideSection(id=mid, kind=kind,
+                            draw_stage=_stage_internal(ds, f"'{mid}' draw"),
+                            return_stage=_stage_internal(rs, f"'{mid}' return"),
+                            rate=rate, ratio=ratio, n_stages=nst)
+                for mid, kind, ds, rs, rate, ratio, nst in col.side_sections()]
+            for s in sections:
+                # Both ends must be real trays: stage 1 is the condenser and
+                # stage N the reboiler, neither of which can host a draw or
+                # a return.
+                if not (2 <= s.draw_stage <= N - 1 and 2 <= s.return_stage <= N - 1):
+                    raise ValueError(
+                        f"{cid}: '{s.id}' draw and return stages must be interior "
+                        f"trays (1 to {N - 2} in Stage-0-is-distillate numbering).")
+
+            # Operating specs, with duty specs converted kW -> kJ/h to match the
+            # energy balance's units, exactly as the single-column path did.
+            ops = [s for s in col.collect_specs()
+                   if s.kind in OPERATING_KINDS or s.kind == SpecKind.SIDEDRAW_RATE]
+            ops = [_replace(s, value=s.value / KJH_TO_KW)
+                   if s.kind in ENERGY_ONLY else s for s in ops]
+            n_free = 1 if col.condenser_config.condenser_type == CondenserType.NONE else 2
+            n_ops = sum(1 for s in ops if s.kind != SpecKind.SIDEDRAW_RATE)
+            if n_ops != n_free:
+                raise ValueError(
+                    f"{cid} needs exactly {n_free} operating spec(s) besides "
+                    "side-draw rates (e.g. reflux ratio + a distillate rate, "
+                    f"purity, or recovery). It has {n_ops} — see the "
+                    "Specifications DoF status.")
+
+            units[cid] = Unit(
+                id=cid, n_stages=N, pressure=pressure, antoine=antoine,
+                specs=[s for s in ops if s.kind in OPERATING_KINDS],
+                feeds=feeds, draws=draws, duties=duties,
+                pumparounds=pumparounds, sections=sections,
+                condenser=col.condenser_config.condenser_type.value.lower(),
+                # Subcooling ΔT (total condenser) — only the energy balance
+                # consumes it; a delta, so °C/K units coincide.
+                subcooling=float(col.condenser_config.subcooling_temp or 0.0),
+                efficiency=float(col.stage_efficiency or 1.0),
+                method=col.method, flows_hook=flows_hook,
+                lk=col.light_key_index, hk=col.heavy_key_index,
+                node_pos=col.node_pos)
 
         if cfg is None:
             cfg = self.sim_tab.get_solver_config()   # honor the Simulation tab knobs
-        knobs = dict(
-            max_iter=int(cfg["max_iterations"]), tol=float(cfg["tolerance"]),
-            efficiency=float(getattr(ws, "stage_efficiency", 1.0)))
-
-        # Resolve implicit specs with the SAME efficiency and solver as the
-        # final run — an operating point found for an E=1 column misses purity
-        # targets when the real column runs at E<1.
+        knobs = dict(max_iter=int(cfg["max_iterations"]), tol=float(cfg["tolerance"]))
         if method is None:
             method = self.sim_tab.solver_combo.currentText()
-        is_inside_out = "Inside-Out" in method
-        rigorous = solve_inside_out if is_inside_out else solve_bubble_point
-        # The energy balance is an Inside-Out feature (its flows_hook seam); the
-        # Wang-Henke bubble-point path stays CMO. Fold the hook into knobs only
-        # when it applies, so both operating-point resolution and the final run
-        # use it consistently.
-        if is_inside_out and flows_hook is not None:
-            knobs["flows_hook"] = flows_hook
 
-        # Side sections: converge the return tear inside every solve, so the
-        # operating-point root-find sees the real column instead of one whose
-        # sections do nothing. The sections keep their torn composition between
-        # calls, so only the first trial pays the full tear.
-        if sections:
-            rigorous = make_side_solver(
-                rigorous, sections, lambda si: _build_si(si.R, si.D))
+        fs = Flowsheet(units=units, connections=list(ws.connections),
+                       comps=list(order), default_method=method,
+                       gamma_fn=gamma_fn, phi_fn=phi_fn)
+        return fs, knobs
+
+    def _solve_flowsheet(self, cfg=None, method=None, report=None, cancel=None):
+        """Gather and solve every column, converging any recycle. The one path —
+        a single column is a one-unit flowsheet with nothing torn."""
+        from core.flowsheet import solve_flowsheet
+        fs, knobs = self._gather_flowsheet(cfg=cfg, method=method)
+        return solve_flowsheet(fs, knobs=knobs, report=report, cancel=cancel)
+
+    def _gather_rigorous_inputs(self, cfg=None, method=None,
+                                report=None, cancel=None, stats=None):
+        """The active column's resolved SolverInput + knobs.
+
+        Kept for callers that want one column's solver input rather than a whole
+        flowsheet result. It now goes through the flowsheet, so the answer is
+        the same one a run produces — there is no second configuration path.
+        """
+        fs, knobs = self._gather_flowsheet(cfg=cfg, method=method)
+        res = self._run_flowsheet(fs, knobs, report=report, cancel=cancel)
+        cid = self.window_state.active_column_id
+        ur = res.units.get(cid)
+        if ur is None:
+            raise ValueError(f"No result for column '{cid}'.")
         if stats is not None:
-            stats["solver"] = rigorous       # the final run must use this one
+            stats["result"] = res
+        return ur.si, knobs
 
-        # Each trial solve of the root-find is a full column solve. Report one tick
-        # per trial (not per inner iteration — that swept the bar 0-100% once per
-        # trial and queued thousands of cross-thread signals), and turn a cancelled
-        # trial into a real abort: least_squares would otherwise happily keep
-        # root-finding on the half-solved profiles an aborted solve returns.
-        # ponytail: RESOLVE_BUDGET is a nominal work unit (least_squares' 60-eval
-        # cap plus its finite differences), not a promise; the bar clamps, so a
-        # long resolve parks near the hand-off instead of overrunning.
-        RESOLVE_BUDGET = 120
-        n_solves = [0]
-        warm = {}                # previous trial's profile; neighbouring (R, D)
-                                 # differ by a finite-difference step, so it skips
-                                 # the slow front-placement phase of a cold start
-        if stats is not None:
-            stats["warm"] = warm     # the final solve warm-starts from it too
+    def _run_flowsheet(self, fs, knobs, report=None, cancel=None):
+        from core.flowsheet import solve_flowsheet
+        return solve_flowsheet(fs, knobs=knobs, report=report, cancel=cancel)
 
-        def _trial_solve(R, D):
-            n_solves[0] += 1
-            if stats is not None:
-                stats["budget"] = RESOLVE_BUDGET
-            prof = rigorous(_build_si(R, D), cancel=cancel,
-                            x0=warm.get("x"), T0=warm.get("T"), **knobs)
-            if prof.get("message") == "Aborted.":
-                raise _AbortedResolve(prof)
-            if float(prof.get("residual", math.inf)) < 1e-2:
-                # only a (near-)converged profile is a good seed — warm-starting
-                # from a chaotic max-iter trial poisons every trial after it
-                warm["x"], warm["T"] = prof["x"], prof["T"]
-            if report is not None:
-                report(min(n_solves[0], RESOLVE_BUDGET),
-                       RESOLVE_BUDGET + int(knobs["max_iter"]),
-                       float(prof.get("residual", 0.0)))
-            return prof
-
-        R, D = resolve_operating_point(
-            ops, F_total, z_mixed, solve_fn=_trial_solve,
-            lk=ws.light_key_index, hk=ws.heavy_key_index,
-            side_draw_total=W, fixed_R=fixed_R)
-
-        return _build_si(float(R), float(D)), knobs
+    def _active_profile(self, res):
+        """The profile the single-column callers expect out of a flowsheet run."""
+        cid = self.window_state.active_column_id
+        ur = res.units.get(cid) or next(iter(res.units.values()), None)
+        if ur is None:
+            raise ValueError("The flowsheet produced no results.")
+        return ur.profile
 
     def _solve_bubble_point(self) -> dict:
         """Run the rigorous bubble-point (Wang-Henke) solver."""
-        from core.column_solvers import solve_bubble_point
-        stats = {}
-        si, knobs = self._gather_rigorous_inputs(method="Bubble-Point",
-                                                 stats=stats)
-        return stats.get("solver", solve_bubble_point)(si, **knobs)
+        return self._active_profile(self._solve_flowsheet(method="Bubble-Point"))
 
     def _solve_inside_out(self) -> dict:
         """Run the Inside-Out solver, with the Abort flag as cancel hook."""
-        from core.column_solvers import solve_inside_out
-        stats = {}
-        si, knobs = self._gather_rigorous_inputs(method="Inside-Out",
-                                                 stats=stats)
         self._abort_flag = False
-        return stats.get("solver", solve_inside_out)(
-            si, **knobs, cancel=lambda: getattr(self, "_abort_flag", False))
+        return self._active_profile(self._solve_flowsheet(
+            method="Inside-Out",
+            cancel=lambda: getattr(self, "_abort_flag", False)))
 
     def abort_simulation(self):
         """Abort a running simulation: flips the worker's cancel flag, which the
@@ -798,26 +753,99 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Aborting…")
 
     def show_preferences(self):
-        """Edit the default rigorous-solver iteration limit and tolerance, which
-        are the Simulation tab's solver knobs.
-        # ponytail: QInputDialog instead of a bespoke dialog — two values, two
-        # prompts; build a proper form only if Preferences grows more fields."""
-        sim = self.sim_tab
-        it, ok = QInputDialog.getInt(
-            self, "Preferences", "Max solver iterations:",
-            sim.max_iter_spin.value(), sim.max_iter_spin.minimum(),
-            sim.max_iter_spin.maximum())
-        if not ok:
+        """Settings that belong to the install, not to the open case.
+
+        Max iterations and tolerance used to live here; they are per-case values
+        owned by the Simulation tab and saved in the `.colx`, so editing them
+        from Preferences quietly modified the case you had open. Everything left
+        here is stored in QSettings and survives File -> New.
+        """
+        from PySide6.QtWidgets import (
+            QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+            QLabel, QPushButton, QVBoxLayout,
+        )
+        from core.units import DUTY, FLOW, TEMPERATURE, DisplayUnits
+        from .app_settings import (
+            beta_enabled, default_units, log_dir, log_level, set_beta_enabled,
+            set_default_units, set_log_level,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Preferences")
+        lay = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        units = default_units()
+        unit_combos = {}
+        for field, choices, label in (("temperature", TEMPERATURE, "Temperature:"),
+                                      ("flow", FLOW, "Flow:"),
+                                      ("duty", DUTY, "Duty:")):
+            combo = QComboBox(dlg)
+            combo.addItems(list(choices))
+            combo.setCurrentText(getattr(units, field))
+            form.addRow(label, combo)
+            unit_combos[field] = combo
+        units_hint = QLabel("Default display units for new cases. A saved case "
+                            "keeps the units it was saved with.", dlg)
+        units_hint.setProperty("hint", True)
+        units_hint.setWordWrap(True)
+        form.addRow("", units_hint)
+
+        log_combo = QComboBox(dlg)
+        log_combo.addItems(["INFO", "DEBUG"])
+        log_combo.setCurrentText(log_level())
+        log_combo.setToolTip("Verbosity of ~/.columnforge/columnforge.log. "
+                             "Takes effect on the next launch.")
+        form.addRow("Log level:", log_combo)
+
+        open_log = QPushButton("Open log folder", dlg)
+        open_log.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(log_dir())))
+        form.addRow("", open_log)
+
+        beta_check = QCheckBox("Enable beta features", dlg)
+        beta_check.setChecked(beta_enabled())
+        beta_check.setToolTip(
+            "Shows features that work but are not settled enough to be the "
+            "default: currently the multi-column flowsheet editor. Solver "
+            "results are unaffected.")
+        form.addRow("", beta_check)
+
+        hint = QLabel("Beta: multi-column flowsheets — several columns joined "
+                      "by streams, with recycles.", dlg)
+        hint.setProperty("hint", True)
+        hint.setWordWrap(True)
+        form.addRow("", hint)
+
+        lay.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+                                   parent=dlg)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
             return
-        tol, ok = QInputDialog.getDouble(
-            self, "Preferences", "Convergence tolerance:",
-            sim.tolerance_spin.value(), sim.tolerance_spin.minimum(),
-            sim.tolerance_spin.maximum(), sim.tolerance_spin.decimals())
-        if not ok:
-            return
-        sim.max_iter_spin.setValue(it)
-        sim.tolerance_spin.setValue(tol)
-        self.statusBar().showMessage("Solver preferences updated.")
+
+        set_default_units(DisplayUnits(
+            **{f: c.currentText() for f, c in unit_combos.items()}))
+        set_log_level(log_combo.currentText())
+        was = beta_enabled()
+        set_beta_enabled(beta_check.isChecked())
+        if beta_check.isChecked() != was:
+            self.refresh_beta()
+            self.statusBar().showMessage(
+                "Beta features " + ("enabled." if beta_check.isChecked()
+                                    else "disabled."))
+        else:
+            self.statusBar().showMessage("Preferences updated.")
+
+    def refresh_beta(self):
+        """Show or hide the beta UI without a restart."""
+        for tab in (self.specs_tab, self.sim_tab, self.results_tab):
+            refresh = getattr(tab, "refresh_beta", None)
+            if refresh is not None:
+                refresh()
 
     def show_about(self):
         """Show about dialog"""
@@ -860,19 +888,19 @@ class MainWindow(QMainWindow):
 
 def _setup_logging():
     """Log to ~/.columnforge/columnforge.log (roadmap Month 3): solver failures
-    from the Run handler land here with tracebacks."""
+    from the Run handler land here with tracebacks. Verbosity is a Preferences
+    setting, read once at startup."""
     import logging
     import logging.handlers
     import os
-    log_dir = os.path.join(os.path.expanduser("~"), ".columnforge")
-    os.makedirs(log_dir, exist_ok=True)
+    from .app_settings import log_dir, log_level
     handler = logging.handlers.RotatingFileHandler(
-        os.path.join(log_dir, "columnforge.log"),
+        os.path.join(log_dir(), "columnforge.log"),
         maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(getattr(logging, log_level()))
     root.addHandler(handler)
     logging.getLogger(__name__).info("ColumnForge started")
 

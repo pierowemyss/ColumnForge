@@ -11,6 +11,8 @@ from gui.panels.condenser_config_panel import CondenserConfigPanel
 from gui.panels.reboiler_config_panel import ReboilerConfigPanel
 from gui.panels.module_config_panel import ModuleConfigPanel
 from gui.panels.column_overview_panel import ColumnOverviewCanvas
+from gui.panels.connection_config_panel import ConnectionConfigPanel
+from gui.panels.flowsheet_canvas import FlowsheetScene, FlowsheetView
 from gui.panels.unit_combo_box import UnitComboBox
 from gui.panels.operating_specs_panel import OperatingSpecsPanel
 from gui.state.window_state import (
@@ -224,14 +226,60 @@ class SpecificationsTab(QWidget):
         layout = QHBoxLayout(page)
         layout.setSpacing(10)
 
-        # Left: column diagram + DoF status
-        self.column_canvas = ColumnOverviewCanvas(self)
-        self.column_canvas.elementClicked.connect(self._on_element_clicked)
-        self.column_canvas.streamClicked.connect(self._open_stream_by_id)
+        # Left: the column diagram + DoF status.
+        #
+        # Two diagrams, one shown at a time. The single-column canvas is the
+        # default experience and is what every non-beta user sees; the flowsheet
+        # editor is behind Preferences -> Enable beta features. Both are built
+        # (they are cheap) and `_update_column_canvas` feeds whichever is on
+        # screen, so the switch needs no restart.
+        self.single_canvas = ColumnOverviewCanvas(self)
+        self.single_canvas.elementClicked.connect(self._on_single_element_clicked)
+        self.single_canvas.streamClicked.connect(self._on_single_stream_clicked)
 
-        overview_group = QGroupBox("Column Diagram")
-        overview_layout = QVBoxLayout(overview_group)
-        overview_layout.addWidget(self.column_canvas)
+        self.flowsheet_scene = FlowsheetScene(self)
+        self.flowsheet_view = FlowsheetView(self.flowsheet_scene, self)
+        self.flowsheet_scene.elementClicked.connect(self._on_element_clicked)
+        self.flowsheet_scene.streamClicked.connect(self._open_stream_by_id)
+        self.flowsheet_scene.edgeClicked.connect(self._on_edge_clicked)
+        self.flowsheet_scene.nodeClicked.connect(self._on_node_clicked)
+        self.flowsheet_scene.nodeDoubleClicked.connect(self._on_node_clicked)
+        self.flowsheet_scene.connectionRequested.connect(self._on_connection_requested)
+        self.flowsheet_scene.deleteRequested.connect(self._on_delete_requested)
+        self.flowsheet_scene.nodeMoved.connect(self._on_node_moved)
+        self.flowsheet_scene.validationRejected.connect(self._on_validation_rejected)
+
+        self.diagram_stack = QStackedWidget(self)
+        self.diagram_stack.addWidget(self.single_canvas)      # 0: default
+        self.diagram_stack.addWidget(self.flowsheet_view)     # 1: beta
+        # every existing caller says `column_canvas`; keep the name pointing at
+        # the diagram that is actually on screen
+        self.column_canvas = self.single_canvas
+
+        self.overview_group = QGroupBox("Column Diagram")
+        overview_layout = QVBoxLayout(self.overview_group)
+
+        # Column selector — beta only; a single-column case has nothing to pick.
+        self.column_row = QWidget(self)
+        col_row = QHBoxLayout(self.column_row)
+        col_row.setContentsMargins(0, 0, 0, 0)
+        col_row.addWidget(QLabel("Column:"))
+        self.column_combo = QComboBox(self)
+        self.column_combo.currentTextChanged.connect(self._on_column_selected)
+        col_row.addWidget(self.column_combo, 1)
+        for text, tip, slot in (
+                ("+", "Add a column to the flowsheet", self._add_column),
+                ("Copy", "Duplicate this column's configuration", self._duplicate_column),
+                ("Rename", "Rename this column", self._rename_column),
+                ("−", "Delete this column and its connections", self._remove_column)):
+            b = QPushButton(text, self)
+            b.setToolTip(tip)
+            b.setMaximumWidth(64)
+            b.clicked.connect(slot)
+            col_row.addWidget(b)
+        overview_layout.addWidget(self.column_row)
+        overview_layout.addWidget(self.diagram_stack)
+        overview_group = self.overview_group
 
         self.dof_status_label = QLabel("Under-specified: Need 2 more specs.")
         set_state(self.dof_status_label, "warn")
@@ -273,6 +321,12 @@ class SpecificationsTab(QWidget):
         self.ov_module_panel = ModuleConfigPanel(self)
         self.ov_module_panel.configChanged.connect(self._on_ov_module_changed)
         self.ov_editor_stack.addWidget(self.ov_module_panel)
+
+        # Page 5: an inter-column connection — split fraction, destination
+        # stage, optional quality override.
+        self.ov_connection_panel = ConnectionConfigPanel(self)
+        self.ov_connection_panel.configChanged.connect(self._on_ov_connection_changed)
+        self.ov_editor_stack.addWidget(self.ov_connection_panel)
 
         ov_config_layout.addWidget(self.ov_editor_stack)
         layout.addWidget(self.ov_config_group, 1)
@@ -340,15 +394,215 @@ class SpecificationsTab(QWidget):
         self.pressure_input.valueChanged.connect(self._on_config_changed)
         self.pressure_drop_spin.valueChanged.connect(self._on_config_changed)
         self.efficiency_spin.valueChanged.connect(self._on_config_changed)
-        self.column_canvas.specsChanged.connect(self._on_config_changed)
+        self.flowsheet_scene.specsChanged.connect(self._on_config_changed)
+        self.single_canvas.specsChanged.connect(self._on_config_changed)
 
     def _on_sub_tab_changed(self, index: int):
         """Handle main sub-tab change."""
         self.stack.setCurrentIndex(index)
         self.sub_tab_bar.setCurrentIndex(index)
 
-    def _on_element_clicked(self, element_type: str):
+    # --- beta gate --------------------------------------------------------
+
+    @property
+    def beta(self) -> bool:
+        from gui.app_settings import beta_enabled
+        return beta_enabled()
+
+    def refresh_beta(self):
+        """Swap between the single-column diagram and the flowsheet editor."""
+        on = self.beta
+        self.diagram_stack.setCurrentIndex(1 if on else 0)
+        self.column_canvas = self.flowsheet_view if on else self.single_canvas
+        self.column_row.setVisible(on)
+        self.overview_group.setTitle("Flowsheet" if on else "Column Diagram")
+        if self.window_state:
+            self._update_column_canvas()
+            self._update_dof_status()
+
+    # The single-column canvas emits without a column id (it only ever draws
+    # one). Adapt to the same handlers the scene uses, naming the active column.
+    def _on_single_element_clicked(self, element_type: str):
+        self._on_element_clicked(self.window_state.active_column_id
+                                 if self.window_state else "C1", element_type)
+
+    def _on_single_stream_clicked(self, sid: str):
+        self._open_stream_by_id(self.window_state.active_column_id
+                                if self.window_state else "C1", sid)
+
+    # --- flowsheet: columns, connections, and the scene's requests ---------
+
+    def _refresh_column_combo(self):
+        """Keep the selector in step with the flowsheet without re-entering."""
+        if not self.window_state:
+            return
+        ids = list(self.window_state.columns)
+        self.column_combo.blockSignals(True)
+        self.column_combo.clear()
+        self.column_combo.addItems(ids)
+        self.column_combo.setCurrentText(self.window_state.active_column_id)
+        self.column_combo.blockSignals(False)
+        # a one-column flowsheet is the old single-column app; hide the buttons
+        # that only mean something once there are several
+        self.column_combo.setEnabled(len(ids) > 1)
+
+    def _set_active_column(self, unit_id):
+        """Point every panel on this tab at another column. The flat
+        window_state names delegate, so the panels themselves need no change."""
+        if not self.window_state or unit_id == self.window_state.active_column_id:
+            return
+        if not self.window_state.set_active_column(unit_id):
+            return
+        self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
+        self.ov_config_group.setTitle("Element Configuration")
+        self._load_from_state()
+        self.specsChanged.emit()
+
+    def _on_column_selected(self, unit_id: str):
+        if unit_id:
+            self._set_active_column(unit_id)
+
+    def _on_node_clicked(self, unit_id: str):
+        self._set_active_column(unit_id)
+
+    def _add_column(self):
+        if not self.window_state:
+            return
+        self.window_state.add_column()
+        self._load_from_state()
+        self.specsChanged.emit()
+
+    def _duplicate_column(self):
+        if not self.window_state:
+            return
+        self.window_state.duplicate_column(self.window_state.active_column_id)
+        self._load_from_state()
+        self.specsChanged.emit()
+
+    def _rename_column(self):
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        if not self.window_state:
+            return
+        old = self.window_state.active_column_id
+        new, ok = QInputDialog.getText(self, "Rename Column", "New name:", text=old)
+        if not ok or not new.strip() or new.strip() == old:
+            return
+        if not self.window_state.rename_column(old, new.strip()):
+            QMessageBox.warning(self, "Rename Column",
+                                f"'{new.strip()}' is already taken.")
+            return
+        self._load_from_state()
+        self.specsChanged.emit()
+
+    def _remove_column(self):
+        from PySide6.QtWidgets import QMessageBox
+        if not self.window_state:
+            return
+        cid = self.window_state.active_column_id
+        if len(self.window_state.columns) <= 1:
+            QMessageBox.information(
+                self, "Delete Column",
+                "A flowsheet needs at least one column.")
+            return
+        n_conn = sum(1 for c in self.window_state.connections
+                     if c.src == cid or c.dst == cid)
+        extra = f" and {n_conn} connection(s)" if n_conn else ""
+        if QMessageBox.question(
+                self, "Delete Column",
+                f"Delete '{cid}'{extra}? This cannot be undone."
+        ) != QMessageBox.Yes:
+            return
+        self.window_state.remove_column(cid)
+        self._load_from_state()
+        self.specsChanged.emit()
+
+    def _on_connection_requested(self, conn):
+        """The scene asked for a connection; the state decides."""
+        if not self.window_state:
+            return
+        self.window_state.connections.append(conn)
+        self.window_state.mark_modified()
+        self._update_column_canvas()
+        self._update_dof_status()
+        self.specsChanged.emit()
+
+    def _on_delete_requested(self, payload):
+        from PySide6.QtWidgets import QMessageBox
+        if not self.window_state:
+            return
+        ws = self.window_state
+        ids = set(payload.get("edges", []))
+        if ids:
+            ws.connections = [c for c in ws.connections if c.id not in ids]
+            ws.mark_modified()
+        for cid in payload.get("nodes", []):
+            if len(ws.columns) <= 1:
+                break
+            if QMessageBox.question(
+                    self, "Delete Column",
+                    f"Delete column '{cid}' and its connections?"
+            ) == QMessageBox.Yes:
+                ws.remove_column(cid)
+        self._load_from_state()
+        self.specsChanged.emit()
+
+    def _on_node_moved(self, unit_id, x, y):
+        if not self.window_state:
+            return
+        col = self.window_state.columns.get(unit_id)
+        if col is not None:
+            col.node_pos = (float(x), float(y))
+            self.window_state.mark_modified()
+
+    def _on_validation_rejected(self, reason: str):
+        self.dof_status_label.setText(f"⚠️ {reason}")
+        set_state(self.dof_status_label, "warn")
+
+    def _on_edge_clicked(self, conn_id: str):
+        """Open a connection in the inline editor."""
+        if not self.window_state:
+            return
+        conn = next((c for c in self.window_state.connections if c.id == conn_id),
+                    None)
+        if conn is None:
+            self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
+            return
+        dst = self.window_state.columns.get(conn.dst)
+        natural = None
+        fs = self._try_build_flowsheet()
+        if fs is not None:
+            try:
+                from core.flowsheet import natural_q
+                natural = natural_q(fs.units[conn.src], conn.port)
+            except Exception:
+                natural = None
+        self.ov_connection_panel.set_config(
+            conn, natural_q=natural,
+            max_stage=dst.num_stages if dst else None)
+        self.ov_editor_stack.setCurrentWidget(self.ov_connection_panel)
+        self.ov_config_group.setTitle(f"{conn.src}.{conn.port} → {conn.dst}")
+
+    def _on_ov_connection_changed(self):
+        """Write an edited connection back. Stages are 0-based in the panel and
+        1-based in core.flowsheet, converted here at the seam."""
+        from dataclasses import replace
+        if not self.window_state:
+            return
+        cfg = self.ov_connection_panel.get_config()
+        ws = self.window_state
+        ws.connections = [
+            replace(c, stage=int(cfg["stage"]) + 1,
+                    split_fraction=float(cfg["split_fraction"]), q=cfg["q"])
+            if c.id == cfg["id"] else c
+            for c in ws.connections]
+        ws.mark_modified()
+        self._update_column_canvas()
+        self._update_dof_status()
+        self.specsChanged.emit()
+
+    def _on_element_clicked(self, unit_id: str, element_type: str):
         """Open the clicked element's config in the overview's inline editor."""
+        self._set_active_column(unit_id)
         if element_type == "condenser":
             self._load_condenser_into(self.ov_condenser_panel)
             self.ov_editor_stack.setCurrentWidget(self.ov_condenser_panel)
@@ -372,9 +626,10 @@ class SpecificationsTab(QWidget):
             self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
             self.ov_config_group.setTitle("Element Configuration")
 
-    def _open_stream_by_id(self, sid: str):
+    def _open_stream_by_id(self, unit_id: str, sid: str):
         """Load any clicked stream (feed/product/side draw) into the overview
-        stream panel — the canvas emits the stream id directly."""
+        stream panel — the scene emits the column and the stream id directly."""
+        self._set_active_column(unit_id)
         if not (self.window_state and sid in self.window_state.streams):
             self.ov_editor_stack.setCurrentWidget(self.ov_placeholder)
             self.ov_config_group.setTitle("Element Configuration")
@@ -398,6 +653,41 @@ class SpecificationsTab(QWidget):
         item = QTableWidgetItem(stream_id)
         item.setData(Qt.UserRole, stream_id)
         return item
+
+    def _add_inlet_rows(self):
+        """Show what arrives from another column, as read-only rows.
+
+        A connection feeds a *stage*, not one of this column's Stream objects —
+        that is what keeps makeup working (an ordinary feed on the same stage
+        just blends, see build_solver_input). But then nothing on the Streams
+        page would mention the recycle at all, and a user would be looking at a
+        column whose real inlet is invisible. These rows are that inlet: not
+        editable here (the connection owns them), and greyed with a tooltip
+        saying where to edit them, per the "nothing is silently ignored" rule.
+        """
+        ws = self.window_state
+        if not ws or not self.beta:
+            return                       # nothing can be connected without beta
+        from PySide6.QtGui import QBrush, QColor
+        from gui.theme import palette
+        cid = ws.active_column_id
+        for c in ws.connections:
+            if c.dst != cid:
+                continue
+            label = f"← {c.src}.{c.port} @ stage {c.stage - 1}"
+            item = QTableWidgetItem(label)
+            item.setData(Qt.UserRole, None)          # not a stream: never renamed
+            item.setFlags(Qt.ItemIsEnabled)          # selectable-looking, not editable
+            item.setForeground(QBrush(QColor(palette.TEXT_MUTED)))
+            split = (f", {c.split_fraction:.0%} of it" if c.split_fraction < 1.0
+                     else "")
+            item.setToolTip(
+                f"Fed by the connection from {c.src}.{c.port}{split}. Its flow "
+                "and composition come from that column's solution — click the "
+                "stream on the Flowsheet diagram to change the stage or split.")
+            row = self.stream_list.rowCount()
+            self.stream_list.insertRow(row)
+            self.stream_list.setItem(row, 0, item)
 
     def _on_stream_renamed(self, item):
         """Commit an in-place rename to window_state, or revert the cell."""
@@ -429,6 +719,8 @@ class SpecificationsTab(QWidget):
         if row >= 0:
             item = self.stream_list.item(row, 0)
             if item:
+                if item.data(Qt.UserRole) is None:
+                    return          # a read-only inlet row, not one of our streams
                 self.current_stream_id = item.text()
                 stream_data = {}
                 if self.window_state and self.current_stream_id in self.window_state.streams:
@@ -722,23 +1014,19 @@ class SpecificationsTab(QWidget):
             self._update_column_canvas()
             self.specsChanged.emit()
 
-    def _update_column_canvas(self):
-        """Update the column overview canvas."""
-        if not self.window_state:
-            return
-            
-        num_stages = self.window_state.num_stages
-        
-        feeds = []
-        products = []
-        modules = []
+    def _column_view_model(self, col):
+        """What the scene needs to draw one column. Same collection the single
+        column canvas used, run per column instead of once."""
+        num_stages = col.num_stages
+
+        feeds, products, modules = [], [], []
 
         # Stages are 0-based from the top (0 = distillate/condenser, N-1 = reboiler).
         def _stage(s, default):
             st = s.stage if s.stage is not None else default
             return max(0, min(num_stages - 1, st))
 
-        for stream_id, stream in self.window_state.streams.items():
+        for stream_id, stream in col.streams.items():
             if stream.stream_type == StreamType.FEED:
                 feeds.append((_stage(stream, 10), stream_id))
             elif stream.stream_type == StreamType.DISTILLATE:
@@ -748,7 +1036,7 @@ class SpecificationsTab(QWidget):
             elif stream.stream_type == StreamType.SIDESTREAM:
                 products.append((_stage(stream, 10), stream_id, "sidestream"))
 
-        for module_id, module in self.window_state.modules.items():
+        for module_id, module in col.modules.items():
             modules.append({
                 "id": module_id, "type": module.module_type.value,
                 "stage": max(0, min(num_stages - 1, module.stage)),
@@ -757,15 +1045,73 @@ class SpecificationsTab(QWidget):
                 "rate": module.rate, "duty": module.duty,
             })
 
-        # Feed stage on the canvas comes from the actual feed streams, not a
-        # hardcoded default (plan Phase 2).
-        feed_stage = feeds[0][0] if feeds else num_stages // 2
-        self.column_canvas.set_column_config(
-            num_stages, feed_stage,
-            self.window_state.condenser_config.condenser_type.value,
-            self.window_state.reboiler_config.reboiler_type.value
-        )
-        self.column_canvas.set_streams(feeds, products, modules)
+        return {
+            "num_stages": num_stages,
+            "condenser_type": col.condenser_config.condenser_type.value,
+            "reboiler_type": col.reboiler_config.reboiler_type.value,
+            "feeds": feeds, "products": products, "modules": modules,
+            "node_pos": col.node_pos,
+        }
+
+    def _try_build_flowsheet(self):
+        """A topology-only Flowsheet: ids, stages, ports and connections.
+
+        Deliberately NOT the solver's gather. The editor has to say which edges
+        are recycles and which are illegal *while the user is still wiring
+        things up* — long before the columns have specs, feeds or thermo, which
+        a real gather demands. Ports, tears and connection legality need none of
+        that, so this builds exactly what those answers require and nothing
+        else. `solve_flowsheet` refuses a Unit built this way.
+        """
+        if not self.window_state:
+            return None
+        from core.flowsheet import Flowsheet, Unit
+        from core.side_sections import SideSection
+
+        ws = self.window_state
+        units = {}
+        for cid, col in ws.columns.items():
+            n = max(2, int(col.num_stages))
+            draws = [(s.id, min(n, max(1, (s.stage or 0) + 1)),
+                      0.0 if s.phase == "vapor" else 1.0,
+                      1.0 if s.phase == "vapor" else 0.0)
+                     for s in col.streams.values()
+                     if s.stream_type == StreamType.SIDESTREAM]
+            sections = []
+            for mid, kind, ds, rs, rate, ratio, nst in col.side_sections():
+                try:
+                    sections.append(SideSection(
+                        id=mid, kind=kind, draw_stage=ds + 1, return_stage=rs + 1,
+                        rate=rate, ratio=ratio, n_stages=nst))
+                except ValueError:
+                    pass          # a half-configured module still draws
+            units[cid] = Unit(
+                id=cid, n_stages=n, draws=draws, sections=sections,
+                condenser=col.condenser_config.condenser_type.value.lower())
+        return Flowsheet(units=units, connections=list(ws.connections),
+                         comps=ws.get_species_names())
+
+    def _update_column_canvas(self):
+        """Redraw whichever diagram is on screen from window_state."""
+        if not self.window_state:
+            return
+        ws = self.window_state
+        if not self.beta:
+            # Default: the single-column diagram, fed exactly as it always was.
+            vm = self._column_view_model(ws.active_column)
+            feeds = vm["feeds"]
+            feed_stage = feeds[0][0] if feeds else vm["num_stages"] // 2
+            self.single_canvas.set_column_config(
+                vm["num_stages"], feed_stage,
+                vm["condenser_type"], vm["reboiler_type"])
+            self.single_canvas.set_streams(feeds, vm["products"], vm["modules"])
+            return
+        vms = {cid: self._column_view_model(col) for cid, col in ws.columns.items()}
+        self.flowsheet_scene.rebuild(vms, list(ws.connections),
+                                     flowsheet=self._try_build_flowsheet(),
+                                     active_unit=ws.active_column_id)
+        self.flowsheet_scene.set_stream_results(getattr(ws, "flowsheet_result", None))
+        self._refresh_column_combo()
 
     def _update_dof_status(self):
         """Update the DoF status from the unified analyzer; auto-balance when
@@ -782,7 +1128,10 @@ class SpecificationsTab(QWidget):
     def set_window_state(self, window_state):
         """Set the window state object and initialize UI from it."""
         self.window_state = window_state
-        self.column_canvas.set_window_state(window_state)
+        # the single canvas keeps a state reference (it edits num_stages inline);
+        # the flowsheet scene holds none and is fed by _update_column_canvas()
+        self.single_canvas.set_window_state(window_state)
+        self.refresh_beta()          # pick the right diagram before loading
         self._load_from_state()
 
     def _load_from_state(self):
@@ -815,6 +1164,7 @@ class SpecificationsTab(QWidget):
             row = self.stream_list.rowCount()
             self.stream_list.insertRow(row)
             self.stream_list.setItem(row, 0, self._stream_item(stream_id))
+        self._add_inlet_rows()
 
         # Always keep a stream selected (prefer the current one, else row 0) so
         # edits target a real stream instead of being silently dropped.

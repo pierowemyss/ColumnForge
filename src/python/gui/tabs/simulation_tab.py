@@ -61,6 +61,21 @@ class SimulationTab(QWidget):
         ])
         options_layout.addRow("Method:", self.solver_combo)
 
+        # Per-column override. One stubborn column (the depropanizer's Inside-Out
+        # limit cycle) should not force every other column onto the slower
+        # solver. The inherit entry NAMES the flowsheet default rather than
+        # reading blank, so an inherited choice is visible, not silent.
+        self.column_method_combo = QComboBox(self)
+        self.column_method_combo.setToolTip(
+            "Solver for the column selected on the Specifications tab. Side "
+            "strippers and rectifiers are always solved with Wang-Henke "
+            "regardless of this choice — their sub-columns are small and that "
+            "is the robust option (see core/side_sections.py).")
+        self.column_method_row_label = QLabel("This column:")
+        options_layout.addRow(self.column_method_row_label,
+                              self.column_method_combo)
+        self._refresh_column_method()
+
         self.max_iter_spin = QSpinBox(self)
         self.max_iter_spin.setRange(10, 10000)
         self.max_iter_spin.setValue(500)
@@ -164,6 +179,51 @@ class SimulationTab(QWidget):
         self.run_btn.clicked.connect(self._on_run_clicked)
         self.abort_btn.clicked.connect(self._on_abort_clicked)
         self.solver_combo.currentTextChanged.connect(self._on_method_changed)
+        self.column_method_combo.currentIndexChanged.connect(
+            self._on_column_method_changed)
+
+    _INHERIT = "__inherit__"
+
+    def refresh_beta(self):
+        self._refresh_column_method()
+
+    def _refresh_column_method(self):
+        """Rebuild the per-column override from the active column. Called on
+        load and whenever the active column or the flowsheet default changes.
+
+        Hidden unless beta features are on: with one column there is nothing to
+        override, and "Method" already says what it will run.
+        """
+        from gui.app_settings import beta_enabled
+        beta = beta_enabled()
+        self.column_method_combo.setVisible(beta)
+        self.column_method_row_label.setVisible(beta)
+        if not beta:
+            return
+        combo = self.column_method_combo
+        combo.blockSignals(True)
+        combo.clear()
+        default = self.solver_combo.currentText()
+        combo.addItem(f"(flowsheet default: {default})", self._INHERIT)
+        for m in ("Inside-Out", "Bubble-Point"):
+            combo.addItem(m, m)
+        ws = self.window_state
+        if ws is not None:
+            current = ws.active_column.method
+            idx = combo.findData(current if current else self._INHERIT)
+            combo.setCurrentIndex(max(0, idx))
+            multi = len(ws.columns) > 1
+            self.column_method_row_label.setText(
+                f"Column {ws.active_column_id}:" if multi else "This column:")
+        combo.blockSignals(False)
+
+    def _on_column_method_changed(self, _index):
+        if not self.window_state:
+            return
+        data = self.column_method_combo.currentData()
+        self.window_state.active_column.method = (
+            None if data == self._INHERIT else data)
+        self.window_state.mark_modified()
 
     def _on_run_clicked(self):
         """Handle Run button click."""
@@ -205,6 +265,11 @@ class SimulationTab(QWidget):
         self.window_state = window_state
         self.refresh_thermo()
         self.refresh_method()
+        self._refresh_column_method()
+
+    def refresh_columns(self):
+        """Re-read the active column — the Specifications tab changed it."""
+        self._refresh_column_method()
 
     # window_state.solver_mode <-> the Method combo. It is persisted in the
     # .colx, so a file saved on Bubble-Point must come back on Bubble-Point.
@@ -228,7 +293,10 @@ class SimulationTab(QWidget):
             self.window_state.solver_mode = (
                 SolverMode.HYSIM if "Inside-Out" in method
                 else SolverMode.BUBBLE_POINT)
+            self.window_state.default_method = method
             self.window_state.is_modified = True
+        # the inherit entry names the default, so it has to follow it
+        self._refresh_column_method()
 
     def _on_thermo_changed(self):
         """Write the mirror combos through to the shared thermo config and let

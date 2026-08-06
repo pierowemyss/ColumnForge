@@ -26,6 +26,10 @@ EXAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 #               terms), so "works" means "sizes", checked separately below
 BVM_ONLY = {"multicomp_col", "extract_col", "matBVM_prediction_extract_col"}
 
+# Examples that are flowsheets rather than a single column. Everything else
+# predates schema v3 and must migrate to exactly one column.
+FLOWSHEETS = {"extractive_two_column_recycle"}
+
 
 def _cases():
     return sorted(glob.glob(os.path.join(EXAMPLES, "*.colx")))
@@ -40,16 +44,34 @@ def _load(path):
     return load_colx(path)
 
 
+def _columns(state):
+    """Every ColumnState in a loaded case.
+
+    Since schema v3 a state holds a flowsheet, so the per-column fields live
+    under `columns[id]` rather than at the top. Every bundled example is a v2
+    file and migrates to exactly one column — these assertions are per-column
+    either way, so they say the same thing they always did.
+    """
+    return list(state["columns"].values())
+
+
 @pytest.mark.parametrize("path", _cases(), ids=_name)
 def test_example_loads(path):
     """Decodes cleanly and carries the pieces a case needs to mean anything."""
     state = _load(path)
     assert state["species"], _name(path)
-    assert state["num_stages"] >= 3
-    feeds = [s for s in state["streams"].values()
-             if getattr(s.stream_type, "value", s.stream_type) == "Feed"]
-    assert feeds, "no feed stream"
-    assert all(s.flow for s in feeds), "a feed with no flow"
+    assert _columns(state), "no columns"
+    fed_by_connection = {c.dst for c in state.get("connections", [])}
+    for cid, col in state["columns"].items():
+        assert col.num_stages >= 3
+        feeds = [s for s in col.streams.values()
+                 if getattr(s.stream_type, "value", s.stream_type) == "Feed"]
+        assert feeds, "no feed stream"
+        if cid in fed_by_connection:
+            # a column fed by another column may legitimately have an empty
+            # feed stream; the connection supplies it
+            continue
+        assert all(s.flow for s in feeds), "a feed with no flow"
 
 
 @pytest.mark.parametrize("path", _cases(), ids=_name)
@@ -59,7 +81,58 @@ def test_example_is_specified(path):
     name = _name(path)
     if name in BVM_ONLY or state.get("bvm_params", {}).get("reaction", {}).get("on"):
         pytest.skip("sized through the BVM module, not the spec ledger")
-    assert state["specs"], f"{name} has no column specification"
+    for col in _columns(state):
+        assert col.specs, f"{name} has no column specification"
+
+
+@pytest.mark.parametrize("path", [p for p in _cases() if _name(p) not in FLOWSHEETS],
+                         ids=_name)
+def test_example_migrates_to_a_one_column_flowsheet(path):
+    """Every example except the flowsheets predates schema v3, so it must arrive
+    as exactly one column with nothing connected — losing or inventing a column
+    here would silently change what the example means."""
+    state = _load(path)
+    assert list(state["columns"]) == ["C1"], list(state["columns"])
+    assert state["active_column_id"] == "C1"
+    assert state["connections"] == []
+
+
+@pytest.mark.parametrize("path", [p for p in _cases() if _name(p) in FLOWSHEETS],
+                         ids=_name)
+def test_flowsheet_example_converges_and_closes(path):
+    """The multi-column gate: every column converges, the recycle tear settles,
+    and the whole flowsheet closes on its EXTERNAL streams — the recycle must
+    not read as feed, and the purge must read as a product.
+
+    Note `closure` alone proves nothing here: under CMO each column's flows
+    close by construction even when the recycle composition is still wrong. The
+    tear residual is what says the loop is converged (core/flowsheet.py).
+    """
+    from PySide6.QtWidgets import QApplication
+    from gui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    win = MainWindow()
+    win.window_state.load_from_dict(_load(path))
+    res = win._solve_flowsheet(method="Bubble-Point")
+
+    assert res.converged, res.message
+    assert len(res.units) > 1, "a flowsheet example with one column"
+    assert res.tear_ids, "a flowsheet example with nothing recycled"
+    assert res.tear_converged and res.tear_residual < 1e-4, res.tear_residual
+
+    # external in == external out, per component
+    out = sum(p["flow"] * np.asarray(p["comp"], float) for p in res.products)
+    assert np.allclose(res.feed_totals, out, atol=1e-2), (res.feed_totals, out)
+    assert res.closure < 1e-2, res.closure
+
+    # the recycle is internal: it is neither an external feed nor a product
+    torn = res.streams[res.tear_ids[0]]
+    assert torn.flow > 0.0
+    assert not any(p["unit"] == torn.src and p["port"] == torn.port
+                   and not p.get("purge") for p in res.products)
+    # a split below 1 leaves the remainder as a purge product
+    assert any(p.get("purge") for p in res.products), res.products
 
 
 def _solve(state):
@@ -147,23 +220,33 @@ def test_the_example_set_covers_the_features_that_have_none():
     seen_modules, flags = set(), set()
     for path in _cases():
         state = _load(path)
-        for m in state.get("modules", {}).values():
-            seen_modules.add(getattr(m.module_type, "value", m.module_type))
-        if state.get("energy_balance"):
+        tc = state["thermodynamics_config"]
+        if tc.energy_balance:
             flags.add("energy_balance")
-        types = [getattr(s.stream_type, "value", s.stream_type)
-                 for s in state["streams"].values()]
-        if types.count("Feed") > 1:
-            flags.add("two_feeds")
-        if StreamType.SIDESTREAM.value in types:
-            flags.add("side_draw")
-        if state["thermodynamics_config"].activity_model == "UNIFAC":
+        if tc.activity_model == "UNIFAC":
             flags.add("unifac")
-        if state["thermodynamics_config"].vle_model == "PLXANT":
+        if tc.vle_model == "PLXANT":
             flags.add("plxant")
+        if len(state["columns"]) > 1:
+            flags.add("multi_column")
+        if state["connections"]:
+            flags.add("connection")
+            if any(c.split_fraction < 1.0 for c in state["connections"]):
+                flags.add("purge")
+        for col in _columns(state):
+            for m in col.modules.values():
+                seen_modules.add(getattr(m.module_type, "value", m.module_type))
+            types = [getattr(s.stream_type, "value", s.stream_type)
+                     for s in col.streams.values()]
+            if types.count("Feed") > 1:
+                flags.add("two_feeds")
+            if StreamType.SIDESTREAM.value in types:
+                flags.add("side_draw")
 
     for want in (ModuleType.SIDE_STRIPPER, ModuleType.SIDE_RECTIFIER,
                  ModuleType.PUMPAROUND, ModuleType.INTERREBOILER):
         assert want.value in seen_modules, f"no example uses {want.value}"
-    assert {"energy_balance", "two_feeds", "side_draw", "unifac",
-            "plxant"} <= flags, flags
+    assert {"energy_balance", "two_feeds", "side_draw", "unifac", "plxant",
+            # the flowsheet features: a second column, a stream between two of
+            # them, and a recycle bled by a purge
+            "multi_column", "connection", "purge"} <= flags, flags

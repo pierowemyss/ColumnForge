@@ -117,15 +117,20 @@ def test_b4_resolution_solves_at_run_efficiency(monkeypatch):
     # implicit made the patch above watch a function resolution never calls, and
     # `seen` came back empty no matter how efficiency behaved. The efficiency
     # knob is built once for both solvers, so Bubble-Point covers the behaviour.
-    si, knobs = w._gather_rigorous_inputs(method="Bubble-Point")
+    #
+    # Efficiency is a per-column property now (it can differ between columns of
+    # one flowsheet), so it rides on the Unit rather than in the shared knobs.
+    fs, knobs = w._gather_flowsheet(method="Bubble-Point")
+    assert fs.units["C1"].efficiency == 0.7
+    assert "efficiency" not in knobs      # not a flowsheet-wide knob any more
 
-    assert knobs["efficiency"] == 0.7
+    res = w._solve_flowsheet(method="Bubble-Point")
     # the purity spec forces iterative solves during resolution — every one
     # of them must run at the real column's efficiency, not E=1
     assert seen and all(e == 0.7 for e in seen)
 
     # and the resolved point actually meets the purity target at E=0.7
-    prof = real(si, **knobs)
+    prof = res.units["C1"].profile
     assert prof["found"]
     assert abs(prof["xD"][0] - 0.55) < 1e-3
 
@@ -157,12 +162,13 @@ def test_b13_phase_survives_colx_roundtrip():
     ws = WindowState()
     ws.add_stream(Stream(id="S1", stream_type=StreamType.SIDESTREAM, stage=5,
                          flow=8.0, phase="vapor"))
+    # streams are per-column since schema v3 (one column here, "C1")
     back = decode_state(encode_state(ws.to_dict()))
-    assert back["streams"]["S1"].phase == "vapor"
+    assert back["columns"]["C1"].streams["S1"].phase == "vapor"
     # old files without the field default to liquid
     enc = encode_state(ws.to_dict())
-    del enc["streams"]["S1"]["phase"]
-    assert decode_state(enc)["streams"]["S1"].phase == "liquid"
+    del enc["columns"]["C1"]["streams"]["S1"]["phase"]
+    assert decode_state(enc)["columns"]["C1"].streams["S1"].phase == "liquid"
 
 
 if __name__ == "__main__":

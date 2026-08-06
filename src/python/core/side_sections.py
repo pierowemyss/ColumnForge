@@ -130,7 +130,15 @@ def _returned(sec: SideSection, sub_prof: dict) -> np.ndarray:
             else np.asarray(sub_prof["xB"])).copy()
 
 
-def _extrapolate(new: np.ndarray, step: np.ndarray, prev_step) -> np.ndarray:
+def _as_composition(x: np.ndarray, new: np.ndarray) -> np.ndarray:
+    """Default projection: a composition is non-negative and sums to 1."""
+    x = np.clip(x, 0.0, None)
+    s = float(x.sum())
+    return x / s if s > 0.0 else new
+
+
+def aitken_step(new: np.ndarray, step: np.ndarray, prev_step,
+                project=None) -> np.ndarray:
     """Aitken jump along a geometrically converging recycle step.
 
     The tear crawls: successive substitution on a side column contracts by the
@@ -144,6 +152,11 @@ def _extrapolate(new: np.ndarray, step: np.ndarray, prev_step) -> np.ndarray:
     scratch, so an overshoot costs one pass rather than a wrong answer. Guarded:
     a ratio that is not a contraction (r >= 0.98, or growing) means the sequence
     is not geometric here and the plain substitution stands.
+
+    `project` maps the jumped vector back onto whatever manifold the tear
+    variable lives on, and defaults to `_as_composition` (this module's only
+    tear variable). core.flowsheet tears on component *flows* plus a thermal
+    quality, which must not be renormalized to sum 1 -- hence the seam.
     """
     if prev_step is None:
         return new
@@ -154,9 +167,7 @@ def _extrapolate(new: np.ndarray, step: np.ndarray, prev_step) -> np.ndarray:
     r = n1 / n0
     if not (0.0 < r < 0.98):
         return new
-    x = np.clip(new + r / (1.0 - r) * step, 0.0, None)
-    s = float(x.sum())
-    return x / s if s > 0.0 else new
+    return (project or _as_composition)(new + r / (1.0 - r) * step, new)
 
 
 def _product(sec: SideSection, sub_prof: dict) -> tuple:
@@ -181,7 +192,7 @@ def make_side_solver(solver, sections: List[SideSection], rebuild,
     (feed_totals / side_draws) already netted so the recycle never shows up as an
     external feed or a product.
 
-    # ponytail: successive substitution with an Aitken jump (`_extrapolate`) --
+    # ponytail: successive substitution with an Aitken jump (`aitken_step`) --
     # plain substitution contracts by the returned fraction of the draw, which on
     # a real arrangement left both bundled examples still moving after 25 passes.
     # Each section keeps its return_comp between calls, so only the first solve of
@@ -215,7 +226,7 @@ def make_side_solver(solver, sections: List[SideSection], rebuild,
         prof = solver(si, **knobs)
         subs = []
         moved = 0.0
-        prev_step = {}                     # per-section step, for _extrapolate
+        prev_step = {}                     # per-section step, for aitken_step
         for _ in range(max_passes):
             if prof.get("message") == "Aborted.":
                 break
@@ -227,7 +238,7 @@ def make_side_solver(solver, sections: List[SideSection], rebuild,
                 # accelerated jump, so the convergence test means what it says.
                 step = new - sec.return_comp
                 moved = max(moved, float(np.max(np.abs(step))))
-                sec.return_comp = _extrapolate(new, step, prev_step.get(sec.id))
+                sec.return_comp = aitken_step(new, step, prev_step.get(sec.id))
                 prev_step[sec.id] = step
             if moved < tol:
                 break
@@ -238,7 +249,11 @@ def make_side_solver(solver, sections: List[SideSection], rebuild,
         # wearing the main solver's "Converged" message. Say it in the one place
         # the GUI already shows (Simulation status), because the side product and
         # everything above the return stage are wrong by `moved`, not by `tol`.
+        # And clear `converged`: the message alone left every programmatic gate
+        # (this project's one honest one -- `found` is a cancellation flag) still
+        # reading True on a half-solved column.
         if subs and moved >= tol:
+            prof["converged"] = False
             prof["message"] = (
                 f"{prof.get('message', 'Solved')}  [side-section recycle NOT "
                 f"converged: composition still moving {moved:.2e} after "
@@ -361,6 +376,29 @@ def _demo():
     assert abs(prof_b["B"] - (F - D - big.product_flow)) < 1e-6, prof_b["B"]
     assert prof_b["side_tear_residual"] < 1e-5, prof_b["side_tear_residual"]
     assert "NOT converged" not in prof_b["message"], prof_b["message"]
+
+    # --- a starved tear must not claim convergence ----------------------------
+    # It used to: only `message` was rewritten, so every programmatic gate still
+    # read `converged` True on compositions that were still moving.
+    starved = SideSection(id="SS2", kind="stripper", draw_stage=11,
+                          return_stage=10, rate=30.0, ratio=1.5, n_stages=4)
+
+    def build_s(_si=None):
+        feeds = [(8, F, z)]
+        if starved.return_comp is not None:
+            feeds.append((starved.return_stage, starved.return_flow,
+                          starved.return_comp, 0.0))
+        liq, vap = starved.draw_rates()
+        return build_solver_input(
+            n_stages=N, comps=comps, feeds=feeds,
+            draws=[(starved.draw_stage, liq, vap)],
+            R=R, D=D, pressure=760.0, antoine=antoine)
+
+    prof_s = make_side_solver(solve_bubble_point, [starved], build_s,
+                              tol=1e-12, max_passes=1)(build_s(), max_iter=300)
+    assert prof_s["side_tear_residual"] >= 1e-12, prof_s["side_tear_residual"]
+    assert prof_s["converged"] is False, prof_s["converged"]
+    assert "NOT converged" in prof_s["message"], prof_s["message"]
     print("side_sections self-check OK")
 
 

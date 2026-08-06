@@ -7,20 +7,17 @@ Contains Thermodynamics and Chemical Species sub-tabs
 Author: Piero Wemyss
 """
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QTableWidget, QTableWidgetItem, QPushButton, QGroupBox, QStackedWidget,
-    QCheckBox
-)
+from gui.panels.reactions_panel import ReactionsPanel
+from gui.panels.species_properties_panel import SpeciesPropertiesPanel
+from gui.panels.sub_tab_bar import SubTabBar
+from gui.state.window_state import Species, ThermodynamicsConfig
+from gui.table_edit import fmt_number, parse_number
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QToolTip
-
-from gui.table_edit import parse_number, fmt_number
-from gui.panels.reactions_panel import ReactionsPanel
-from gui.panels.sub_tab_bar import SubTabBar
-from gui.panels.species_properties_panel import SpeciesPropertiesPanel
-from gui.state.window_state import Species, ThermodynamicsConfig
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
+                               QLabel, QPushButton, QStackedWidget,
+                               QTableWidget, QTableWidgetItem, QToolTip,
+                               QVBoxLayout, QWidget)
 
 IMPLEMENTED_VLE = ThermodynamicsConfig.IMPLEMENTED_VLE
 IMPLEMENTED_ACTIVITY = ThermodynamicsConfig.IMPLEMENTED_ACTIVITY
@@ -523,8 +520,9 @@ class InitializationTab(QWidget):
         """Add a species from the bundled component database (search dialog)."""
         if not self.window_state:
             return
-        from ..panels.species_search_dialog import SpeciesSearchDialog
         from core import component_db
+
+        from ..panels.species_search_dialog import SpeciesSearchDialog
 
         dlg = SpeciesSearchDialog(self, existing_names=self.get_species_names())
         if not dlg.exec() or not dlg.selected_name:
@@ -536,14 +534,14 @@ class InitializationTab(QWidget):
         self._update_parameter_visibility()
         self.load_interaction_parameters()   # show any auto-filled NRTL pairs
         self.speciesChanged.emit()
-        if info["missing_pairs"]:
-            from PySide6.QtWidgets import QMessageBox
-            pairs = ", ".join(f"{i}/{j}" for i, j in info["missing_pairs"])
-            QMessageBox.information(
-                self, "NRTL parameters missing",
-                f"No curated NRTL binary parameters for: {pairs}.\n"
-                "These pairs will be treated as ideal unless you enter "
-                "parameters in Thermodynamics → Binary Interactions.")
+        # if info["missing_pairs"]:
+        #     from PySide6.QtWidgets import QMessageBox
+        #     pairs = ", ".join(f"{i}/{j}" for i, j in info["missing_pairs"])
+        #     QMessageBox.information(
+        #         self, "NRTL parameters missing",
+        #         f"No curated NRTL binary parameters for: {pairs}.\n"
+        #         "These pairs will be treated as ideal unless you enter "
+        #         "parameters in Thermodynamics → Binary Interactions.")
 
     def _add_species(self):
         """Add a new species."""

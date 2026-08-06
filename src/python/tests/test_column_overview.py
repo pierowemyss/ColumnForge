@@ -100,7 +100,9 @@ def test_module_is_anchored_to_its_stage_and_opens_its_editor():
     # the module editor — the module is what defines the product
     prod = "Side Stripper 1 product"
     assert prod in canvas.stream_hits
-    tab._on_element_clicked("condenser")                 # move focus away first
+    # move focus away first. The handler names a column now (one, unless beta
+    # features build a flowsheet); the single-column canvas passes the active one.
+    tab._on_element_clicked(ws.active_column_id, "condenser")
     canvas._handle_click(canvas.stream_hits[prod].center())
     assert tab.ov_editor_stack.currentWidget() is tab.ov_module_panel
     assert tab.current_module_id == "Side Stripper 1"
@@ -152,3 +154,52 @@ if __name__ == "__main__":
             fn()
             print(f"{fn.__name__} OK")
     print("column-overview checks passed")
+
+
+def test_the_single_column_diagram_is_the_default():
+    """The flowsheet editor is beta and must stay off unless asked for.
+
+    Guards the whole gate in one place: with beta off the Specifications tab
+    shows the original canvas, offers no column selector, and the Results tab
+    offers no unit selector — the app the user had before flowsheets existed.
+    """
+    from gui.app_settings import beta_enabled, set_beta_enabled
+    from gui.panels.column_overview_panel import ColumnOverviewCanvas
+
+    was = beta_enabled()
+    set_beta_enabled(False)
+    try:
+        tab, _ws = _tab()
+        assert isinstance(tab.column_canvas, ColumnOverviewCanvas)
+        assert tab.diagram_stack.currentIndex() == 0
+        assert not tab.column_row.isVisibleTo(tab)
+        assert tab.overview_group.title() == "Column Diagram"
+
+        # ...and turning it on swaps in the editor without a restart
+        set_beta_enabled(True)
+        tab.refresh_beta()
+        assert tab.column_canvas is tab.flowsheet_view
+        assert tab.diagram_stack.currentIndex() == 1
+        assert tab.column_row.isVisibleTo(tab)
+    finally:
+        set_beta_enabled(was)
+
+
+def test_a_connection_fed_column_shows_no_inlet_rows_without_beta():
+    """Inlet rows describe connections, which cannot exist without beta."""
+    from gui.app_settings import beta_enabled, set_beta_enabled
+    from core.flowsheet import Connection
+
+    was = beta_enabled()
+    set_beta_enabled(False)
+    try:
+        tab, ws = _tab()
+        ws.add_column("C2")
+        ws.set_active_column("C2")
+        ws.connections = [Connection("k", "C1", "B", "C2", 8)]
+        tab._load_from_state()
+        labels = [tab.stream_list.item(r, 0).text()
+                  for r in range(tab.stream_list.rowCount())]
+        assert not any("←" in t for t in labels), labels
+    finally:
+        set_beta_enabled(was)

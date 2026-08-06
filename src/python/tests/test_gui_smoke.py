@@ -51,7 +51,7 @@ def test_end_to_end_both_solvers_and_results_tab():
         assert abs(profile["D"] - 40.0) < 1e-6
         assert profile["xD"][0] > profile["xB"][0]   # benzene up top
 
-        ws.results = profile
+        ws.results = {ws.active_column_id: profile}   # {column_id: profile}
         w.results_tab.update_results(w._normalize_results(profile))
         assert w.results_tab.data_table.rowCount() == 20
         # stage 0 (distillate) on the top row of the table
@@ -163,7 +163,11 @@ def test_side_section_solves_on_the_threaded_job_path():
                                return_stage=11, rate=25.0, boilup_ratio=1.5,
                                num_stages=4))
     for method in ("Bubble-Point", "Inside-Out (HYSIM)"):
-        prof = w._make_solver_job(method)(lambda *a, **k: None, lambda: False)
+        # the job hands back a whole FlowsheetResult now; one column here
+        res = w._make_solver_job(method)(lambda *a, **k: None, lambda: False)
+        assert res.converged, (method, res.message)
+        assert list(res.units) == ["C1"]
+        prof = res.units["C1"].profile
         assert prof["found"], (method, prof.get("message"))
         assert prof["side_tear_residual"] < 1e-4, (method,
                                                    prof["side_tear_residual"])

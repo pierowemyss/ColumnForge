@@ -30,8 +30,10 @@ def _rigorous_profile():
 
 
 class _WS:                       # minimal stand-in for window_state
-    def __init__(self, results):
-        self.results = results
+    def __init__(self, profile):
+        # window_state.results is {column_id: profile} since the flowsheet
+        # landed. Every test here renders one column, so file it under "C1".
+        self.results = {"C1": profile}
 
 
 def test_results_tab_renders_all_available():
@@ -151,7 +153,7 @@ def test_mccabe_thiele_binary_only():
     # a WindowState-like stub carrying the thermo the McCabe plot needs
     class _WSthermo:
         def __init__(self, prof):
-            self.results = prof
+            self.results = {"C1": prof}   # {column_id: profile}
             self.pressure = 760.0
             from gui.state.window_state import WindowState, Species
             ws = WindowState()
@@ -187,7 +189,7 @@ def test_display_units_convert_table_and_summary():
 
     class _WSu:                                    # window_state stub with units
         def __init__(self, prof):
-            self.results = prof
+            self.results = {"C1": prof}   # {column_id: profile}
             self.display_units = DisplayUnits(temperature="K", duty="MW")
             self.species = {}
     tab = ResultsTab()

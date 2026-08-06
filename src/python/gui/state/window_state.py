@@ -1,9 +1,11 @@
+from copy import deepcopy
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 from core.data_structures import SolverMode  # canonical, single definition
 from core.dof import DoFAnalyzer, Spec, SpecKind
+from core.flowsheet import Connection
 from core.material_balance import overall_balance
 
 
@@ -290,8 +292,220 @@ class ModuleConfig:
                                           # (side stripper/rectifier) rate, kmol/h
 
 
+@dataclass
+class ColumnState:
+    """One Column of the flowsheet: everything that varies from shell to shell.
+
+    Species, thermodynamics and display units are deliberately NOT here — they
+    are flowsheet-global, shared by every column, and live on WindowState.
+
+    Every field is reachable under its old name straight off WindowState, which
+    delegates to the active column (see `_column_property`). That is what keeps
+    the ~250 existing `window_state.num_stages` call sites working unchanged.
+    """
+    num_stages: int = 20
+    pressure: float = 1.0                # bar
+    pressure_drop: float = 0.0           # bar/stage
+    stage_efficiency: float = 1.0        # Murphree vapour efficiency (column-wide)
+    streams: Dict[str, Stream] = field(default_factory=dict)
+    condenser_config: CondenserConfig = field(default_factory=CondenserConfig)
+    reboiler_config: ReboilerConfig = field(default_factory=ReboilerConfig)
+    modules: Dict[str, ModuleConfig] = field(default_factory=dict)
+    specs: List[Spec] = field(default_factory=list)
+    light_key_index: int = 0             # 0-based light-key index
+    heavy_key_index: Optional[int] = None  # 0-based; None => defaults to lk+1
+    # None = inherit the flowsheet's default rigorous solver. Per-column because
+    # one stubborn column (the depropanizer's Inside-Out limit cycle) should not
+    # force every other column onto the slower solver.
+    method: Optional[str] = None
+    node_pos: Optional[tuple] = None     # (x, y) on the flowsheet canvas
+
+    # --- streams and modules ---------------------------------------------
+
+    def add_stream(self, stream: Stream):
+        self.streams[stream.id] = stream
+
+    def remove_stream(self, stream_id: str):
+        self.streams.pop(stream_id, None)
+
+    def add_module(self, module_id: str, module: ModuleConfig):
+        self.modules[module_id] = module
+
+    def remove_module(self, module_id: str):
+        self.modules.pop(module_id, None)
+
+    def interheater_duties(self):
+        """[(gui_stage, duty_kW)] for modules carrying an internal heat duty
+        (interreboiler +kW / intercooler -kW). Consumed by the energy balance as
+        si.duty[]; ignored under CMO. gui_stage is 0-based from the top (0 =
+        distillate), like feeds/draws.
+        """
+        # A pumparound's duty is its cooler — claimed by pumparounds() below and
+        # folded into si.duty at build; counting it here too would double it.
+        return [(m.stage, float(m.duty))
+                for m in self.modules.values()
+                if m.duty and m.module_type == ModuleType.INTERREBOILER]
+
+    def pumparounds(self):
+        """[(draw_stage, return_stage, rate, duty_kW)] for pumparound modules.
+
+        Draw liquid `rate` at draw_stage, cool it (removing `duty` kW), return it
+        to return_stage (above the draw). gui_stage is 0-based from the top, like
+        feeds/draws; the cooling Q is consumed by the energy balance (same guard
+        as interheater duties). Only fully-specified pumparounds are returned.
+        """
+        out = []
+        for m in self.modules.values():
+            if (m.module_type == ModuleType.PUMPAROUND and m.rate
+                    and m.return_stage is not None):
+                out.append((m.stage, m.return_stage, float(m.rate),
+                            float(m.duty or 0.0)))
+        return out
+
+    # Side stripper / rectifier: the section's ratio spec lives on the type's own
+    # field (boilup for a stripper, reflux for a rectifier).
+    _SECTION_KIND = {ModuleType.SIDE_STRIPPER: "stripper",
+                     ModuleType.SIDE_RECTIFIER: "rectifier"}
+
+    @staticmethod
+    def _section_ratio(m) -> Optional[float]:
+        return (m.boilup_ratio if m.module_type == ModuleType.SIDE_STRIPPER
+                else m.reflux_ratio)
+
+    def side_sections(self):
+        """[(id, kind, draw_stage, return_stage, rate, ratio, n_stages)] for
+        fully-specified side strippers/rectifiers (see core.side_sections).
+
+        A stripper draws liquid and returns vapour above the draw; a rectifier
+        draws vapour and returns liquid below it. Stages are 0-based from the top
+        like feeds/draws. Unlike duties these work under CMO — the ratio spec, not
+        a heat term, sets the split.
+        """
+        out = []
+        for mid, m in self.modules.items():
+            kind = self._SECTION_KIND.get(m.module_type)
+            ratio = self._section_ratio(m)
+            if kind and m.rate and ratio and m.return_stage is not None:
+                out.append((mid, kind, m.stage, m.return_stage, float(m.rate),
+                            float(ratio), int(m.num_stages or 1)))
+        return out
+
+    def module_spec_counts(self) -> List[int]:
+        """Design specs each module adds, in modules order.
+
+        MESH ledger: one spec per duty unit the module adds plus one per extra
+        product. Interheater = its duty (1). Pumparound = rate + cooler duty (2).
+        Side stripper/rectifier = draw rate + its boilup/reflux ratio (2: a duty
+        unit and an extra product).
+        """
+        return [1 if m.module_type == ModuleType.INTERREBOILER else 2
+                for m in self.modules.values()]
+
+    def module_specs(self) -> List[Spec]:
+        """One Spec per module value the user has actually set, keyed by module id
+        so the DoF ledger balances against module_spec_counts()."""
+        specs: List[Spec] = []
+        for mid, m in self.modules.items():
+            if m.module_type == ModuleType.INTERREBOILER:
+                if m.duty:
+                    specs.append(Spec(SpecKind.MODULE_DUTY, float(m.duty), mid))
+            elif m.module_type == ModuleType.PUMPAROUND:
+                if m.rate:
+                    specs.append(Spec(SpecKind.MODULE_RATE, float(m.rate), mid))
+                if m.duty:
+                    specs.append(Spec(SpecKind.MODULE_DUTY, float(m.duty), mid))
+            else:
+                ratio = self._section_ratio(m)
+                if m.rate:
+                    specs.append(Spec(SpecKind.MODULE_RATE, float(m.rate), mid))
+                if ratio:
+                    specs.append(Spec(SpecKind.MODULE_RATIO, float(ratio), mid))
+        return specs
+
+    # --- operating specs --------------------------------------------------
+
+    def upsert_operating_spec(self, kind, value, component: int = -1):
+        """Set one operating spec by kind in self.specs (the single source).
+
+        Operating specs are keyed by kind — a column can't have two reflux
+        ratios — so this replaces any existing spec of the same kind. A falsy
+        value drops it. unit_ref is the kind name, so collect_specs' dedup keeps
+        exactly one entry per kind no matter which panel wrote it.
+        """
+        from core.dof import OPERATING_KINDS
+        if kind not in OPERATING_KINDS:
+            raise ValueError(f"{kind} is not an operating spec")
+        self.specs = [s for s in self.specs if s.kind != kind]
+        if value:
+            self.specs.append(Spec(kind, float(value), kind.name, component))
+
+    def get_operating_spec(self, kind):
+        """Current value for an operating-spec kind, or None."""
+        return next((s for s in self.specs if s.kind == kind), None)
+
+    def collect_specs(self) -> List[Spec]:
+        """Structured operating specs for DoF + the operating-point resolver.
+
+        self.specs is the single source — written by the Operating-specs slots
+        and by the condenser/reboiler panels alike (both go through
+        upsert_operating_spec, keyed by kind, so nothing double-counts). For
+        configs saved before that existed, fall back to the reflux/boilup/rate
+        fields on condenser_config/reboiler_config. Side-draw rates always count.
+        """
+        specs: List[Spec] = list(self.specs)
+        present = {s.kind for s in self.specs}
+
+        def _legacy(kind, value, ref):
+            # Legacy fallback per kind: only fill kinds the slots don't already
+            # carry, so a config mixing old condenser/reboiler fields with new
+            # operating slots never drops or double-counts a spec.
+            if value and kind not in present:
+                specs.append(Spec(kind, value, ref))
+
+        cc = self.condenser_config
+        if cc.condenser_type != CondenserType.NONE:
+            _legacy(SpecKind.REFLUX_RATIO, cc.reflux_ratio, "condenser")
+            _legacy(SpecKind.DISTILLATE_RATE, cc.vapor_distillate_flow, "condenser")
+        rc = self.reboiler_config
+        if rc.reboiler_type != ReboilerType.NONE:
+            _legacy(SpecKind.BOILUP_RATIO, rc.boilup_ratio, "reboiler")
+            _legacy(SpecKind.BOTTOMS_RATE, rc.bottoms_flow, "reboiler")
+        for s in self.streams.values():
+            if s.stream_type == StreamType.SIDESTREAM and s.flow:
+                specs.append(Spec(SpecKind.SIDEDRAW_RATE, s.flow, s.id))
+        specs.extend(self.module_specs())      # module knobs, keyed by module id
+        return specs
+
+    def side_draw_streams(self) -> List[Stream]:
+        """Sidestreams with a rate — the ones that become flowsheet draw ports."""
+        return [s for s in self.streams.values()
+                if s.stream_type == StreamType.SIDESTREAM and s.flow]
+
+
+def _column_property(name: str) -> property:
+    """Expose a ColumnState field under its old name on WindowState.
+
+    Every `window_state.num_stages` / `.streams` / `.condenser_config` read and
+    write in the GUI and the tests keeps working and now means "the active
+    column". The same trick `energy_balance` already uses to live on
+    ThermodynamicsConfig while being read off WindowState — see the note on
+    _PERSIST below for what happened when a field lived in two places instead.
+    """
+    def get(self):
+        return getattr(self.columns[self.active_column_id], name)
+
+    def set(self, value):
+        setattr(self.columns[self.active_column_id], name, value)
+
+    return property(get, set, doc=f"Active column's {name}.")
+
+
+DEFAULT_COLUMN_ID = "C1"
+
+
 class WindowState:
-    """Manages the overall window state including column configuration."""
+    """Manages the overall window state: a flowsheet of Columns plus the
+    species/thermodynamics they all share."""
 
     def __init__(self):
         self.current_tab = 0
@@ -301,25 +515,18 @@ class WindowState:
         self._tab_states = {}
         self.column_config = None
 
-        # Column data
-        self.num_stages = 20
-        self.pressure = 1.0  # bar
-        self.pressure_drop = 0.0  # bar/stage
-        self.stage_efficiency = 1.0  # Murphree vapour efficiency (column-wide)
+        # The flowsheet: columns by id, the one being edited, and the streams
+        # between them. A single-column case is just len(columns) == 1.
+        self.columns: Dict[str, ColumnState] = {DEFAULT_COLUMN_ID: ColumnState()}
+        self.active_column_id: str = DEFAULT_COLUMN_ID
+        self.connections: List[Connection] = []
+        self.default_method: str = "Inside-Out"
 
-        # Species management
+        # Species management (flowsheet-global)
         self.species: Dict[str, Species] = {}
 
-        # Streams management
-        self.streams: Dict[str, Stream] = {}
-
-        # Configuration
-        self.condenser_config = CondenserConfig()
-        self.reboiler_config = ReboilerConfig()
+        # Configuration (flowsheet-global)
         self.thermodynamics_config = ThermodynamicsConfig()
-
-        # Modules
-        self.modules: Dict[str, ModuleConfig] = {}
 
         # BVM solver knobs live in the Modules/BVM widget; mirrored here so they
         # round-trip through to_dict()/load_from_dict() (.colx). {} = use defaults.
@@ -339,72 +546,170 @@ class WindowState:
         # bvm_params["reaction"]; `bvm_module.set_params` still honours it.
         self.reactions: dict = {}
 
-        # Spec/DoF: structured extra specs (e.g. key-recovery) + CMO flag.
-        # Condenser/reboiler/side-draw specs are derived from config in
-        # collect_specs(); self.specs holds anything not on those panels yet.
-        self.specs: List[Spec] = []
-        self.light_key_index = 0             # 0-based light-key index
-        self.heavy_key_index = None          # 0-based; None => defaults to lk+1
-        self.results = None                  # last solver profile (Results tab reads this)
-        from core.units import DisplayUnits
-        self.display_units = DisplayUnits()  # output-only unit choices (Results/export)
+        # results: {column_id: solver profile}. Session-only, never persisted.
+        self.results: Dict[str, dict] = {}
+        # The last core.flowsheet.FlowsheetResult: inter-unit streams, external
+        # products, tear residual. Also session-only.
+        self.flowsheet_result = None
+        from ..app_settings import default_units
+        self.display_units = default_units()  # output-only unit choices (Results/export)
 
         # Add default streams
         self._add_default_streams()
 
-    def create_new_column(self):
-        """Reset to a new empty column configuration (the single reset path;
-        a separate clear() used to drift out of sync with this)."""
+    # --- the active column, and the flat names that reach it ---------------
+
+    @property
+    def active_column(self) -> ColumnState:
+        """The column every un-qualified `window_state.<field>` refers to."""
+        return self.columns[self.active_column_id]
+
+    num_stages = _column_property("num_stages")
+    pressure = _column_property("pressure")
+    pressure_drop = _column_property("pressure_drop")
+    stage_efficiency = _column_property("stage_efficiency")
+    streams = _column_property("streams")
+    condenser_config = _column_property("condenser_config")
+    reboiler_config = _column_property("reboiler_config")
+    modules = _column_property("modules")
+    specs = _column_property("specs")
+    light_key_index = _column_property("light_key_index")
+    heavy_key_index = _column_property("heavy_key_index")
+    node_pos = _column_property("node_pos")
+
+    def new_flowsheet(self):
+        """Reset everything, including the species and thermodynamics that all
+        columns share. This is File -> New."""
         self.current_tab = 0
         self.solver_mode = SolverMode.HYSIM
         self._tab_states = {}
         self.column_config = None
         self.is_modified = False
         self.file_path = None
-        self.num_stages = 20
-        self.pressure = 1.0
-        self.pressure_drop = 0.0
-        self.stage_efficiency = 1.0
+        self.columns = {DEFAULT_COLUMN_ID: ColumnState()}
+        self.active_column_id = DEFAULT_COLUMN_ID
+        self.connections = []
+        self.default_method = "Inside-Out"
         self.species = {}
-        self.streams = {}
-        self.condenser_config = CondenserConfig()
-        self.reboiler_config = ReboilerConfig()
         self.thermodynamics_config = ThermodynamicsConfig()
-        self.modules = {}
         self.bvm_params = {}
         self.rbm_params = {}
         self.reactions = {}
-        self.specs = []
-        self.light_key_index = 0
-        self.heavy_key_index = None
-        self.results = None
-        from core.units import DisplayUnits
-        self.display_units = DisplayUnits()
+        self.results = {}
+        self.flowsheet_result = None
+        from ..app_settings import default_units
+        self.display_units = default_units()
 
         # Add default streams
         self._add_default_streams()
 
-    def _add_default_streams(self):
+    #: Kept as the File -> New entry point it has always been. It resets the
+    #: whole flowsheet, species included — `add_column` is the thing that makes
+    #: one more column inside the flowsheet you already have.
+    create_new_column = new_flowsheet
+
+    def _add_default_streams(self, col: Optional[ColumnState] = None):
         """Add the standard Feed, Distillate, and Bottoms streams.
         Stages are 0-based from the top (0 = condenser/distillate, N-1 = reboiler)."""
-        feed = Stream(id="Feed", stream_type=StreamType.FEED, stage=10)
-        distillate = Stream(id="Distillate", stream_type=StreamType.DISTILLATE,
-                            stage=0)
-        bottoms = Stream(id="Bottoms", stream_type=StreamType.BOTTOMS,
-                         stage=self.num_stages - 1)
-        
-        self.add_stream(feed)
-        self.add_stream(distillate)
-        self.add_stream(bottoms)
+        col = col if col is not None else self.active_column
+        col.add_stream(Stream(id="Feed", stream_type=StreamType.FEED, stage=10))
+        col.add_stream(Stream(id="Distillate", stream_type=StreamType.DISTILLATE,
+                              stage=0))
+        col.add_stream(Stream(id="Bottoms", stream_type=StreamType.BOTTOMS,
+                              stage=col.num_stages - 1))
         self.is_modified = False # Reset modified flag after defaults
+
+    # --- column management -------------------------------------------------
+
+    def _fresh_column_id(self) -> str:
+        n = len(self.columns) + 1
+        while f"C{n}" in self.columns:
+            n += 1
+        return f"C{n}"
+
+    def add_column(self, column_id: Optional[str] = None,
+                   activate: bool = True) -> str:
+        """Add a column to the flowsheet, with the usual default streams.
+        Species and thermodynamics are shared, so nothing about them changes."""
+        column_id = column_id or self._fresh_column_id()
+        if column_id in self.columns:
+            raise ValueError(f"a column named '{column_id}' already exists")
+        self.columns[column_id] = ColumnState()
+        self._add_default_streams(self.columns[column_id])
+        if activate:
+            self.active_column_id = column_id
+        self.is_modified = True
+        return column_id
+
+    def remove_column(self, column_id: str) -> bool:
+        """Drop a column and every connection touching it. The last column
+        cannot be removed — a flowsheet with no columns has nothing to edit."""
+        if column_id not in self.columns or len(self.columns) <= 1:
+            return False
+        del self.columns[column_id]
+        self.connections = [c for c in self.connections
+                            if c.src != column_id and c.dst != column_id]
+        self.results.pop(column_id, None)
+        if self.active_column_id == column_id:
+            self.active_column_id = next(iter(self.columns))
+        self.is_modified = True
+        return True
+
+    def rename_column(self, old_id: str, new_id: str) -> bool:
+        """Rename a column, carrying its connections with it."""
+        new_id = (new_id or "").strip()
+        if old_id not in self.columns or not new_id or new_id in self.columns:
+            return False
+        self.columns = {(new_id if k == old_id else k): v
+                        for k, v in self.columns.items()}
+        self.connections = [
+            replace(c,
+                    src=new_id if c.src == old_id else c.src,
+                    dst=new_id if c.dst == old_id else c.dst,
+                    id=c.id.replace(old_id, new_id, 1) if c.id.startswith(old_id) else c.id)
+            for c in self.connections]
+        if self.active_column_id == old_id:
+            self.active_column_id = new_id
+        if old_id in self.results:
+            self.results[new_id] = self.results.pop(old_id)
+        self.is_modified = True
+        return True
+
+    def duplicate_column(self, column_id: str,
+                         new_id: Optional[str] = None) -> Optional[str]:
+        """Copy a column's whole configuration. Connections are NOT copied — a
+        duplicated column is a new unit and it is the user's call where it sits."""
+        if column_id not in self.columns:
+            return None
+        new_id = new_id or self._fresh_column_id()
+        if new_id in self.columns:
+            return None
+        self.columns[new_id] = deepcopy(self.columns[column_id])
+        self.columns[new_id].node_pos = None      # let auto-layout place it
+        self.active_column_id = new_id
+        self.is_modified = True
+        return new_id
+
+    def set_active_column(self, column_id: str) -> bool:
+        if column_id not in self.columns:
+            return False
+        self.active_column_id = column_id
+        return True
 
     def load_column_config(self, config):
         """Load a column configuration."""
         self.column_config = config
         self.is_modified = False
 
-    # Persisted column state. Stored as live objects (dataclasses + enums) — the
-    # .colx is pickled, so no field-by-field (de)serialization is needed.
+    # Persisted state, as live objects (dataclasses + enums); persistence.py
+    # projects them to JSON primitives at the file boundary (ADR-0001).
+    #
+    # `columns` and `connections` are the flowsheet; everything else listed here
+    # is flowsheet-global and shared by every column. The per-column fields
+    # (num_stages, streams, condenser_config, ...) are deliberately absent —
+    # they live inside `columns` now and are reachable under their old names as
+    # properties on the active column.
+    #
     # ponytail: BVM knobs (r, q, FR_LK…) live in the Modules/BVM widget, not here,
     # so they aren't persisted yet — re-enter them after load, or lift them into
     # window_state when the BVM panel should round-trip too.
@@ -414,11 +719,9 @@ class WindowState:
     # while the DoF ledger read this one, so it stayed False forever and duty
     # specs were rejected on a column whose solver was running the energy
     # balance. Old .colx files still carry the stale key; it is ignored on load.
-    _PERSIST = ("num_stages", "pressure", "pressure_drop", "stage_efficiency",
-                "species", "streams", "condenser_config", "reboiler_config",
-                "thermodynamics_config", "modules", "bvm_params", "rbm_params",
-                "reactions", "specs",
-                "light_key_index", "heavy_key_index",
+    _PERSIST = ("columns", "connections", "active_column_id", "default_method",
+                "species", "thermodynamics_config",
+                "bvm_params", "rbm_params", "reactions",
                 "display_units", "solver_mode")
 
     @property
@@ -440,7 +743,12 @@ class WindowState:
         for k in self._PERSIST:
             if k in state:
                 setattr(self, k, state[k])
-        self.results = None
+        if not self.columns:                      # never leave the flat names dangling
+            self.columns = {DEFAULT_COLUMN_ID: ColumnState()}
+        if self.active_column_id not in self.columns:
+            self.active_column_id = next(iter(self.columns))
+        self.results = {}
+        self.flowsheet_result = None
         self.is_modified = False
 
     # --- Activity-model registry (Phase 7) --------------------------------
@@ -643,8 +951,12 @@ class WindowState:
         return make_energy_balance(np.array(cp, float), np.array(hv, float),
                                    np.array(tb, float), np.array(tcr, float))
 
-    def feed_quality(self, stream, order) -> float:
+    def feed_quality(self, stream, order, col=None) -> float:
         """Thermal quality q of a feed stream from its temperature (SI, K).
+
+        `col` selects which column's pressure the bubble/dew points are taken
+        at — the same feed is a different q in a column running at 1 bar and one
+        at 10. Defaults to the active column.
 
         q is the feed's liquid fraction *by enthalpy*:
             q = (Hv_sat - Hf) / (Hv_sat - Hl_sat)
@@ -665,7 +977,7 @@ class WindowState:
             return 1.0
         tc = self.thermodynamics_config
         antoine = tc.psat_params(order)
-        P = tc.pressure_in_psat_unit(self.pressure)
+        P = tc.pressure_in_psat_unit(self._col(col).pressure)
         gamma_fn = self.build_gamma_fn(order)
         phi_fn = self.build_phi_fn(order)
         T = float(stream.temperature) - 273.15   # SI K -> fit unit (degC)
@@ -713,16 +1025,22 @@ class WindowState:
         self.is_modified = False
 
     def add_species(self, species: Species):
-        """Add a species to the column."""
+        """Add a species to the flowsheet (every column shares them)."""
         self.species[species.name] = species
         self.thermodynamics_config.get_component_params(species.name)
         self.is_modified = True
 
     def remove_species(self, name: str):
-        """Remove a species from the column."""
+        """Remove a species from the flowsheet, and from every column's stream
+        compositions — species are global, so a removal that only cleaned up the
+        active column would leave the others carrying a component that no longer
+        exists."""
         if name in self.species:
             del self.species[name]
             self.thermodynamics_config.remove_component(name)
+            for col in self.columns.values():
+                for stream in col.streams.values():
+                    stream.composition.pop(name, None)
             self.is_modified = True
 
     def rename_species(self, old_name: str, new_name: str) -> bool:
@@ -747,11 +1065,15 @@ class WindowState:
             self.thermodynamics_config.component_params[new_name] = params
         
         self._rename_binary_keys(old_name, new_name)
-        
-        for stream in self.streams.values():
-            if old_name in stream.composition:
-                stream.composition[new_name] = stream.composition.pop(old_name)
-        
+
+        # Species are flowsheet-global, so the rename has to reach EVERY column's
+        # stream compositions. Walking only the active column left the others
+        # keyed by a name no longer in self.species.
+        for col in self.columns.values():
+            for stream in col.streams.values():
+                if old_name in stream.composition:
+                    stream.composition[new_name] = stream.composition.pop(old_name)
+
         self.is_modified = True
         return True
 
@@ -768,132 +1090,86 @@ class WindowState:
                 d.pop(key, None)
                 d[new_key] = value
 
+    # --- per-column pass-throughs -----------------------------------------
+    # These all act on the active column. The real implementations live on
+    # ColumnState so the flowsheet gather can ask any column, not just the
+    # active one; the wrappers exist so every existing call site keeps working
+    # and keeps setting `is_modified`, which the tabs read directly.
+
     def add_stream(self, stream: Stream):
-        """Add a stream to the column. (Feeds/side-draws are counted from
-        self.streams by the DoF analyzer, so no separate registration.)"""
-        self.streams[stream.id] = stream
+        """Add a stream to the active column. (Feeds/side-draws are counted from
+        col.streams by the DoF analyzer, so no separate registration.)"""
+        self.active_column.add_stream(stream)
         self.is_modified = True
 
     def remove_stream(self, stream_id: str):
-        """Remove a stream from the column."""
-        if stream_id in self.streams:
-            del self.streams[stream_id]
+        """Remove a stream from the active column, and any connection that
+        sourced from it — a connection pointing at a deleted draw would fail
+        validation later with no clue as to why."""
+        col = self.active_column
+        if stream_id in col.streams:
+            col.remove_stream(stream_id)
+            self.connections = [
+                c for c in self.connections
+                if not (c.src == self.active_column_id and c.port == stream_id)]
             self.is_modified = True
 
     def rename_stream(self, old_id: str, new_id: str) -> bool:
         """Rename a stream, keeping its data and every reference to it.
 
+        A sidestream's id doubles as its flowsheet port key, so any connection
+        drawn from it is carried along. (The alternative — a second, immutable
+        key field on Stream — buys nothing the user can see, and this rename is
+        the only place ids change.)
+
         Returns False (no change) if old_id is unknown, new_id is empty, or
         new_id is already taken — the caller reverts its display text.
         """
+        col = self.active_column
         new_id = new_id.strip()
-        if old_id not in self.streams or not new_id or new_id in self.streams:
+        if old_id not in col.streams or not new_id or new_id in col.streams:
             return False
         # rebuild the dict so the stream keeps its position in the list
-        self.streams = {(new_id if k == old_id else k): v
-                        for k, v in self.streams.items()}
-        self.streams[new_id].id = new_id
+        col.streams = {(new_id if k == old_id else k): v
+                       for k, v in col.streams.items()}
+        col.streams[new_id].id = new_id
+        self.connections = [
+            replace(c, port=new_id)
+            if (c.src == self.active_column_id and c.port == old_id) else c
+            for c in self.connections]
         self.is_modified = True
         return True
 
     def add_module(self, module_id: str, module: ModuleConfig):
-        """Add a side module to the column."""
-        self.modules[module_id] = module
+        """Add a side module to the active column."""
+        self.active_column.add_module(module_id, module)
         self.is_modified = True
 
     def remove_module(self, module_id: str):
-        """Remove a side module from the column."""
-        if module_id in self.modules:
-            del self.modules[module_id]
+        """Remove a side module from the active column, and any connection that
+        sourced from its side product."""
+        col = self.active_column
+        if module_id in col.modules:
+            col.remove_module(module_id)
+            self.connections = [
+                c for c in self.connections
+                if not (c.src == self.active_column_id and c.port == module_id)]
             self.is_modified = True
 
     def interheater_duties(self):
-        """[(gui_stage, duty_kW)] for modules carrying an internal heat duty
-        (interreboiler +kW / intercooler -kW). Consumed by the energy balance as
-        si.duty[]; ignored under CMO. gui_stage is 0-based from the top (0 =
-        distillate), like feeds/draws.
-        """
-        # A pumparound's duty is its cooler — claimed by pumparounds() below and
-        # folded into si.duty at build; counting it here too would double it.
-        return [(m.stage, float(m.duty))
-                for m in self.modules.values()
-                if m.duty and m.module_type == ModuleType.INTERREBOILER]
+        return self.active_column.interheater_duties()
 
     def pumparounds(self):
-        """[(draw_stage, return_stage, rate, duty_kW)] for pumparound modules.
-
-        Draw liquid `rate` at draw_stage, cool it (removing `duty` kW), return it
-        to return_stage (above the draw). gui_stage is 0-based from the top, like
-        feeds/draws; the cooling Q is consumed by the energy balance (same guard
-        as interheater duties). Only fully-specified pumparounds are returned.
-        """
-        out = []
-        for m in self.modules.values():
-            if (m.module_type == ModuleType.PUMPAROUND and m.rate
-                    and m.return_stage is not None):
-                out.append((m.stage, m.return_stage, float(m.rate),
-                            float(m.duty or 0.0)))
-        return out
-
-    # Side stripper / rectifier: the section's ratio spec lives on the type's own
-    # field (boilup for a stripper, reflux for a rectifier).
-    _SECTION_KIND = {ModuleType.SIDE_STRIPPER: "stripper",
-                     ModuleType.SIDE_RECTIFIER: "rectifier"}
-
-    @staticmethod
-    def _section_ratio(m) -> Optional[float]:
-        return (m.boilup_ratio if m.module_type == ModuleType.SIDE_STRIPPER
-                else m.reflux_ratio)
+        return self.active_column.pumparounds()
 
     def side_sections(self):
-        """[(id, kind, draw_stage, return_stage, rate, ratio, n_stages)] for
-        fully-specified side strippers/rectifiers (see core.side_sections).
-
-        A stripper draws liquid and returns vapour above the draw; a rectifier
-        draws vapour and returns liquid below it. Stages are 0-based from the top
-        like feeds/draws. Unlike duties these work under CMO — the ratio spec, not
-        a heat term, sets the split.
-        """
-        out = []
-        for mid, m in self.modules.items():
-            kind = self._SECTION_KIND.get(m.module_type)
-            ratio = self._section_ratio(m)
-            if kind and m.rate and ratio and m.return_stage is not None:
-                out.append((mid, kind, m.stage, m.return_stage, float(m.rate),
-                            float(ratio), int(m.num_stages or 1)))
-        return out
+        return self.active_column.side_sections()
 
     def module_spec_counts(self) -> List[int]:
-        """Design specs each module adds, in modules order.
-
-        MESH ledger: one spec per duty unit the module adds plus one per extra
-        product. Interheater = its duty (1). Pumparound = rate + cooler duty (2).
-        Side stripper/rectifier = draw rate + its boilup/reflux ratio (2: a duty
-        unit and an extra product).
-        """
-        return [1 if m.module_type == ModuleType.INTERREBOILER else 2
-                for m in self.modules.values()]
+        return self.active_column.module_spec_counts()
 
     def module_specs(self) -> List[Spec]:
-        """One Spec per module value the user has actually set, keyed by module id
-        so the DoF ledger balances against module_spec_counts()."""
-        specs: List[Spec] = []
-        for mid, m in self.modules.items():
-            if m.module_type == ModuleType.INTERREBOILER:
-                if m.duty:
-                    specs.append(Spec(SpecKind.MODULE_DUTY, float(m.duty), mid))
-            elif m.module_type == ModuleType.PUMPAROUND:
-                if m.rate:
-                    specs.append(Spec(SpecKind.MODULE_RATE, float(m.rate), mid))
-                if m.duty:
-                    specs.append(Spec(SpecKind.MODULE_DUTY, float(m.duty), mid))
-            else:
-                ratio = self._section_ratio(m)
-                if m.rate:
-                    specs.append(Spec(SpecKind.MODULE_RATE, float(m.rate), mid))
-                if ratio:
-                    specs.append(Spec(SpecKind.MODULE_RATIO, float(ratio), mid))
-        return specs
+        return self.active_column.module_specs()
 
     # --- Unified DoF + auto material balance (single source of truth) ---
 
@@ -904,62 +1180,29 @@ class WindowState:
         """Species in insertion order. Used by the BVM/BP solvers' input gather."""
         return list(self.species.keys())
 
-    def upsert_operating_spec(self, kind, value, component: int = -1):
-        """Set one operating spec by kind in self.specs (the single source).
+    def _col(self, col=None) -> ColumnState:
+        """A ColumnState from an id, an object, or None (= the active one)."""
+        if col is None:
+            return self.active_column
+        return self.columns[col] if isinstance(col, str) else col
 
-        Operating specs are keyed by kind — a column can't have two reflux
-        ratios — so this replaces any existing spec of the same kind. A falsy
-        value drops it. unit_ref is the kind name, so collect_specs' dedup keeps
-        exactly one entry per kind no matter which panel wrote it.
-        """
-        from core.dof import Spec, OPERATING_KINDS
-        if kind not in OPERATING_KINDS:
-            raise ValueError(f"{kind} is not an operating spec")
-        self.specs = [s for s in self.specs if s.kind != kind]
-        if value:
-            self.specs.append(Spec(kind, float(value), kind.name, component))
+    def upsert_operating_spec(self, kind, value, component: int = -1, col=None):
+        """Set one operating spec by kind on a column's specs (the single source)."""
+        self._col(col).upsert_operating_spec(kind, value, component)
         self.mark_modified()
 
-    def get_operating_spec(self, kind):
+    def get_operating_spec(self, kind, col=None):
         """Current value for an operating-spec kind, or None."""
-        return next((s for s in self.specs if s.kind == kind), None)
+        return self._col(col).get_operating_spec(kind)
 
-    def collect_specs(self) -> List[Spec]:
-        """Structured operating specs for DoF + the operating-point resolver.
+    def collect_specs(self, col=None) -> List[Spec]:
+        """Structured operating specs for DoF + the operating-point resolver."""
+        return self._col(col).collect_specs()
 
-        self.specs is the single source — written by the Operating-specs slots
-        and by the condenser/reboiler panels alike (both go through
-        upsert_operating_spec, keyed by kind, so nothing double-counts). For
-        configs saved before that existed, fall back to the reflux/boilup/rate
-        fields on condenser_config/reboiler_config. Side-draw rates always count.
-        """
-        specs: List[Spec] = list(self.specs)
-        present = {s.kind for s in self.specs}
-
-        def _legacy(kind, value, ref):
-            # Legacy fallback per kind: only fill kinds the slots don't already
-            # carry, so a config mixing old condenser/reboiler fields with new
-            # operating slots never drops or double-counts a spec.
-            if value and kind not in present:
-                specs.append(Spec(kind, value, ref))
-
-        cc = self.condenser_config
-        if cc.condenser_type != CondenserType.NONE:
-            _legacy(SpecKind.REFLUX_RATIO, cc.reflux_ratio, "condenser")
-            _legacy(SpecKind.DISTILLATE_RATE, cc.vapor_distillate_flow, "condenser")
-        rc = self.reboiler_config
-        if rc.reboiler_type != ReboilerType.NONE:
-            _legacy(SpecKind.BOILUP_RATIO, rc.boilup_ratio, "reboiler")
-            _legacy(SpecKind.BOTTOMS_RATE, rc.bottoms_flow, "reboiler")
-        for s in self.streams.values():
-            if s.stream_type == StreamType.SIDESTREAM and s.flow:
-                specs.append(Spec(SpecKind.SIDEDRAW_RATE, s.flow, s.id))
-        specs.extend(self.module_specs())      # module knobs, keyed by module id
-        return specs
-
-    def build_dof_analyzer(self) -> DoFAnalyzer:
-        cc, rc = self.condenser_config, self.reboiler_config
-        n_side = sum(1 for s in self.streams.values()
+    def build_dof_analyzer(self, col=None) -> DoFAnalyzer:
+        c = self._col(col)
+        cc, rc = c.condenser_config, c.reboiler_config
+        n_side = sum(1 for s in c.streams.values()
                      if s.stream_type == StreamType.SIDESTREAM)
         return DoFAnalyzer(
             n_components=len(self.species),
@@ -967,20 +1210,40 @@ class WindowState:
             reboiler=rc.reboiler_type != ReboilerType.NONE,
             partial_condenser=cc.condenser_type == CondenserType.PARTIAL,
             n_side_draws=n_side,
-            module_spec_counts=self.module_spec_counts(),
+            module_spec_counts=c.module_spec_counts(),
             energy_balance=self.energy_balance,
         )
 
-    def analyze_dof(self):
-        """DoFResult for the current config + collected specs."""
-        return self.build_dof_analyzer().analyze(self.collect_specs())
+    def analyze_dof(self, col=None):
+        """DoFResult for one column's config + collected specs."""
+        return self.build_dof_analyzer(col).analyze(self.collect_specs(col))
 
-    def get_specification_status(self) -> tuple:
-        """(icon, message, can_run) from the unified DoF analyzer."""
-        r = self.analyze_dof()
+    def analyze_flowsheet_dof(self) -> Dict[str, object]:
+        """{column_id: DoFResult} for every column. A connection consumes no
+        degrees of freedom — it makes a column's feed implicit, not free — so
+        the flowsheet requirement is exactly the sum of the per-column ones."""
+        return {cid: self.analyze_dof(cid) for cid in self.columns}
+
+    def get_specification_status(self, col=None) -> tuple:
+        """(icon, message, can_run) from the unified DoF analyzer.
+
+        With more than one column this reports the whole flowsheet: it can only
+        run when every column can, and it names the ones that cannot. A
+        single-column case — every case, unless beta features built one — reads
+        exactly as it always did.
+        """
+        if col is None and len(self.columns) > 1:
+            results = self.analyze_flowsheet_dof()
+            bad = {cid: r for cid, r in results.items() if not r.can_run}
+            if not bad:
+                return "✅", f"Perfectly specified ({len(self.columns)} columns).", True
+            worst = next(iter(bad.values()))
+            names = ", ".join(sorted(bad))
+            return worst.icon, f"{names}: {worst.message}", False
+        r = self.analyze_dof(col)
         return r.icon, r.message, r.can_run
 
-    def auto_balance(self):
+    def auto_balance(self, col=None):
         """Run the overall component balance and write D/B flows + comps.
 
         Fires only when the column is fully specified AND a key-recovery spec is
@@ -990,17 +1253,18 @@ class WindowState:
         key-spec panel exists to supply it. NK_spec defaults to 0 — exact for the
         2-key case, the upgrade is a non-key distribution spec.
         """
-        if not self.analyze_dof().can_run:
+        c = self._col(col)
+        if not self.analyze_dof(c).can_run:
             return None
         order = self._ordered_species()
         if len(order) < 2:
             return None
-        lk_recovery = next((sp.value for sp in self.collect_specs()
+        lk_recovery = next((sp.value for sp in self.collect_specs(c)
                             if sp.kind == SpecKind.LK_RECOVERY), None)
         if lk_recovery is None:
             return None
         feeds = []
-        for s in self.streams.values():
+        for s in c.streams.values():
             if s.stream_type == StreamType.FEED and s.flow and s.composition:
                 z = [s.composition.get(name, 0.0) for name in order]
                 if sum(z) > 0:
@@ -1008,14 +1272,14 @@ class WindowState:
         if not feeds:
             return None
         xD, D, xB, B = overall_balance(
-            feeds, lk=self.light_key_index, spec_mode="recovery",
+            feeds, lk=c.light_key_index, spec_mode="recovery",
             FR_LK=lk_recovery, NK_spec=0.0)
-        self._write_product(StreamType.DISTILLATE, D, xD, order)
-        self._write_product(StreamType.BOTTOMS, B, xB, order)
+        self._write_product(StreamType.DISTILLATE, D, xD, order, c)
+        self._write_product(StreamType.BOTTOMS, B, xB, order, c)
         return xD, D, xB, B
 
-    def _write_product(self, stream_type, flow, x, order):
-        s = next((st for st in self.streams.values()
+    def _write_product(self, stream_type, flow, x, order, col=None):
+        s = next((st for st in self._col(col).streams.values()
                   if st.stream_type == stream_type), None)
         if s is None or s.user_specified:
             return                      # never clobber a user-entered product
@@ -1241,6 +1505,90 @@ def _demo():
     assert abs(tc.pressure_in_psat_unit(1.01325) - 760.0) < 0.1
     tc.vle_model = "PLXANT"
     assert abs(tc.pressure_in_psat_unit(1.0) - 1.0) < 1e-9
+    # --- the flowsheet: many columns behind the same flat attribute names ----
+    fs = WindowState()
+    fs.add_species(Species(name="A"))
+    fs.add_species(Species(name="B"))
+    assert list(fs.columns) == [DEFAULT_COLUMN_ID] and fs.active_column_id == "C1"
+
+    # A flat write lands on the active column, and only on it.
+    fs.num_stages = 33
+    assert fs.columns["C1"].num_stages == 33 and fs.num_stages == 33
+    c2 = fs.add_column()
+    assert c2 == "C2" and fs.active_column_id == "C2"
+    assert fs.num_stages == 20, "a new column must not inherit C1's stage count"
+    assert fs.columns["C1"].num_stages == 33, "adding a column disturbed C1"
+    # ...and species/thermo are shared, not copied per column
+    assert fs.get_species_names() == ["A", "B"]
+    assert set(fs.streams) == {"Feed", "Distillate", "Bottoms"}
+
+    # Switching columns switches everything the flat names see, together.
+    fs.set_active_column("C1")
+    assert fs.num_stages == 33
+    fs.streams["Feed"].flow = 100.0
+    fs.set_active_column("C2")
+    assert fs.streams["Feed"].flow is None, "columns are sharing a streams dict"
+
+    # A renamed species reaches EVERY column's compositions, not just the active.
+    fs.set_active_column("C1")
+    fs.streams["Feed"].composition = {"A": 0.6, "B": 0.4}
+    fs.columns["C2"].streams["Feed"].composition = {"A": 0.3, "B": 0.7}
+    assert fs.rename_species("A", "acetone")
+    assert "acetone" in fs.columns["C2"].streams["Feed"].composition, \
+        "rename_species missed a non-active column"
+    assert "A" not in fs.columns["C2"].streams["Feed"].composition
+    fs.remove_species("acetone")
+    assert "acetone" not in fs.columns["C2"].streams["Feed"].composition
+
+    # Connections follow a renamed side draw, and die with a deleted one.
+    fs.set_active_column("C1")
+    fs.add_stream(Stream(id="Side1", stream_type=StreamType.SIDESTREAM,
+                         stage=5, flow=10.0))
+    fs.connections.append(Connection("k", "C1", "Side1", "C2", 8))
+    assert fs.rename_stream("Side1", "Kerosene")
+    assert fs.connections[0].port == "Kerosene", fs.connections
+    fs.remove_stream("Kerosene")
+    assert fs.connections == [], "a connection outlived the draw it came from"
+
+    # Renaming a column carries its connections both ways.
+    fs.connections.append(Connection("C1.B->C2@8", "C1", "B", "C2", 8))
+    assert fs.rename_column("C2", "Recovery")
+    assert fs.connections[0].dst == "Recovery" and fs.active_column_id == "C1"
+    assert fs.rename_column("C1", "Main")
+    assert fs.connections[0].src == "Main" and fs.active_column_id == "Main"
+
+    # Duplicating copies the configuration but not the wiring.
+    dup = fs.duplicate_column("Main")
+    assert fs.columns[dup].num_stages == 33 and fs.columns[dup].node_pos is None
+    assert not any(c.src == dup or c.dst == dup for c in fs.connections)
+
+    # Removing a column takes its connections with it; the last one cannot go.
+    assert fs.remove_column(dup)
+    assert fs.remove_column("Recovery")
+    assert fs.connections == []
+    assert not fs.remove_column("Main"), "the last column must not be removable"
+
+    # Flowsheet DoF is the sum of the columns', and names the ones at fault.
+    fs.add_column("Second")
+    fs.set_active_column("Main")
+    fs.upsert_operating_spec(SpecKind.REFLUX_RATIO, 2.0)
+    fs.upsert_operating_spec(SpecKind.DISTILLATE_RATE, 40.0)
+    assert fs.analyze_dof("Main").can_run
+    assert not fs.analyze_dof("Second").can_run
+    icon, msg, can_run = fs.get_specification_status()
+    assert not can_run and "Second" in msg, msg
+    fs.upsert_operating_spec(SpecKind.REFLUX_RATIO, 2.0, col="Second")
+    fs.upsert_operating_spec(SpecKind.DISTILLATE_RATE, 40.0, col="Second")
+    assert fs.get_specification_status()[2], fs.get_specification_status()
+    assert fs.columns["Main"].get_operating_spec(SpecKind.REFLUX_RATIO).value == 2.0
+
+    # A round-trip keeps every column, and the flat names still reach the active.
+    snap = fs.to_dict()
+    ws2 = WindowState()
+    ws2.load_from_dict(snap)
+    assert set(ws2.columns) == {"Main", "Second"} and ws2.active_column_id == "Main"
+    assert ws2.num_stages == 33 and ws2.results == {}
+
     print("window_state self-check OK")
 
 

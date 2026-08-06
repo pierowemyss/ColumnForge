@@ -56,6 +56,14 @@ class canvas:
     FEED = "#4dabf7"          # lighter than the old #1971c2 for dark contrast
     PRODUCT = "#ff6b6b"
     INTERNAL = "#51cf66"
+    # --- flowsheet canvas ---------------------------------------------------
+    # A recycle needs its own HUE, not just a dash: dashed INTERNAL green reads
+    # as "selected" against everything else on this palette.
+    RECYCLE = "#e599f7"
+    EDGE_INVALID = "#ff922b"  # a connection that no longer validates
+    NODE_ACTIVE = "#4dabf7"   # border of the column being edited
+    NODE_LABEL = TEXT_BRIGHT  # a column's name, always legible
+    STAGE_LABEL = TEXT_MUTED  # stage numbers, only drawn when zoomed in
 
 
 # Token table consumed by app.qss (@name@ -> value). Only colours/metrics —

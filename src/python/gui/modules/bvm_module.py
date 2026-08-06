@@ -925,12 +925,21 @@ class BVMModuleWidget(QWidget):
     def _push_results(self, profile):
         """G5: store the rigorous-solver profile in WindowState.results and render it
         in the Results tab (same handoff as the Simulation tab), so the sized column's
-        profiles/duties are inspectable -- not stranded behind a status label."""
+        profiles/duties are inspectable -- not stranded behind a status label.
+
+        BVM sizes one column, so the profile is filed under the active column id
+        (results is {column_id: profile} since the flowsheet landed) and any
+        stale flowsheet result is cleared -- leaving the previous run's
+        inter-unit streams on screen next to a BVM profile would read as though
+        BVM had produced them."""
         if not self.window_state:
             return
-        self.window_state.results = profile
+        ws = self.window_state
+        ws.results = {ws.active_column_id: profile}
+        ws.flowsheet_result = None
         mw = self.window()
         try:
+            mw.results_tab.set_flowsheet_result(None)
             summary = mw._normalize_results(profile)
             mw.results_tab.update_results(summary)
             mw.tab_widget.setCurrentIndex(3)

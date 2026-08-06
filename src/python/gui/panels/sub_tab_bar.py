@@ -67,3 +67,15 @@ class SubTabBar(QFrame):
         if 0 <= index < len(self.tab_buttons):
             return self.tab_buttons[index]
         return None
+
+    def setTabVisible(self, index: int, visible: bool):
+        """Show/hide one tab, keeping every other index stable (same contract as
+        QTabWidget.setTabVisible). Used for tabs that only apply to some runs —
+        the Results tab's Flowsheet page is meaningless for a single column."""
+        if 0 <= index < len(self.tab_buttons):
+            self.tab_buttons[index].setVisible(visible)
+
+    def isTabVisible(self, index: int) -> bool:
+        if 0 <= index < len(self.tab_buttons):
+            return self.tab_buttons[index].isVisible()
+        return False

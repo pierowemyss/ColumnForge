@@ -9,35 +9,161 @@
 
 
 subroutine antoine_psat(n, coeffs, Tcel, Psat)
-   implicit none
+    implicit none
 
-   integer, intent(in) :: n
-   real(8), intent(in) :: Tcel, coeffs(n,3)
-   real(8) :: a(n), b(n), c(n)
-   real(8), intent(out) :: Psat(n)
-   
-   a = coeffs(:,1)
-   b = coeffs(:,2)
-   c = coeffs(:,3)
+    integer, intent(in) :: n
+    real(8), intent(in) :: Tcel, coeffs(n,3)
+    real(8) :: a(n), b(n), c(n)
+    real(8), intent(out) :: Psat(n)
 
-   Psat = 10.00d0 ** (a + b / (Tcel+C))
+    a = coeffs(:,1)
+    b = coeffs(:,2)
+    c = coeffs(:,3)
+
+    Psat = 10.00d0 ** (a + b / (Tcel+C))
 
 end subroutine
 
 subroutine PLXANT_psat(n, c, Tcel, Psat)
-   implicit none
+    implicit none
 
-   integer, intent(in) :: n
-   real(8), intent(in) :: Tcel
-   real(8), intent(in), dimension(0:n,0:7) :: c
-   real(8) :: Tk, lnP(n)
-   real(8), intent(out) :: Psat(n)
+    integer, intent(in) :: n
+    real(8), intent(in) :: Tcel
+    real(8), intent(in), dimension(0:n,0:7) :: c
+    real(8) :: Tk, lnP(n)
+    real(8), intent(out) :: Psat(n)
 
-   Tk = Tcel + 273.15d0
+    Tk = Tcel + 273.15d0
 
-   lnP = (c(:, 0) + c(:, 1) / (c(:, 2) + Tk) + c(:, 3) * Tk + c(:, 4) * log(Tk) + c(:, 5) * Tk ** c(:, 6))
+    lnP = (c(:, 0) + c(:, 1) / (c(:, 2) + Tk) + c(:, 3) * Tk + c(:, 4) * log(Tk) + c(:, 5) * Tk ** c(:, 6))
 
-   Psat = exp(lnP)
+    Psat = exp(lnP)
+
+end subroutine
+
+subroutine wagner_psat(n, c, TCel, Psat)
+    implicit none
+    
+    integer, intent(in) :: n
+    real(8), intent(in) :: TCel
+    real(8) :: TcCel(n), Pc(n), Tr(n), tau(n), f(n)
+    real(8), intent(in), dimension(0:n,0:5) :: c
+    real(8), intent(out) :: Psat(n)
+
+    TcCel = c(:,4)
+    Pc = c(:,5)
+
+    Tr = min((TcCel+273.15d0) / (TcCel + 273.15d0), [1.0d0, 1.0d0, 1.0d0])
+    tau = 1.0d0 - Tr
+
+    f = c(:, 0) * tau + c(:, 1) * tau ** 1.5 + c(:, 2) * tau ** 3 + c(:, 3) * tau ** 6
+    Psat = Pc * exp(f / Tr)
+
+end subroutine
+
+subroutine antoine_tsat(n_comps, c, Psat, TCel)
+    use minpack_module, only: wp, hybrd1, dpmpar, enorm
+    use iso_fortran_env, only: nwrite => output_unit
+
+    implicit none
+
+    integer :: info
+
+    integer,parameter :: n = 1
+    integer,parameter :: lwa = (n*(3*n+13))/2
+
+    real(8) :: Psat(n), fvec(n), wa(lwa)
+    real(8) :: tol
+
+    Psat0 = 1.0d0
+    Psat(1) = Psat0
+
+    tol = 1.0d-8
+
+    if (shape(c(1,:))==3) then
+        external :: antoine_psat
+
+        call hybrd1(antoine_psat, n, Z, fvec, tol, info, wa, lwa)
+
+        if (info /= 1) then
+            write(*, '(A, i2)') "NIFCO.TSAT ERROR: Unsuccessful root find for saturated mixture temperature."
+        end if
+    end if
+
+
+    if (shape(c(1,:))==7) then
+        external :: PLXANT_psat
+
+        call hybrd1(PLXANT_psat, n, Z, fvec, tol, info, wa, lwa)
+
+        if (info /= 1) then
+            write(*, '(A, i2)') "NIFCO.TSAT ERROR: Unsuccessful root find for saturated mixture temperature."
+        end if
+    end if
+
+
+    if (shape(c(1,:))==5) then
+        external :: wagner_psat
+
+        call hybrd1(wagner_psat, n, Z, fvec, tol, info, wa, lwa)
+
+        if (info /= 1) then
+            write(*, '(A, i2)') "NIFCO.TSAT ERROR: Unsuccessful root find for saturated mixture temperature."
+        end if
+    end if
+
+end subroutine
+
+subroutine antoine_tsat_func(n_comps, c, Psat, TCel, fvec, iflag)
+    use minpack_module, only: wp, hybrd1, dpmpar, enorm
+    use iso_fortran_env, only: nwrite => output_unit
+
+    implicit none
+
+    integer :: info
+
+    integer,parameter :: n = 1
+    integer,parameter :: lwa = (n*(3*n+13))/2
+
+    real(8) :: Psat(n), fvec(n), wa(lwa)
+    real(8) :: tol
+
+    Psat0 = 1.0d0
+    Psat(1) = Psat0
+
+    tol = 1.0d-8
+
+    if (shape(c(1,:))==3) then
+        external :: antoine_psat
+
+        call hybrd1(antoine_psat, n, Z, fvec, tol, info, wa, lwa)
+
+        if (info /= 1) then
+            write(*, '(A, i2)') "NIFCO.TSAT ERROR: Unsuccessful root find for saturated mixture temperature."
+        end if
+    end if
+
+
+    if (shape(c(1,:))==7) then
+        external :: PLXANT_psat
+
+        call hybrd1(PLXANT_psat, n, Z, fvec, tol, info, wa, lwa)
+
+        if (info /= 1) then
+            write(*, '(A, i2)') "NIFCO.TSAT ERROR: Unsuccessful root find for saturated mixture temperature."
+        end if
+    end if
+
+
+    if (shape(c(1,:))==5) then
+        external :: wagner_psat
+
+        call hybrd1(wagner_psat, n, Z, fvec, tol, info, wa, lwa)
+
+        if (info /= 1) then
+            write(*, '(A, i2)') "NIFCO.TSAT ERROR: Unsuccessful root find for saturated mixture temperature."
+        end if
+    end if
 
 end subroutine
 

@@ -48,21 +48,25 @@ def _configured_window():
 
 def test_threaded_run_updates_results_and_progress():
     w, ws = _configured_window()
-    ws.results = None
+    ws.results = {}
     w.run_simulation()
-    assert w._solver_thread.isRunning() or ws.results is not None
-    _spin_until(lambda: ws.results is not None)
+    assert w._solver_thread.isRunning() or ws.results
+    _spin_until(lambda: bool(ws.results))
     _spin_until(lambda: not w._solver_thread.isRunning())
 
-    assert ws.results["found"], ws.results.get("message")
+    # results is {column_id: profile}; this run has the one default column
+    assert list(ws.results) == ["C1"], list(ws.results)
+    prof = ws.results["C1"]
+    assert prof["found"], prof.get("message")
+    assert ws.flowsheet_result is not None and ws.flowsheet_result.converged
     assert w.results_tab.data_table.rowCount() == 20
     assert w.sim_tab.progress_bar.value() == 100
     assert int(w.sim_tab.iter_label.text()) >= 1
     assert w.sim_tab.run_btn.isEnabled()          # set_running(False) happened
     # a second run while idle is allowed and completes too
-    ws.results = None
+    ws.results = {}
     w.run_simulation()
-    _spin_until(lambda: ws.results is not None)
+    _spin_until(lambda: bool(ws.results))
 
 
 def test_abort_cancels_running_job():
@@ -74,8 +78,13 @@ def test_abort_cancels_running_job():
             stalled["n"] += 1
             report(stalled["n"], 100, 1.0)         # (done, total, residual)
             time.sleep(0.002)
-        return {"found": False, "message": "Aborted.", "n_stages": 20,
+        # the job's contract is a FlowsheetResult now, not a bare profile
+        from core.flowsheet import FlowsheetResult, UnitResult
+        prof = {"found": False, "message": "Aborted.", "n_stages": 20,
                 "feed_stage": 10, "T": [], "x": [[]]}
+        return FlowsheetResult(
+            units={"C1": UnitResult("C1", prof, False, True, 0.0, 0.0, 0, "Aborted.")},
+            aborted=True, converged=False, message="Aborted.")
 
     w._start_solver(slow_job)
     _spin_until(lambda: stalled["n"] > 5)          # job is genuinely running
@@ -100,15 +109,16 @@ def test_recovery_spec_run_converges_and_moves_the_bar():
     ws.upsert_operating_spec(SpecKind.LK_RECOVERY, 0.98)
     seen = []
     w._solver_worker = None
-    ws.results = None
+    ws.results = {}
     w.run_simulation()
     w._solver_worker.progress.connect(lambda d, t, r: seen.append((d, t)))
-    _spin_until(lambda: ws.results is not None, timeout=60.0)
+    _spin_until(lambda: bool(ws.results), timeout=60.0)
     _spin_until(lambda: not w._solver_thread.isRunning())
 
-    assert ws.results["found"], ws.results.get("message")
+    prof = ws.results["C1"]
+    assert prof["found"], prof.get("message")
     # the recovery target was actually hit: rec = D xD_lk / (F z_lk)
-    rec = ws.results["D"] * ws.results["xD"][0] / (100.0 * 0.4)
+    rec = prof["D"] * prof["xD"][0] / (100.0 * 0.4)
     assert abs(rec - 0.98) < 2e-3, rec
     assert seen, "no progress reported during the resolve"
     pcts = [min(99, int(100 * d / max(1, t))) for d, t in seen]
@@ -122,7 +132,7 @@ def test_closing_mid_solve_does_not_crash():
     w, ws = _configured_window()
     ws.is_modified = False                         # no save prompt
     w.run_simulation()
-    assert w._solver_thread.isRunning() or ws.results is not None
+    assert w._solver_thread.isRunning() or ws.results
     w.close()                                      # joins the solver thread
     assert not w._solver_thread.isRunning()
     app.processEvents()
