@@ -90,7 +90,7 @@ def test_extractive_feasible_and_entrainer_in_balance():
     # at exactly zero traps the rectifying profile on the entrainer-free face,
     # where it cannot reach the feed at all and "connects" only to its own anchor;
     # the trace is what lets the profile bend off the face, and its value is
-    # solved for by driver.solve_omega rather than fixed here.
+    # solved for by splits.solve_free_splits rather than fixed here.
     an = ws.get_species_names().index("AN")
     assert d["xB"][an] > 0.85, d["xB"]
     assert 0.0 < d["xD"][an] < 1e-3, d["xD"]
@@ -134,19 +134,57 @@ def test_extractive_stage_count_with_efficiency():
     assert size_column(prob, tp, R=3.0, EF=1.0)["N_total"] < d["N_total"]
 
 
-def test_multicomp_feasible_at_file_efficiency():
-    """The file carries stage_efficiency=0.5; the column must size FEASIBLY at its
-    historical operating point (R=1, eff=0.5) -- the primary contract. The stage
-    count is a documented ceiling, not pinned: for this sloppy difference-point
-    split the ideal march already yields ~47 stages (~MESH-real 45), so Murphree
-    eff=0.5 double-counts to ~2x. Match the reference count at eff=1 (tested above);
-    here we only guard that eff<1 no longer wrongly reports infeasible."""
+def test_multicomp_efficiency_does_not_buy_feasibility():
+    """Murphree efficiency scales the stage COUNT; it does not widen the junction.
+
+    This test used to assert the opposite -- that the file's own eff=0.5 must size
+    feasibly at R=1, "the primary contract" -- and it was guarding a tolerance, not
+    a column. `connect` computed tol = max(eps_stage, loc/efficiency), so halving
+    the efficiency doubled the accepted gap, and the verdict moved while the
+    profiles did not. Measured here at R=1:
+
+        eff 1.00   feasible          N=46   dmin 0.03454   tol 0.05000
+        eff 0.75   feasible          N=61   dmin 0.04554   tol 0.05000
+        eff 0.50   below_min_reflux         dmin 0.04836   tol 0.04793
+
+    dmin genuinely GROWS as the efficiency falls -- smaller marched steps pinch
+    before reaching as far -- so the geometry really is worse at eff=0.5, and the
+    old rule was loosening the test exactly where the profiles were getting
+    further apart. On the DMC/2ME split at rec 0.99/0.01 the same coupling turned
+    a 0.054 miss into a confident 104-stage design, and 0.10 rec_hk into a
+    17-stage one, off identical geometry (dmin equal to 16 digits). That pair of
+    numbers is what this test now exists to prevent.
+
+    N=46 at ideal stages is the anchor worth keeping: the file's Inside-Out
+    reference is 45 real stages.
+    """
     ws = _load("multicomp_col.colx")
     prob, tp = _build(ws, "DMC", "EG")
+
+    prob.efficiency = 1.0
+    ideal = size_column(prob, tp, R=1.0)
+    assert ideal["feasible"], [f.cls for f in ideal["findings"]]
+    assert 40 <= ideal["N_total"] <= 55, ideal["N_total"]   # MESH-real 45
+    assert ideal["feed_stages"]
+
+    # lower efficiency costs stages, monotonically, while the column still exists
+    prob.efficiency = 0.75
+    mid = size_column(prob, tp, R=1.0)
+    assert mid["feasible"], [f.cls for f in mid["findings"]]
+    assert mid["N_total"] > ideal["N_total"], (mid["N_total"], ideal["N_total"])
+
+    # ...and at the file's own 0.5 the junction is an honest near miss, reported
+    # as one rather than absorbed by an efficiency-scaled tolerance
     prob.efficiency = float(ws.stage_efficiency)      # 0.5 in the file
-    d = size_column(prob, tp, R=1.0)
-    assert d["feasible"], [f.cls for f in d["findings"]]
-    assert d["N_total"] > 0 and d["feed_stages"]
+    low = size_column(prob, tp, R=1.0)
+    assert not low["feasible"]
+    assert [f.cls for f in low["findings"]] == ["below_min_reflux"], low["findings"]
+
+    # the point of the whole test: the tolerance may not move with efficiency.
+    # Same geometry (dmin within a few percent across the three), one tolerance.
+    tols = [d["connection"]["tol"] for d in (ideal, mid, low)]
+    assert max(tols) / min(tols) < 1.5, tols
+    assert low["connection"]["dmin"] > low["connection"]["tol"], low["connection"]
 
 
 def test_srk_changes_which_branch_the_rectifying_march_tracks():

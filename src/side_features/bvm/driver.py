@@ -15,8 +15,6 @@ from functools import partial
 
 import numpy as np
 
-from scipy.optimize import least_squares
-
 from . import reactive
 from .problem import overall_balance, SideDraw, free_split_indices
 from .sections import (single_feed_chain, extractive_chain, multifeed_chain,
@@ -367,7 +365,7 @@ def _size_two(prob, tp, rect, strip, xD, xB, P, out, forced=None):
     feasible, findings = classify(profiles, conn, both_pinched=both_pinched,
                                   side_draw=side)
     if forced is not None:
-        # junction already solved for (solve_omega); don't let the tolerance-based
+        # junction already solved for (solve_free_splits); don't let the tolerance-based
         # test overrule an exact solution.
         conn = {**conn, "nA": float(forced[0]), "nB": float(forced[1]),
                 "connected": True}
@@ -749,7 +747,7 @@ def _size_three(prob, tp, top_sec, mid_sec, bot_sec, xD, xB, P, out, extractive,
                           efficiency=E, dP=dP, P_lim=P)
 
     if forced is not None:
-        # junction indices already solved for (solve_omega): take them as given
+        # junction indices already solved for (solve_free_splits): take them as given
         # rather than re-searching with the tolerance-based test, which would
         # otherwise be free to disagree with an exact solution.
         mprof, upper_n, i_lo, i_hi, bot_n = forced
@@ -949,15 +947,32 @@ def _size(prob, tp, R, S=None, EF=None, split=None, forced=None):
     not physical. So the sizing is retried down a ladder of floors before the
     design is called infeasible.
 
-    ponytail: a ladder, not `solve_omega`'s least squares over the splits. The
-    solve is the principled version and it is already written -- but it costs 40 s
-    on c2-c4 and 200 s on the C=6 reference column, and it does not converge above
-    C=3 (it walks the splits into the simplex corners), so it cannot sit inside
-    the R_min bisection. The ladder is three extra marches, only on failure, and
-    it recovers the same crossings. Replace it when the split solve is fixed.
+    How much the seed is worth, measured on c2-c4 (ethane/propane/n-butane, the
+    near-ideal sharp split where Underwood is trustworthy at 0.1296) by holding
+    the one free split fixed and bisecting r_min:
+
+        split 1e-4 (floor)      r_min 2.751     +2020%
+        split 9.3e-7 (Fenske)   r_min 0.1916      +48%
+        split 1e-8 (ladder)     r_min 0.1364       +5%
+        split 3.1e-10 (solved)  r_min 0.1271       -2%
+        split -> 0              r_min 0.1225       -5%   (plateau)
+
+    r_min is monotone in the seed and spans a factor of 21 across it, so the seed
+    is not a detail; it converges as the seed shrinks, so there is no "too small";
+    and BVM's junction criterion reproduces Underwood to 2% at the solved split,
+    which says the method is right and the seed carries essentially all of the
+    error. What it does NOT say is that any cheap closed-form seed is safe.
+    `splits.fenske_split` is written and measured and is deliberately NOT wired
+    in here: it is 100x better than the floor on c2-c4 and still 3000x above the
+    solved value, it is worse than this ladder's own 1e-8 rung, and on the
+    quaternary reference column it takes the junction from dmin 0.008 to 0.036.
+    A seed that helps one case and moves three others without a measurement to
+    arbitrate them is not an improvement. Use it as the starting point for a real
+    solve, not as the answer.
     """
+    given = split is not None          # a SOLVED split from the caller stands
     out = _size_once(prob, tp, R, S=S, EF=EF, split=split, forced=forced)
-    if (out.get("feasible") or split is not None or forced is not None
+    if (out.get("feasible") or given or forced is not None
             or not free_split_indices(prob)):
         return out
     for floor in _TRACE_LADDER:
@@ -1005,270 +1020,6 @@ def _size_once(prob, tp, R, S=None, EF=None, split=None, forced=None):
         return _size_two(prob, tp, secs[0], secs[-1], xD, xB, P, out, forced=forced)
     rect, strip = single_feed_chain(prob, R, xD, xB, D, B)
     return _size_two(prob, tp, rect, strip, xD, xB, P, out, forced=forced)
-
-
-def _at(prof, t):
-    """Composition at fractional stage index t along a marched profile.
-
-    Linearly EXTRAPOLATES past either end rather than clamping: a clamped index
-    makes the residual flat in that direction, so a least-squares solver that
-    steps off the end has no gradient to come back on and simply stalls there.
-    `_range_penalty` is what keeps the answer on the curve.
-    """
-    X = prof["X"]
-    last = len(X) - 1
-    if last <= 0:
-        return X[0]
-    i = int(np.clip(np.floor(t), 0, last - 1))
-    return X[i] + (float(t) - i) * (X[i + 1] - X[i])
-
-
-def _range_penalty(prof, t, scale=1.0):
-    """How far a fractional stage index falls outside its profile, 0 when inside."""
-    last = len(prof["X"]) - 1
-    return scale * (max(0.0, -float(t)) + max(0.0, float(t) - last))
-
-
-def _profiles_for(prob, tp, R, EF, split, P, mid=None, bot=None):
-    """March every section for a candidate free-split vector. Returns
-    (chain, profiles, xD, xB, D, B) with profiles ordered top -> bottom.
-
-    `mid` and `bot` supply pre-computed interior and stripping curves. Of the
-    three, only the RECTIFYING profile depends strongly on the free split -- that
-    is the whole point of solving for it, a trace of entrainer in the distillate
-    amplifies downward -- while the other two shift by ~1e-3 across two decades of
-    x_D,EG. Since every profile costs UNIFAC evaluations (the dominant expense by
-    far), `solve_omega` freezes those two through each inner solve and refreshes
-    them in an outer loop, re-measuring the final residual against fresh ones.
-    """
-    extractive = prob.extractive and prob.x_E is not None and EF
-    xD, xB, D, B = overall_balance(prob, EF if extractive else None, split=split)
-    E = prob.efficiency
-    dP = _dP(prob)
-    if extractive:
-        rect, ext, strip = extractive_chain(prob, R, EF, xD, xB, D, B)
-        tprof = march_section(rect, xD, tp, P, prob.max_stages, efficiency=E,
-                              dP=dP, P_lim=_P_bot(prob), stop_sec=ext)
-        bprof = bot if bot is not None else march_section(
-            strip, xB, tp, _P_bot(prob), prob.max_stages, efficiency=E, dP=dP,
-            P_lim=P)
-        if mid is None:
-            # the same double-junction choice `_size_three` makes -- an arbitrary
-            # candidate would hand the least-squares a curve running the wrong way
-            # up, which its top->bottom order penalty can then never satisfy.
-            best, _, _ = _choose_interior(prob, tp, rect, ext, strip, tprof, bprof)
-            if best is not None:
-                mid = best[1]["mprof"]
-            else:
-                mids = _interior_profiles(ext, tp, _P_mid(prob), prob, tprof, bprof)
-                mid = mids[0] if mids else None
-        return (rect, ext, strip), (tprof, mid, bprof), xD, xB, D, B
-    rect, strip = single_feed_chain(prob, R, xD, xB, D, B)
-    tprof = march_section(rect, xD, tp, P, prob.max_stages, efficiency=E,
-                          dP=dP, P_lim=_P_bot(prob))
-    bprof = bot if bot is not None else march_section(
-        strip, xB, tp, _P_bot(prob), prob.max_stages, efficiency=E, dP=dP,
-        P_lim=P)
-    return (rect, strip), (tprof, None, bprof), xD, xB, D, B
-
-
-def solve_omega(prob, tp, R, omega, EF=None, split0=None):
-    """Solve for the free distillate splits that make the sections meet at omega.
-
-    omega is the junction location on the rectifying profile -- the feed-tray
-    position, counted in stages from the distillate. Holding it fixed leaves
-
-        C-2 free splits  +  the remaining arc lengths
-
-    against C-1 junction equations per junction, which is square for a two-section
-    column at any C, and square for a three-section (extractive) column at C=3.
-    Above that an exact double junction is over-determined and genuinely may not
-    exist; we solve in least squares and hand back `residual` so the caller can
-    say so instead of hiding it in a tolerance.
-
-    This is the answer to "which distillate composition lets the sections
-    intersect": there is a one-parameter family of them, indexed by omega, and
-    sweeping it (see `spectrum`) is the spectrum of feasible designs.
-
-    Returns dict(split, residual, omega, converged) or None when there is nothing
-    free to solve for (C == 2, or no interior curve to aim at).
-    """
-    free = free_split_indices(prob)
-    if not free:
-        return None
-    P = prob.pressure
-    C = prob.C
-    extractive = bool(prob.extractive and prob.x_E is not None and EF)
-
-    # unconstrained parameterisation: split = sigmoid(theta) keeps every free
-    # split strictly inside (0, 1) without the solver ever having to be clipped.
-    def to_split(theta):
-        return 1.0 / (1.0 + np.exp(-np.clip(theta, -40.0, 40.0)))
-
-    if split0 is None:
-        _, _, D0, _ = overall_balance(prob, EF if extractive else None)
-        base = overall_balance(prob, EF if extractive else None)[0]
-        split0 = np.array([max(base[k], 1e-6) for k in free])
-    s0 = np.clip(np.asarray(split0, float), 1e-9, 1 - 1e-9)
-    theta0 = np.log(s0 / (1.0 - s0))
-
-    n_t = 3 if extractive else 1        # free arc lengths besides omega
-
-    def unpack(u):
-        return to_split(u[:len(free)]), u[len(free):]
-
-    def junction(sec_above, prof_above, t_above, prof_below, t_below):
-        """Residual of (E): a x_above + b == K(x_below) x_below (connect.py)."""
-        xa = _at(prof_above, t_above)
-        xb = _at(prof_below, t_below)
-        try:
-            y_below, _ = tp.bubble(xb, P)
-        except (ValueError, FloatingPointError):
-            return np.ones(C)
-        return (sec_above.a * xa + sec_above.bvec) - y_below
-
-    def residual(u, mid=None, bot=None):
-        split, ts = unpack(u)
-        try:
-            chain, (tprof, mprof, bprof), *_ = _profiles_for(
-                prob, tp, R, EF, split, P, mid=mid, bot=bot)
-        except (ValueError, FloatingPointError):
-            return np.full(_n_res(), 1.0)
-        if extractive:
-            if mprof is None:
-                return np.full(_n_res(), 1.0)
-            rect, ext, _strip = chain
-            r1 = junction(rect, tprof, omega, mprof, ts[0])
-            r2 = junction(ext, mprof, ts[1], bprof, ts[2])
-            pen = (_range_penalty(mprof, ts[0]) + _range_penalty(mprof, ts[1])
-                   + _range_penalty(bprof, ts[2]))
-            order = max(0.0, ts[0] - ts[1])   # junctions must run top -> bottom
-            return np.concatenate([r1[:C - 1], r2[:C - 1], [pen, order]])
-        rect = chain[0]
-        r = junction(rect, tprof, omega, bprof, ts[0])[:C - 1]
-        return np.concatenate([r, [_range_penalty(bprof, ts[0])]])
-
-    def _n_res():
-        return (2 * (C - 1) + 2) if extractive else C
-
-    # Outer loop refreshes the interior curve; inner solve holds it fixed (see
-    # `_profiles_for`). Two passes are enough -- the curve is nearly independent
-    # of the free split -- and the final residual is always re-measured against a
-    # freshly computed curve, so nothing is accepted on a stale one.
-    best = None
-    theta = theta0
-    for _outer in range(2):
-        try:
-            _, (_t, _m, _b), *_ = _profiles_for(prob, tp, R, EF,
-                                                to_split(theta), P)
-        except (ValueError, FloatingPointError):
-            return None
-        if extractive and _m is None:
-            return None
-        span_m = max((_m["n"] - 1) if _m is not None else 1, 1)
-        span_b = max(_b["n"] - 1, 1)
-        # The junction system is multi-modal: with the interior curve tens of
-        # stages long, one start lands in whichever local minimum it is nearest
-        # and plateaus near 0.1 while an exact solution (1e-10) sits elsewhere on
-        # the same curve. Spread the arc-length starts and keep the best.
-        if extractive:
-            starts = [np.array([a * span_m, b * span_m, c * span_b])
-                      for a, b, c in ((0.02, 0.5, 0.1), (0.1, 0.9, 0.3),
-                                      (0.3, 0.7, 0.05))]
-        else:
-            starts = [np.array([f * span_b]) for f in (0.2, 0.6, 0.05)]
-        if best is not None:
-            starts.insert(0, best[1][len(free):])      # continue from incumbent
-
-        for t0 in starts:
-            u0 = np.concatenate([theta, t0])
-            try:
-                sol = least_squares(residual, u0, args=(_m, _b), xtol=1e-10,
-                                    ftol=1e-10, max_nfev=80)
-            except (ValueError, FloatingPointError):
-                continue
-            res = float(np.linalg.norm(residual(sol.x)))   # fresh curves
-            if best is None or res < best[0]:
-                best = (res, sol.x, bool(sol.success))
-            if res < 1e-8:
-                break
-        if best is None:
-            return None
-        if best[0] < 1e-8:
-            break
-        theta = best[1][:len(free)]
-
-    res, u, ok = best
-    split, ts = unpack(u)
-    return {"split": split, "arc": ts, "residual": res, "omega": float(omega),
-            "converged": ok and res < 1e-6, "free": free}
-
-
-def design_at_omega(prob, tp, R, omega, EF=None, split0=None):
-    """Solve for the free splits at this feed-tray position and build the column.
-
-    The design is assembled at the junction indices the solve produced, not by
-    re-running the tolerance-based search over them -- otherwise an exactly solved
-    junction can still be rejected by `connect`'s stage-width test. Returns
-    (design, solution) with `design["exact"]` recording whether the junction
-    equations actually closed.
-    """
-    sol = solve_omega(prob, tp, R, omega, EF=EF, split0=split0)
-    if sol is None:
-        return _size(prob, tp, R, EF=EF), None
-    extractive = bool(prob.extractive and prob.x_E is not None and EF)
-    P = prob.pressure
-    forced = None
-    if sol["converged"]:
-        arc = sol["arc"]
-        try:
-            _, (tprof, mprof, bprof), *_ = _profiles_for(prob, tp, R, EF,
-                                                         sol["split"], P)
-        except (ValueError, FloatingPointError):
-            tprof = mprof = bprof = None
-        if extractive and mprof is not None:
-            i_lo, i_hi = int(np.floor(arc[0])), int(np.floor(arc[1]))
-            if 0 <= i_lo <= i_hi < mprof["n"]:
-                forced = (mprof, int(np.floor(omega)), i_lo, i_hi,
-                          int(np.floor(arc[2])))
-        elif not extractive:
-            forced = (int(np.floor(omega)), int(np.floor(arc[0])))
-    d = _size(prob, tp, R, EF=EF, split=sol["split"], forced=forced)
-    d["omega"] = float(omega)
-    d["split"] = sol["split"]
-    d["junction_residual"] = sol["residual"]
-    d["exact"] = bool(sol["converged"] and forced is not None)
-    return d, sol
-
-
-def spectrum(prob, tp, R, omega_grid, EF=None):
-    """Sweep the feed-tray position: N_total and the solved x_D at each omega.
-
-    This is the spectrum of designs. Fixing the two key recoveries leaves C-2 free
-    distillate splits, and requiring the sections to meet is C-1 equations per
-    junction -- one short of determining everything, so feasible designs come as a
-    ONE-PARAMETER FAMILY indexed by where the feed tray sits. For each omega there
-    is a unique distillate composition that makes the sections intersect; N_total
-    against omega has an interior minimum at the best feed location.
-
-    Each omega is warm-started from the previous solution, so the sweep is one
-    continuation rather than N cold solves. Returns a list of dicts ordered by
-    omega.
-    """
-    rows = []
-    split0 = None
-    for w in np.atleast_1d(omega_grid):
-        d, sol = design_at_omega(prob, tp, R, float(w), EF=EF, split0=split0)
-        if sol is None:
-            continue
-        split0 = sol["split"]              # continuation
-        rows.append({"omega": float(w), "split": sol["split"],
-                     "residual": sol["residual"], "exact": d["exact"],
-                     "feasible": d["feasible"], "N_total": d["N_total"],
-                     "feed_stages": d["feed_stages"], "xD": d["xD"],
-                     "xB": d["xB"], "findings": d["findings"],
-                     "free_indices": list(sol["free"])})
-    return rows
 
 
 def r_min(prob, tp, R_hi=30.0, S=None, EF=None, tol=1e-3):

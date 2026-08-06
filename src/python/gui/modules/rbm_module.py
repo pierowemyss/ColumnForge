@@ -1193,7 +1193,7 @@ def _demo():
     from gui.state.window_state import WindowState
     from PySide6.QtWidgets import QApplication
 
-    app = QApplication.instance() or QApplication(sys.argv[:1])
+    QApplication.instance() or QApplication(sys.argv[:1])
     ws = WindowState()
     ws.load_from_dict(persistence.load_colx("docs/examples/c2-c4.colx"))
     w = RBMModuleWidget(window_state=ws)

@@ -129,7 +129,7 @@ free coordinates against `C-1` equations, so the system is over-determined and a
 exact crossing generically does not exist — the quaternary reference case sits at
 8.4e-3 and the `C = 6` one at 0.035, at every reflux. The missing degrees of
 freedom are the non-key distillate splits (`problem.free_split_indices`), held at
-a trace-floor guess; `driver.solve_omega`, which is meant to solve them, does not
+a trace-floor guess; `splits.solve_free_splits`, which is meant to solve them, does not
 converge at `C >= 4`. Until that is replaced those junctions are accepted within
 one stage and flagged `approximate`, and **callers must not read that flag as a
 crossing**. (This is also why the RBM module exists: bodies are up to

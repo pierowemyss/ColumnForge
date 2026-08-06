@@ -24,7 +24,7 @@ correctly reported infeasible. Halving the efficiency doubles the stage count an
 gives the rectifying march the resolution it needs -- the upper junction then
 closes at an exact crossing -- so this is where the arm geometry can be pinned
 without a tolerance argument underneath it. Fixing the ideal-stage case means
-solving x_D,entrainer against the junction (`driver.solve_omega`); it is a free
+solving x_D,entrainer against the junction (`splits.solve_free_splits`); it is a free
 split, not a specification, and it is still pinned at the
 `Problem.entrainer_trace` seed.
 

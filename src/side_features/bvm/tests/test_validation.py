@@ -217,7 +217,7 @@ def test_extractive_chain_and_feasible_band():
     would give the extractive column its maximum reflux -- see
     `docs/adr/0004-extractive-anchoring-and-the-r-max-gap.md`. It is also the same
     shape as ipa/water/EG: a saddle-launched arm has to stand in for a profile the
-    free distillate splits were never solved for, see `driver.solve_omega`."""
+    free distillate splits were never solved for, see `splits.solve_free_splits`."""
     from core.thermodynamics import nrtl_gamma_fn
     from side_features.bvm.sections import extractive_chain
     from side_features.bvm.problem import overall_balance
@@ -324,12 +324,12 @@ def test_warm_start_beats_cold_start():
 
 
 def test_solved_split_beats_the_trace_floor_as_a_warm_start():
-    """Solving the free distillate split (design_at_omega) rather than leaving it
+    """Solving the free distillate split (design_at_feed) rather than leaving it
     at the 1e-4 trace floor produces a measurably better handoff.
 
     This is the independent check that the free split is a real design variable
     and not bookkeeping: at R=4 on BTX the floor gives a max profile error of
-    0.096 against the converged MESH column while the omega-solved design at the
+    0.096 against the converged MESH column while the split-solved design at the
     same reflux gives 0.076.
 
     The margin used to be 2x, against a 1e-4 floor. Dropping the default floor to
@@ -338,7 +338,7 @@ def test_solved_split_beats_the_trace_floor_as_a_warm_start():
     ratio moves with an arbitrary constant is precisely why the split is solved
     rather than seeded; the assertion below only has to show solving still wins."""
     from core.column_solvers import solve_bubble_point
-    from side_features.bvm.driver import design_at_omega
+    from side_features.bvm.splits import design_at_feed
     tp = ColumnForgeThermo(BTX)
     prob = btx_problem()
     comps = ["benzene", "toluene", "xylene"]
@@ -353,7 +353,7 @@ def test_solved_split_beats_the_trace_floor_as_a_warm_start():
         return float(np.abs(np.asarray(init["x0"]) - np.asarray(sol["x"])).max())
 
     floor_gap = handoff_gap(size_column(prob, tp, R=4.0))
-    solved, sol = design_at_omega(prob, tp, 4.0, 7.0)
+    solved, sol = design_at_feed(prob, tp, 4.0, 7.0)
     assert solved["feasible"] and solved["exact"], solved["findings"]
     assert sol["residual"] < 1e-6, sol["residual"]
     assert handoff_gap(solved) < 0.85 * floor_gap, (handoff_gap(solved), floor_gap)

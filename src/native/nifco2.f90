@@ -7,6 +7,40 @@
 ! \  Fortran subroutines for computing coefficients for non-ideal mixtures |
 !  ------------------------------------------------------------------------
 
+
+subroutine antoine_psat(n, coeffs, Tcel, Psat)
+   implicit none
+
+   integer, intent(in) :: n
+   real(8), intent(in) :: Tcel, coeffs(n,3)
+   real(8) :: a(n), b(n), c(n)
+   real(8), intent(out) :: Psat(n)
+   
+   a = coeffs(:,1)
+   b = coeffs(:,2)
+   c = coeffs(:,3)
+
+   Psat = 10.00d0 ** (a + b / (Tcel+C))
+
+end subroutine
+
+subroutine PLXANT_psat(n, c, Tcel, Psat)
+   implicit none
+
+   integer, intent(in) :: n
+   real(8), intent(in) :: Tcel
+   real(8), intent(in), dimension(0:n,0:7) :: c
+   real(8) :: Tk, lnP(n)
+   real(8), intent(out) :: Psat(n)
+
+   Tk = Tcel + 273.15d0
+
+   lnP = (c(:, 0) + c(:, 1) / (c(:, 2) + Tk) + c(:, 3) * Tk + c(:, 4) * log(Tk) + c(:, 5) * Tk ** c(:, 6))
+
+   Psat = exp(lnP)
+
+end subroutine
+
 ! HYSYS-modified NRTL | INPUT:  liquid mole fractions  |  OUTPUT: activity coefficients
 ! (Vectorized)        |         temperature (Celsius)  |
 !                     |         binary coefficients    |

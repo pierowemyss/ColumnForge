@@ -11,8 +11,10 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import PySide6.QtWidgets  # noqa: F401,E402  bind Qt to PySide6 before matplotlib
+import PySide6.QtWidgets as _qt  # noqa: E402  bind Qt to PySide6 before matplotlib
 import matplotlib  # noqa: E402
+
+assert _qt  # the import is the point; pyflakes (CI's linter) ignores noqa
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 

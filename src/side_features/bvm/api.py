@@ -2,10 +2,10 @@
 
 Entry points over the difference-point-chain core:
 
-    size_column(problem, provider, R, S, EF) -> design
-    spectrum(problem, provider, R, omegas)   -> [design row per feed position]
-    feasibility_map(problem, provider, grid) -> map
-    to_solver(design)                        -> init_state
+    size_column(problem, provider, R, S, EF)   -> design
+    spectrum(problem, provider, R, feed_locs)  -> [design row per feed position]
+    feasibility_map(problem, provider, grid)   -> map
+    to_solver(design)                          -> init_state
 
 `design` carries the feasibility verdict (classified on failure), stages per
 section, feed/draw locations, R_min / min-E/F, and the full top->bottom profiles.
@@ -15,28 +15,44 @@ section, feed/draw locations, R_min / min-E/F, and the full top->bottom profiles
 `spectrum` is the design family: two key recoveries leave C-2 free distillate
 splits, and requiring the sections to meet is one equation short of pinning
 them, so feasible designs form a one-parameter family indexed by the feed-tray
-position omega. Sweeping omega gives N_total against feed location, and the
+position `feed_loc`. Sweeping it gives N_total against feed location, and the
 unique distillate composition that closes the junctions at each one.
 """
 
 import numpy as np
 
 from .driver import (size_column as _size, feasibility_map as _fmap,
-                    r_min as _rmin, ef_min as _efmin, spectrum as _spectrum,
-                    design_at_omega as _at_omega)
+                    r_min as _rmin, ef_min as _efmin)
+from .splits import (design_at_feed as _at_feed, design_solved as _solved,
+                     spectrum as _spectrum)
 from .handoff import to_solver
 
 
 def size_column(prob, provider, R, S=None, EF=None, with_limits=True,
-                omega=None):
+                feed_loc=None, solve_splits=False):
     """Size the column at (R, S, EF); attach R_min (and min E/F) when asked.
 
-    With `omega` the free distillate splits are SOLVED for that feed-tray
-    position instead of being left at their trace-floor starting guess, and the
-    design reports `exact` / `junction_residual`.
+    The C-2 free non-key distillate splits are seeded, not solved, by default --
+    `problem.overall_balance`'s trace floor plus `driver._size`'s ladder. That is
+    the cheap path and the one every sweep and every `r_min` bisection takes.
+
+    Two ways to do better, both costing a marched-profile least squares:
+
+    `feed_loc`      solve the splits so the sections meet at THAT feed-tray
+                    position -- one member of the design family.
+    `solve_splits`  let the geometry pick the feed position (size, read the
+                    junction, solve there, re-size). One corrector step.
+
+    Either way the design reports `exact` and `junction_residual`, so a solve
+    that did not converge is visible instead of silent. Worth knowing before
+    choosing: on c2-c4 the seeded and solved splits give r_min 0.1364 and 0.1271
+    against Underwood's 0.1296, and the seed alone can move it by 21x --
+    `splits` and `tests/test_free_split_sets_rmin.py` carry the measurements.
     """
-    if omega is not None:
-        design, _ = _at_omega(prob, provider, R, float(omega), EF=EF)
+    if feed_loc is not None:
+        design, _ = _at_feed(prob, provider, R, float(feed_loc), EF=EF)
+    elif solve_splits:
+        design = _solved(prob, provider, R, S=S, EF=EF)
     else:
         design = _size(prob, provider, R, S=S, EF=EF)
     if with_limits:
@@ -46,9 +62,9 @@ def size_column(prob, provider, R, S=None, EF=None, with_limits=True,
     return design
 
 
-def spectrum(prob, provider, R, omega_grid, EF=None):
+def spectrum(prob, provider, R, feed_locs, EF=None):
     """The one-parameter family of designs indexed by feed-tray position."""
-    return _spectrum(prob, provider, R, omega_grid, EF=EF)
+    return _spectrum(prob, provider, R, feed_locs, EF=EF)
 
 
 def feasibility_map(prob, provider, R_grid, S_grid=None, EF_grid=None, **kw):

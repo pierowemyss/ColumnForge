@@ -103,7 +103,7 @@ class Problem:
     balance_residual: float = 0.0     # E13: unclosed |f - (D xD + B xB)|/F, explicit path
     trace_floor: float = 1e-4         # starting-guess floor on every product split
     entrainer_trace: float = 1e-6     # ...and a smaller one for the entrainer
-    # Both are SEEDS for the free splits, not answers -- `driver.solve_omega`
+    # Both are SEEDS for the free splits, not answers -- `splits.solve_free_splits`
     # solves them against the junction condition. They still need sane values,
     # because a seed that overshoots sends the march somewhere the solver cannot
     # come back from, and the right value is component-specific: a heavy entrainer
@@ -139,7 +139,7 @@ def free_split_indices(prob):
     non-key distillate compositions are determined by *requiring the section
     profiles to intersect*, not by a rule of thumb. `overall_balance` defaults
     them to a light/heavy heuristic with a trace floor, which is only a starting
-    guess; `driver.solve_omega` solves for them.
+    guess; `splits.solve_free_splits` solves for them.
 
     The ENTRAINER is among them, and has to be. It enters below the rectifying
     section so its distillate content is *small*, but pinning it at exactly zero
@@ -151,7 +151,7 @@ def free_split_indices(prob):
     stage, but that is an argument for stopping the march at the junction
     (`march_section(stop_sec=...)`), not for deleting the degree of freedom:
     x_D,entrainer is determined by the junction condition like every other free
-    split, and `driver.solve_omega` solves for it.
+    split, and `splits.solve_free_splits` solves for it.
     """
     return [i for i in range(prob.C) if i not in (prob.lk, prob.hk)]
 
@@ -219,7 +219,7 @@ def overall_balance(prob, EF=None, split=None):
     # That floor is only the STARTING GUESS for the free splits -- its value is
     # not physical, and the design IS sensitive to it, which is exactly why it
     # must not be the final answer. `split` carries the solved values (in
-    # `free_split_indices` order); see `driver.solve_omega`.
+    # `free_split_indices` order); see `splits.solve_free_splits`.
     eps = float(prob.trace_floor)
     frac = np.clip(frac, eps, 1.0 - eps)
 

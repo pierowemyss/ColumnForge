@@ -343,9 +343,18 @@ def _finish_profile(si, x, T, L, V, B, extra=None, efficiency=1.0):
     return prof
 
 
+#: Iterations an Aitken jump gets to beat the residual it jumped from before the
+#: bubble-point loop rewinds it. The step size right after a jump says nothing
+#: about whether the jump was good, so judging it immediately reverts the good
+#: ones (BTX: 38 -> 351 iterations when this was 0). Swept over the four
+#: validation columns: 5 is too short for the depropanizer's r ~ 0.99994 tail
+#: (16600x step, needs room to settle), and everything from 15 up is flat.
+_AITKEN_GRACE = 15
+
+
 def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                        feed_stage=None, R=None, D=None, P=None,
-                       max_iter=500, tol=1e-6, gamma_fn=None, efficiency=1.0,
+                       max_iter=6000, tol=1e-6, gamma_fn=None, efficiency=1.0,
                        cancel=None, report=None, x0=None, T0=None):
     """Bubble-point (Wang-Henke) column solve.
 
@@ -359,6 +368,27 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     x0/T0: optional (N,C)/(N,) warm-start profiles (e.g. a BVM design,
     stage 0 = top); when shape-compatible they replace the flat feed guess so a
     good initial column converges in fewer iterations.
+
+    Read `converged`, not `found`, to decide whether a result is usable: `found`
+    only reports that the run was not cancelled, so it is True for a profile that
+    burned the whole budget. `message` says which happened.
+
+    Convergence ceiling: direct substitution, accelerated by a guarded Aitken
+    extrapolation (see the loop). Measured on the validation columns — BTX 38
+    iterations, depropanizer 140, ethanol/water 227, and a 50/50 methanol/water
+    column at R=2.5 needing ~5000 because both keys are pinned against zero in
+    both products. The default budget covers all four; a column that still runs
+    out is telling you something about the column.
+
+    WHAT `residual` DOES NOT MEAN. It is the last temperature STEP, not the
+    distance to the answer. For a geometric tail of ratio r those differ by
+    r/(1-r), and near a pinch r runs to 0.9999+ — so a run reporting 1e-6 can
+    still sit ~1e-2 degC from its own fixed point. Measured by solving the
+    depropanizer through two exactly-equivalent vapour-pressure encodings: the
+    profiles separate by 9.3e-3 degC at tol=1e-6, 7.4e-4 at 1e-8 and 1.1e-6 at
+    1e-10. Products are far stiffer than the mid-column profile (max |dxD| = 2e-9
+    across all three), so trust x_D/x_B well past where you trust T[j]. Tighten
+    tol if you need the profile itself to that precision.
     """
     si = _coerce_input(si_or_zF, F, antoine, comps, N=N, feed_stage=feed_stage,
                        R=R, D=D, P=P, gamma_fn=gamma_fn)
@@ -381,6 +411,11 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     aborted = False
     dT = float("inf")
     dx_prev = r_prev = None
+    jumped_from = None      # (dT, x, T) saved just before an Aitken jump
+    cooldown = 0            # iterations to wait before extrapolating again
+    backoff = 10            # doubles each time a jump has to be undone
+    relax = 1.0             # substitution damping; halved on genuine oscillation
+    n_osc = 0
     for iterations in range(1, max_iter + 1):
         if cancel is not None and cancel():
             aborted = True
@@ -395,6 +430,14 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         xnew = _stage_compositions(Keff, L, V, si.feed + Rz,
                                    si.liquid_draw + Wp,
                                    si.vapor_draw, B, si.D, Nst, n)
+        if relax < 1.0:
+            # Oscillation damping engaged (see below): blend toward the previous
+            # iterate instead of replacing it outright. Same cure Inside-Out
+            # already carries; full-replacement Wang-Henke is a limit cycle on a
+            # 50/50 methanol/water column at R = 2.5.
+            xnew = x + relax * (xnew - x)
+            np.clip(xnew, 1e-12, 1.0, out=xnew)
+            xnew /= xnew.sum(axis=1, keepdims=True)
         # T[j] is last iteration's stage temperature — a secant seed a fraction of
         # a degree from the answer, instead of brentq re-bracketing 600 degrees.
         Tnew = np.array([bubble_T(xnew[j], si.pressure[j], si.antoine,
@@ -408,6 +451,27 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         if dT < tol:
             break
 
+        # An extrapolation that overshot is NOT "safe, just wasted": on
+        # methanol/water it kicked direct substitution out of a 6e-3 basin into a
+        # limit cycle that GREW (4e-3 at iteration 500 -> 1.8e-2 at 3900, never
+        # converging). So judge each jump by where it actually leaves the
+        # iteration and undo the ones that made things worse.
+        #
+        # dT is a STEP size, not an error, so it is legitimately large for a few
+        # iterations right after a jump lands: give the jump _GRACE iterations to
+        # beat the residual it started from before calling it a failure.
+        if jumped_from is not None:
+            prev_dT, prev_x, prev_T, grace = jumped_from
+            if dT < prev_dT:                       # jump paid off
+                jumped_from, backoff = None, 10
+            elif grace > 0:
+                jumped_from = (prev_dT, prev_x, prev_T, grace - 1)
+            else:                                  # overshot — rewind
+                x, T, dT = prev_x, prev_T, prev_dT
+                jumped_from, dx_prev, r_prev = None, None, None
+                cooldown, backoff = backoff, min(backoff * 2, 400)
+                continue
+
         # Direct substitution crawls: for a column near a pinch the change per
         # iteration decays geometrically with a near-constant ratio r (~0.99 for
         # a plain BTX split), so the last decade of residual costs hundreds of
@@ -418,8 +482,26 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         if dx_prev is not None:
             den = float(np.sum(dx_prev * dx_prev))
             r = float(np.sum(dx * dx_prev)) / den if den > 0.0 else 0.0
-            if (0.5 < r < 0.999 and r_prev is not None
+            # Sign-flipping steps two iterations running = genuine oscillation,
+            # not a slow march: halve the relaxation (Inside-Out's rule, and the
+            # only thing that makes methanol/water converge here at all).
+            n_osc = n_osc + 1 if r < -0.3 else 0
+            if n_osc >= 2 and relax > 0.1:
+                relax *= 0.5
+                n_osc = 0
+                dx_prev = r_prev = None       # the damped map has its own ratio
+                continue
+        if cooldown > 0:
+            cooldown -= 1
+        elif dx_prev is not None:
+            # The window used to stop at r < 0.999, which locked out the tails
+            # that need this most: a 4-atm depropanizer stalls at dT ~ 4e-4 with
+            # r ~ 0.99994 (residual still 3.9e-4 after 3000 iterations), and
+            # 0.999 rejected it every time. The steadiness test below is what
+            # makes a near-1 ratio safe to trust, not the upper bound.
+            if (0.5 < r < 1.0 and r_prev is not None
                     and abs(r - r_prev) < 0.01):
+                jumped_from = (dT, x.copy(), T.copy(), _AITKEN_GRACE)
                 x = x + dx * (r / (1.0 - r))
                 np.clip(x, 1e-12, 1.0, out=x)      # extrapolation must stay a
                 x /= x.sum(axis=1, keepdims=True)  # composition
@@ -427,9 +509,8 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                                        gamma_fn=si.gamma_fn, phi_fn=si.phi_fn,
                                        T_guess=T[j])
                               for j in range(Nst)])
-                # The jump invalidates the ratio estimate; re-learn it. (A bad
-                # extrapolation is safe, just wasted: the loop still only exits
-                # on a real dT < tol, so it re-converges from wherever it lands.)
+                # The jump invalidates the ratio estimate; re-learn it. The
+                # revert guard above decides whether the jump is kept at all.
                 dx_prev = r_prev = None
                 continue
             r_prev = r
@@ -447,13 +528,17 @@ def solve_bubble_point(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     return _finish_profile(si, x, T, L, V, B, efficiency=efficiency, extra={
         "iterations": iterations, "residual": float(dT),
         "found": not aborted,
+        # `found` only means "the user did not press Cancel" — it is True for a
+        # run that burned its whole budget. `converged` is the one to gate a
+        # result on; every validation test does.
+        "converged": bool(dT < tol and not aborted),
         "message": message,
     })
 
 
 def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                      feed_stage=None, R=None, D=None, P=None,
-                     max_iter=50, tol=1e-6, gamma_fn=None, efficiency=1.0,
+                     max_iter=150, tol=1e-6, gamma_fn=None, efficiency=1.0,
                      cancel=None, flows_hook=None, report=None,
                      x0=None, T0=None):
     """Inside-Out column solve.
@@ -477,6 +562,17 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
     Returns the bubble-point profile schema plus iterations and approximate
     condenser/reboiler duties (latent-heat basis, kJ/h — flows are kmol/h and
     latent heats J/mol; multiply by thermodynamics.KJH_TO_KW for kW).
+
+    Read `converged`, not `found` — see solve_bubble_point.
+
+    KNOWN LIMIT. The outer loop does not close the 4-atm depropanizer: its
+    residual decays sublinearly (1.1e-2 at 50 passes, 5.0e-3 at 200, 3.1e-3 at
+    400) and never reaches outer_tol. It is not the jump cap — sweeping that
+    30 -> 1000 moves nothing. The products are unaffected (x_D matches
+    solve_bubble_point, which closes the same column in 140 iterations), so what
+    fails is the temperature residual, not the answer. Use the bubble-point
+    solver as the cross-check on wide-boiling hydrocarbon columns until the outer
+    map gets a real Newton step.
     """
     si = _coerce_input(si_or_zF, F, antoine, comps, N=N, feed_stage=feed_stage,
                        R=R, D=D, P=P, gamma_fn=gamma_fn)
@@ -603,6 +699,10 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
                 # ~1 stage per ~10 passes (a near-neutral mode; measured on a
                 # 45-stage azeotropic column, which spent 200 of 280 passes just
                 # marching the MEOH front into place) -> take 10 steps at once.
+                # ponytail: 30 is not tuned, it is just "well inside the linear
+                # regime". Sweeping it 30 -> 1000 changes nothing on any of the
+                # four validation columns, so it is not the knob that limits the
+                # one case this loop still cannot close (see the docstring).
                 factor = min(r / (1.0 - r), 30.0) if r < 0.999 else 10.0
                 jump = (x, T, dT)
                 x = x + dx * factor
@@ -641,6 +741,7 @@ def solve_inside_out(si_or_zF, F=None, antoine=None, comps=None, *, N=None,
         "iterations": outer, "residual": float(dT),
         "condenser_duty": Qc, "reboiler_duty": Qr,
         "found": not aborted,
+        "converged": bool(dT < outer_tol and not aborted),   # see solve_bubble_point
         "message": message,
     })
 

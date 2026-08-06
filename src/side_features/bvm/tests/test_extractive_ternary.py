@@ -25,7 +25,8 @@ is the crossing of the two liquid profiles, at x_f, which lies on both.
 import numpy as np
 import pytest
 
-from side_features.bvm.driver import size_column, spectrum
+from side_features.bvm.driver import size_column
+from side_features.bvm.splits import spectrum
 from side_features.bvm.problem import build_problem
 from side_features.bvm.sections import (extractive_chain, feasible,
                                         feasible_margin, region_center)
@@ -175,17 +176,17 @@ def test_the_entrainer_split_is_the_design_freedom(case):
     overhead glycol. That geometric ladder IS the family.
     """
     from side_features.bvm.problem import free_split_indices
-    from side_features.bvm.driver import design_at_omega
+    from side_features.bvm.splits import design_at_feed
     prob, tp, _ = case
     ent = 2
     assert free_split_indices(prob) == [ent], free_split_indices(prob)
 
     seen = []
-    for omega in (1, 2, 3):
-        d, sol = design_at_omega(prob, tp, 3.0, float(omega), EF=1.0)
-        assert sol is not None and sol["converged"], (omega, sol)
-        assert sol["residual"] < 1e-6, (omega, sol["residual"])
-        assert d["feasible"] and d["exact"], (omega, d["findings"])
+    for feed_loc in (1, 2, 3):
+        d, sol = design_at_feed(prob, tp, 3.0, float(feed_loc), EF=1.0)
+        assert sol is not None and sol["converged"], (feed_loc, sol)
+        assert sol["residual"] < 1e-6, (feed_loc, sol["residual"])
+        assert d["feasible"] and d["exact"], (feed_loc, d["findings"])
         seen.append((d["feed_stages"][0], d["xD"][ent]))
 
     # deeper entrainer feed <=> fewer stages to strip the glycol <=> more of it

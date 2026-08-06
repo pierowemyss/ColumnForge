@@ -155,6 +155,22 @@ def travel_end(X, tol=CROSS_TOL):
     step smaller than that cannot make a crossing this test could tell apart. A
     fraction-of-the-largest-step rule was tried first and is wrong: 2% of the max
     step cut c2-c4's genuine crossing off the stripping profile.
+
+    CROSS_TOL is also the right depth, not merely a safe one, and the temptation
+    to trim harder should be resisted. Measured where the junctions of the shipped
+    cases actually land relative to this cut:
+
+        multicomp eff=1.0    stripping  n=46  junction@44.00  step 9.5e-7  trim@44
+        multicomp eff=0.75   stripping  n=61  junction@59.00  step 9.5e-7  trim@59
+        extract   eff=0.5    extractive n=87  junction@ 3.81  step 8.2e-4  trim@86
+
+    Every one of them sits at or just inside the cut, on a step of ~1e-6 -- i.e.
+    right at the pinch onset, which is exactly where a boundary-value junction
+    belongs. And the first of those is the design that returns N=46 against the
+    file's Inside-Out reference of 45 real stages. Any stricter rule deletes that
+    junction and with it the case's agreement with MESH. The 104-stage answer this
+    module was suspected of producing through a pinch tail came from the
+    efficiency-scaled tolerance in `connect`, not from an untrimmed crawl.
     """
     if len(X) < 3:
         return len(X) - 1
@@ -209,16 +225,18 @@ def connect(profA, profB, secA, tp, P, eps_stage=1e-2, efficiency=1.0,
     exist: the quaternary reference case sits at 8.4e-3 and the C=6 one at 0.035,
     at every reflux. The missing degrees of freedom are the non-key distillate
     splits (`problem.free_split_indices`), held at a trace-floor guess -- and
-    `driver.solve_omega`, which is supposed to solve them, does not converge at
+    `splits.solve_free_splits`, which is supposed to solve them, does not converge at
     C >= 4 (it drives the splits to the simplex corners: residual 0.139 at C=4,
     0.064 at C=6 after 204 s). So until that is replaced, C >= 4 is accepted
     within one stage of travel and flagged `approximate`; the flag is the
     honest part, and callers must not read it as a crossing.
 
-    `efficiency` no longer widens the tolerance at C <= 3 -- it used to divide it,
+    `efficiency` no longer widens the tolerance anywhere -- it used to divide it,
     doubling the accepted gap at E=0.5, which is half of why R_min came out low.
-    It still does on the near-miss paths, where there is no crossing to tighten
-    onto.
+    It was removed from the C <= 3 crossing branch first and from the near-miss
+    branches second; the argument is the same in both places and is written out
+    at the `tol` assignment below. The parameter is kept in the signature because
+    callers pass it positionally, and ignored.
 
     `step_cap` bounds that local step so the near-miss allowance cannot swallow
     half the simplex, and it now applies to the INTERIOR path as well as C >= 4.
@@ -261,17 +279,26 @@ def connect(profA, profB, secA, tp, P, eps_stage=1e-2, efficiency=1.0,
         tol = CROSS_TOL
     else:
         # one stage of travel, from the larger side: at the junction one profile
-        # is often pinched and its own step has collapsed to ~0. Divided by E
-        # because a marched step is already efficiency-scaled and the bridge is an
-        # EQUILIBRIUM stage's reach. This is the shipped rule, moved into liquid
-        # space -- deliberately unchanged, because neither of these paths has a
-        # crossing to tighten onto.
+        # is often pinched and its own step has collapsed to ~0.
+        #
+        # NOT divided by the efficiency. `loc` is the step the marched profile
+        # actually takes, so it is already the resolution at which this test can
+        # tell a crossing from a miss; dividing by E inflates it to the reach of
+        # an EQUILIBRIUM stage, which is larger than any step either profile
+        # takes, and the allowance then exceeds the discretisation it is supposed
+        # to describe. Efficiency belongs on the stage COUNT, after the geometry
+        # has closed -- it is not a licence to accept a wider gap. Concretely, on
+        # the C=6 reference column at R=1 this rule at E=0.5 doubled the
+        # tolerance to 0.065 and admitted a 0.054 miss as a 104-stage column;
+        # the same geometry at E=1.0 was correctly below_min_reflux. A verdict
+        # that flips on tray efficiency alone, with the profiles unchanged, is
+        # reporting the tolerance and not the column.
         locA = float(np.linalg.norm(XA[bi + 1] - XA[bi]))
         locB = float(np.linalg.norm(XB[bj + 1] - XB[bj]))
         loc = max(locA, locB)
         if step_cap is not None:
             loc = min(loc, float(step_cap))
-        tol = max(float(eps_stage), loc / max(float(efficiency), 1e-6))
+        tol = max(float(eps_stage), loc)
     in_simplex = bool(mid.min() > -1e-6 and mid.max() < 1.0 + 1e-6)
     connected = bool(dmin <= tol and in_simplex)
 

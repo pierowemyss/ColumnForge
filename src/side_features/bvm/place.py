@@ -6,7 +6,7 @@ meet. The product is capped by the purest the profile ever gets; if the target
 is never reached, no stage works (raise R / add a side unit).
 
 The feed-stage crossover that used to live here is gone: `connect` locates the
-junction from the feed-stage vapour balance and `driver.solve_omega` solves for
+junction from the feed-stage vapour balance and `splits.solve_free_splits` solves for
 it exactly, so a second, geometry-only placement rule had no caller left.
 """
 

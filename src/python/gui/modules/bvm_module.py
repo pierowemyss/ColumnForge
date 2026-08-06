@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox,
                                QSpinBox, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from core.data_structures import SolverMode
 from side_features.bvm import api as _mbvm_api
 from side_features.bvm import driver as _driver
 from side_features.bvm import reactive as _rx
@@ -857,8 +858,14 @@ class BVMModuleWidget(QWidget):
             return
         try:
             init = _mbvm_api.to_solver(self._design)
-            from core.column_solvers import solve_bubble_point
+            from core.column_solvers import solve_bubble_point, solve_inside_out
             from core.solver_input import build_solver_input
+            # warm-start whichever rigorous solver the case is set to. A BVM-mode
+            # case has no rigorous method of its own -> Bubble-Point.
+            io = (self.window_state is not None
+                  and self.window_state.solver_mode == SolverMode.HYSIM)
+            rigorous = solve_inside_out if io else solve_bubble_point
+            method = "Inside-Out" if io else "Bubble-Point"
             # rebuild the problem BVM was sized from, so the handoff carries the
             # same feeds, entrainer and pressure profile rather than a
             # reconstruction: a single pooled feed with D computed from F+E is a
@@ -880,10 +887,9 @@ class BVMModuleWidget(QWidget):
             self.status.setText(f"Handoff failed: {exc}")
             return
         self._run_bg(
-            "Warm start -> rigorous solver",
-            lambda: solve_bubble_point(si, efficiency=eff, x0=init["x0"],
-                                       T0=init["T0"]),
-            self._on_send_done)
+            f"Warm start -> {method}",
+            lambda: rigorous(si, efficiency=eff, x0=init["x0"], T0=init["T0"]),
+            lambda sol: self._on_send_done(sol, method))
 
     @staticmethod
     def _handoff_feeds(prob, init):
@@ -906,11 +912,13 @@ class BVMModuleWidget(QWidget):
         return [(stages[min(i, len(stages) - 1)], F, z, q)
                 for i, (F, z, q) in enumerate(mains)]
 
-    def _on_send_done(self, sol):
-        ok = sol.get("found")
+    def _on_send_done(self, sol, method="rigorous solver"):
+        # `found` only means the run was not cancelled — reporting it as
+        # "converged" told the user a budget-exhausted profile had closed.
+        ok = sol.get("converged")
         self._push_results(sol)              # G5: feed the Results tab, not just a label
         self.status.setText(
-            f"Warm start -> rigorous solver: {'converged' if ok else 'did not converge'} "
+            f"Warm start -> {method}: {'converged' if ok else 'did not converge'} "
             f"in {sol['iterations']} iterations ({sol['message']}). "
             "Profile sent to the Results tab.")
 
@@ -1314,8 +1322,13 @@ def _demo():
     w._on_map(); wait(w)
     assert w._map is not None and np.count_nonzero(w._map["feasible"]) > 0
 
+    # the handoff warm-starts whichever rigorous solver the case is set to
+    ws.solver_mode = SolverMode.BUBBLE_POINT
     w._on_send(); wait(w)
-    assert "rigorous solver" in w.status.text(), w.status.text()
+    assert "Bubble-Point" in w.status.text(), w.status.text()
+    ws.solver_mode = SolverMode.HYSIM
+    w._on_send(); wait(w)
+    assert "Inside-Out" in w.status.text(), w.status.text()
 
     # second FEED stream -> auto-detected entrainer, extractive prefilled from flows
     ws.add_stream(Stream(id="Entrainer", stream_type=StreamType.FEED, stage=2,

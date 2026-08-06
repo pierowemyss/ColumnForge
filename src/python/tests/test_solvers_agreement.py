@@ -33,7 +33,7 @@ def test_bubble_point_inside_out_agreement():
     si = _si()
     bp = solve_bubble_point(si)
     io = solve_inside_out(si)
-    assert bp["found"] and io["found"]
+    assert bp["converged"] and io["converged"]
     # same column, same thermo -> products agree closely
     assert np.allclose(bp["xD"], io["xD"], atol=2e-2), (bp["xD"], io["xD"])
     assert np.allclose(bp["xB"], io["xB"], atol=2e-2), (bp["xB"], io["xB"])
@@ -49,7 +49,7 @@ def test_solver_component_closure_multifeed_sidedraw():
     si = _si(feeds=[(14, 60.0, [0.6, 0.3, 0.1]), (6, 40.0, [0.1, 0.4, 0.5])],
              draws=[(10, 15.0, 0.0)], D=35.0)
     prof = solve_bubble_point(si)
-    assert prof["found"]
+    assert prof["converged"]
 
     F_in = 60.0 * np.array([0.6, 0.3, 0.1]) + 40.0 * np.array([0.1, 0.4, 0.5])
     D, B = prof["D"], prof["B"]
@@ -83,13 +83,13 @@ def test_stage_efficiency_degrades_split():
     si = _si()
     ideal = solve_bubble_point(si)
     eff = solve_bubble_point(si, efficiency=0.6)
-    assert eff["found"] and np.allclose(eff["x"].sum(axis=1), 1.0, atol=1e-8)
+    assert eff["converged"] and np.allclose(eff["x"].sum(axis=1), 1.0, atol=1e-8)
     # E=1 is a no-op; a lower Murphree efficiency must worsen the top purity
     assert np.allclose(solve_bubble_point(si, efficiency=1.0)["x"], ideal["x"],
                        atol=1e-12)
     assert eff["xD"][0] < ideal["xD"][0]
     io_eff = solve_inside_out(si, efficiency=0.6)
-    assert io_eff["found"] and io_eff["xD"][0] < solve_inside_out(si)["xD"][0]
+    assert io_eff["converged"] and io_eff["xD"][0] < solve_inside_out(si)["xD"][0]
 
 
 if __name__ == "__main__":

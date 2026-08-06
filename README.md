@@ -7,6 +7,8 @@ and synthesis tools such as Boundary Value Methods (BVM), Rectification Bodies
 (RBM), Residue Curve Mapping (RCM), and other features for designing difficult
 columns and sending to a rigorous simulation in one integrated workflow.
 
+This application is intended to be an educational tool for Chemical Engineers.
+
 ![ColumnForge solving a multicomponent column](docs/img/hero.png)
 
 ## Why this exists
@@ -469,13 +471,34 @@ The solver and state layers are Qt-free and self-checking. 278 tests, headless:
 QT_QPA_PLATFORM=offscreen python -m pytest src/python/tests/ src/side_features/bvm/tests/ src/side_features/rbm/tests/
 ```
 
-`src/python/tests/validation/` is the acceptance gate for solver changes: BTX
-ideal, a depropanizer through the PLXANT path, ethanol/water against its known
-NRTL azeotrope, methanol/water against Perry's VLE data. RBM's own tests cross-check
-its R<sub>min</sub> against Underwood on a near-ideal split and its pinch
-structure against the published extractive case. Every `core` module is
-also runnable standalone as a self-check
+**[docs/validation.md](docs/validation.md) is the short answer to "is any of this
+right?"** — 33 reference-vs-computed comparisons, 16 against published data
+(NIST boiling points, DDBST/Gmehling azeotropes, literature VLE) and 17 between
+ColumnForge's own methods, which should agree and are checked to say so. It is
+generated, never hand-written, so it cannot drift from the code:
+
+```bash
+python tools/validation_report.py     # runs the suite, rewrites the table
+```
+
+`src/python/tests/validation/` is the acceptance gate for solver changes:
+
+| file                      | what it pins                                                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test_validation_v1.py`   | the six named cases — BTX ideal, depropanizer through PLXANT, ethanol/water vs its azeotrope, methanol/water vs Perry's, cross-model NRTL/Wilson/UNIQUAC, SRK |
+| `test_literature_data.py` | published boiling points and azeotropes, each with a URL that resolves                                                                                        |
+| `test_limits.py`          | the identities any MESH solver must obey — Fenske at total reflux, Underwood's R<sub>min</sub> wall, and monotonicity in both stages and reflux               |
+| `test_agreement.py`       | BVM's sized column re-solved in MESH, FUG's design built rigorously, R<sub>min</sub> three independent ways                                                   |
+
+RBM's own tests cross-check its R<sub>min</sub> against Underwood on a near-ideal
+split and its pinch structure against the published extractive case. Every `core`
+module is also runnable standalone as a self-check
 (`PYTHONPATH=src/python python -m core.column_solvers`).
+
+> [!IMPORTANT]
+> Gate solver results on `converged`, not `found` — `found` only reports that
+> the run was not cancelled. See `solve_bubble_point`'s docstring for what
+> `residual` does and does not bound.
 
 > [!NOTE]
 > Much of the suite is AI-generated and hasn't had a line-by-line review pass

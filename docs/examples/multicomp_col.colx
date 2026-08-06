@@ -5,7 +5,7 @@
     {
       "name": "ColumnForge Configuration",
       "state": {
-        "num_stages": 45,
+        "num_stages": 24,
         "pressure": 1.0,
         "pressure_drop": 0.0,
         "stage_efficiency": 0.5,
@@ -69,7 +69,7 @@
           "Feed": {
             "id": "Feed",
             "stream_type": "Feed",
-            "stage": 4,
+            "stage": 11,
             "temperature": 342.207,
             "flow": 1728.0,
             "composition": {
@@ -88,8 +88,15 @@
             "stream_type": "Distillate",
             "stage": 18,
             "temperature": null,
-            "flow": null,
-            "composition": {},
+            "flow": 1521.848195136,
+            "composition": {
+              "MEOH": 0.8963332902452197,
+              "DMC": 0.10366659620863261,
+              "2ME": 1.1354614773766665e-07,
+              "EG": 0.0,
+              "EC": 0.0,
+              "AN": 0.0
+            },
             "user_specified": false,
             "phase": "liquid"
           },
@@ -98,8 +105,15 @@
             "stream_type": "Bottoms",
             "stage": 0,
             "temperature": null,
-            "flow": null,
-            "composition": {},
+            "flow": 206.1518048640001,
+            "composition": {
+              "MEOH": 0.0,
+              "DMC": 7.652923538717581e-06,
+              "2ME": 0.08382088728934307,
+              "EG": 0.80720321662854,
+              "EC": 0.10896824315857757,
+              "AN": 0.0
+            },
             "user_specified": false,
             "phase": "liquid"
           }
@@ -725,22 +739,43 @@
           }
         },
         "modules": {},
-        "bvm_params": {},
+        "bvm_params": {
+          "rec_lk": 0.99999,
+          "rec_hk": 1e-05,
+          "r_spin": 2.0,
+          "q_spin": 1.0,
+          "eff_spin": 0.5,
+          "rmax_spin": 10.0,
+          "map_pts": 16,
+          "ef_spin": 0.5,
+          "max_stages": 200,
+          "eps_stage": 0.01,
+          "ef_min_spin": 0.2,
+          "ef_max_spin": 2.0,
+          "ef_pts_spin": 8,
+          "lk": "DMC",
+          "hk": "2ME",
+          "extractive": false,
+          "entrainer_eb": false,
+          "entrainer": "AN",
+          "anchor_method": "saddle"
+        },
+        "rbm_params": {},
+        "reactions": {},
         "specs": [
           {
             "kind": "Reflux ratio",
-            "value": 1.0,
+            "value": 2.0,
             "unit_ref": "REFLUX_RATIO",
             "component": -1
           },
           {
-            "kind": "Distillate rate",
-            "value": 1521.8,
-            "unit_ref": "DISTILLATE_RATE",
+            "kind": "Light-key recovery",
+            "value": 0.99999,
+            "unit_ref": "LK_RECOVERY",
             "component": -1
           }
         ],
-        "energy_balance": false,
         "light_key_index": 1,
         "heavy_key_index": 2,
         "display_units": {

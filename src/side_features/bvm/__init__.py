@@ -31,6 +31,9 @@ Module map (blueprint Sec 18):
                    marched -- the hull is an over-approximation, so it cannot
                    choose, only rule out
     reactive       reaction-invariant transformed-composition marching
+    splits         the C-2 free non-key distillate splits: Fenske seed, pinch-
+                   equation solve, marched-profile solve, and `spectrum` -- the
+                   one-parameter family of designs indexed by feed position
     diagnostics    classified infeasibility
     driver         sweep (R,S,E/F), build the design map, size a column
     handoff        package stage counts + profiles for the rigorous solver
@@ -43,6 +46,7 @@ Module map (blueprint Sec 18):
 
 __all__ = [
     "problem", "thermo_adapter", "sections", "march", "anchor", "connect",
-    "place", "pinch", "bodies", "reactive", "diagnostics", "driver", "handoff",
+    "place", "pinch", "bodies", "reactive", "splits", "diagnostics", "driver",
+    "handoff",
     "api",
 ]
