@@ -46,12 +46,12 @@ module directly, replicate those paths:
 
 > [!IMPORTANT]
 > **The RCM (residue-curve map) module needs a compiled library** (it calls a Fortran/C solver through `ctypes`).
-> Prebuilt libraries ship in `src/side_features/freeRCM/lib/`, but they were built on a machine that may or may
-> not share the same architecture as yours. The module will not load and show "Compile RCM_solv.c to use this
-> module." instead of a plot. I highly recommend compiling it yourself:
+> Prebuilt libraries ship in `src/side_features/rcm/lib/`, but they were built on a machine that may or may
+> not share the same architecture as yours. The module still opens either way — it reports the reason in its
+> status line and disables Auto-generate — but it cannot draw a map. I highly recommend compiling it yourself:
 >
 > ```bash
-> cd src/side_features/freeRCM/build && make    # needs gfortran + a C compiler
+> make -C src/side_features/rcm               # needs gfortran + a C compiler
 > ```
 >
 > Additional requirements for this include GSL and MINPACK. The rest of the app is unaffected either way.
@@ -83,7 +83,7 @@ flowchart TD
     subgraph SIDE["side_features/ &nbsp; Modules tab"]
         BVM["<b>bvm/</b><br/>difference-point-chain<br/>boundary-value sizing"]
         RBM["<b>rbm/</b><br/>rectification bodies<br/>feasibility, R_min / R_max"]
-        RCM["<b>freeRCM/</b><br/>residue-curve maps"]
+        RCM["<b>core/rcm.py</b><br/>residue-curve maps<br/>(compiled: RCM_solv.c &rarr; nifco2.f90)"]
         RBM -->|"operating point"| BVM
     end
 
@@ -345,7 +345,7 @@ column defined.
 
 | module              | what it does                                                                                                      |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **RCM**             | residue-curve maps (the preserved predecessor app, `side_features/freeRCM/`)                                      |
+| **RCM**             | residue-curve maps for a ternary: auto-generated or one curve per click, plus the azeotrope/node/saddle table     |
 | **BVM**             | size at one `R`, sweep a design map, send a warm start to the rigorous solver, or size a **reactive** column      |
 | **RBM**             | pinches + rectification bodies at one point, `r_min`/`r_max`, or the whole feasible **(E/F, r)** operating region |
 | **Shortcut (FUG)**  | Fenske/Underwood/Gilliland/Kirkbride report + stages-vs-reflux curve                                              |
@@ -457,8 +457,8 @@ columnForge/
 │   ├── side_features/
 │   │   ├── bvm/           # difference-point-chain BVM solver (own README + tests/)
 │   │   ├── rbm/           # rectification-body feasibility / R_min (own tests/)
-│   │   └── freeRCM/       # preserved predecessor (residue curve maps)
-│   └── native/            # Fortran sources (nifco2.f90), not bound to the app yet
+│   │   └── rcm/           # RCM_solv.c, the compiled residue-curve integrator
+│   └── native/            # Fortran thermo kernels (nifco2.f90) + Makefile
 ├── docs/                  # thermodynamics.md (equation reference), img/
 └── launch.py              # GUI entry point
 ```
@@ -501,7 +501,7 @@ module is also runnable standalone as a self-check
 > `residual` does and does not bound.
 
 > [!NOTE]
-> Much of the suite is AI-generated and hasn't had a line-by-line review pass
+> Much of the testing suite is AI-generated and hasn't had a line-by-line review pass
 > yet; it is committed because a green gate you can run beats a private one you
 > can't. CI (`.github/workflows/ci.yml`) runs it on 3.11 and 3.12 with pyflakes.
 

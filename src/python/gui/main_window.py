@@ -765,9 +765,11 @@ class MainWindow(QMainWindow):
             QLabel, QPushButton, QVBoxLayout,
         )
         from core.units import DUTY, FLOW, TEMPERATURE, DisplayUnits
+        from core import nifco
         from .app_settings import (
-            beta_enabled, default_units, log_dir, log_level, set_beta_enabled,
-            set_default_units, set_log_level,
+            apply_nifco, beta_enabled, default_units, log_dir, log_level,
+            nifco_enabled, set_beta_enabled, set_default_units, set_log_level,
+            set_nifco_enabled,
         )
 
         dlg = QDialog(self)
@@ -803,6 +805,19 @@ class MainWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(log_dir())))
         form.addRow("", open_log)
 
+        have_nifco = nifco.available()
+        nifco_check = QCheckBox("Enable NIFCO thermo", dlg)
+        nifco_check.setChecked(nifco_enabled() and have_nifco)
+        nifco_check.setEnabled(have_nifco)
+        nifco_check.setToolTip(
+            "Evaluate NRTL / Wilson / UNIQUAC / UNIFAC / Margules in the "
+            "compiled Fortran kernel (src/native/nifco2.f90) instead of NumPy. "
+            "Identical equations and identical numbers — speed only."
+            if have_nifco else
+            "Not consumed yet: no compiled library in src/native/lib. Build one "
+            "with `make -C src/native`, then re-open Preferences.")
+        form.addRow("", nifco_check)
+
         beta_check = QCheckBox("Enable beta features", dlg)
         beta_check.setChecked(beta_enabled())
         beta_check.setToolTip(
@@ -830,6 +845,8 @@ class MainWindow(QMainWindow):
         set_default_units(DisplayUnits(
             **{f: c.currentText() for f, c in unit_combos.items()}))
         set_log_level(log_combo.currentText())
+        set_nifco_enabled(nifco_check.isChecked())
+        apply_nifco()
         was = beta_enabled()
         set_beta_enabled(beta_check.isChecked())
         if beta_check.isChecked() != was:
@@ -939,6 +956,8 @@ def _install_excepthook():
 def main():
     _setup_logging()
     _install_excepthook()
+    from .app_settings import apply_nifco
+    apply_nifco()                        # compiled thermo, if built and asked for
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     from .theme import load_theme

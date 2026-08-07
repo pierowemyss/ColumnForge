@@ -26,6 +26,13 @@ APP = "ColumnForge"
 _BETA_KEY = "features/beta"
 
 
+#: Route the activity-coefficient models through the compiled Fortran kernel
+#: (`src/native/nifco2.f90`, built by `make -C src/native`). Same equations as
+#: the NumPy paths and bit-identical results, so this changes speed, not
+#: answers — and it stays off unless the library was built *and* asked for.
+_NIFCO_KEY = "features/nifco"
+
+
 def _settings() -> QSettings:
     return QSettings(ORG, APP)
 
@@ -38,6 +45,25 @@ def set_beta_enabled(on: bool) -> None:
     s = _settings()
     s.setValue(_BETA_KEY, bool(on))
     s.sync()
+
+
+def nifco_enabled() -> bool:
+    return _settings().value(_NIFCO_KEY, False, type=bool)
+
+
+def set_nifco_enabled(on: bool) -> None:
+    s = _settings()
+    s.setValue(_NIFCO_KEY, bool(on))
+    s.sync()
+
+
+def apply_nifco() -> bool:
+    """Push the stored preference into `core.thermodynamics`; returns what
+    actually took effect (False if no library is installed). Called at startup
+    and whenever Preferences is accepted — the setting lives here, the switch
+    lives in `core`, and this is the one place the two are joined."""
+    from core.thermodynamics import set_native
+    return set_native(nifco_enabled())
 
 
 #: Display units a *new* case starts with. A `.colx` carries its own choice and
@@ -103,6 +129,14 @@ def _demo():
         assert log_level() == "INFO"
         set_log_level("DEBUG")
         assert log_level() == "DEBUG"
+
+        assert nifco_enabled() is False                   # never on by default
+        set_nifco_enabled(True)
+        assert nifco_enabled() is True
+        from core.nifco import available
+        assert apply_nifco() is available()                # off if never built
+        set_nifco_enabled(False)
+        assert apply_nifco() is False
         _settings().clear()
         print("app_settings self-check OK")
     finally:

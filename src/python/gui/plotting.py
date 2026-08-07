@@ -15,17 +15,14 @@ Conventions shared by the Results tab and the BVM module:
 """
 
 import numpy as np
-from matplotlib.backends.backend_qt import (
-    NavigationToolbar2QT as NavigationToolbar,
-)
-
 from core.thermodynamics import bubble_T, k_values
+from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
 
 # Section / series colours (rectifying teal + stripping orange match the .m).
 RECT_C = "#218fa7"
 STRIP_C = "#fb8500"
 EXTRACT_C = "#2f9e44"
-INTER_C = "#9c36b5"     # intermediate (multifeed) section
+INTER_C = "#9c36b5"  # intermediate (multifeed) section
 TEMP_C = "#fb8500"
 DATA_C = "#219ebc"
 BOUNDARY_C = "#d00000"
@@ -41,6 +38,7 @@ class CompactNavigationToolbar(NavigationToolbar):
 # --------------------------------------------------------------------------
 # Ternary (right-triangle) axes — RCMplot conventions
 # --------------------------------------------------------------------------
+
 
 def active_comps(x, comps, tol=1e-6):
     """Indices + names of components present anywhere in a per-stage profile. A
@@ -58,15 +56,22 @@ def ternary_axes(ax, comps):
     All three edges + vertex labels, axes off; x-axis carries comps[0],
     y-axis comps[1], the origin is pure comps[2] (freeRCM's RCMplot layout).
     """
-    ax.plot([0, 1], [1, 0], "k-", linewidth=1.5)
-    ax.plot([0, 0], [0, 1], "k-", linewidth=1.5)
-    ax.plot([0, 1], [0, 0], "k-", linewidth=1.5)
+    ax.plot([0, 1], [1, 0], color="#9C9C9C", linestyle="-", linewidth=1.5)
+    ax.plot([0, 0], [0, 1], color="#9C9C9C", linestyle="-", linewidth=1.5)
+    ax.plot([0, 1], [0, 0], color="#9C9C9C", linestyle="-", linewidth=1.5)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
-    ax.annotate(comps[2], [0, 0], [-0.025, -0.04], fontsize=7)
-    ax.annotate(comps[1], [0, 1], [-0.02, 1.02], fontsize=7)
-    ax.annotate(comps[0], [1, 0], [1.0, -0.02], fontsize=7)
+    ax.annotate(comps[2], [0, 0], [-0.025, -0.04], fontsize=11)
+    ax.annotate(comps[1], [0, 1], [-0.02, 1.02], fontsize=11)
+    ax.annotate(comps[0], [1, 0], [1.0, -0.04], fontsize=11)
+    ax.annotate(
+        "Generated using ColumnForge by Piero Wemyss",
+        [0.55, 1.0],
+        [0.55, 1.0],
+        fontsize=7,
+        color="tab:gray",
+    )
     return ax
 
 
@@ -87,6 +92,7 @@ def composition_from_click(event):
 # --------------------------------------------------------------------------
 # Residue curves: dx/dxi = x - y(x)
 # --------------------------------------------------------------------------
+
 
 def equilibrium_y(x, P, antoine, gamma_fn=None):
     """Bubble-point vapour in equilibrium with liquid x. Returns (y, T)."""
@@ -119,12 +125,13 @@ def mccabe_thiele_steps(xeq, yeq, xD, xB, zF, R, q, max_steps=200):
     the stage-step polyline and the stage count (steps to reach xB, the last is
     the reboiler). Pure geometry — the equilibrium curve is the only thermo in.
     """
-    xeq = np.asarray(xeq, float); yeq = np.asarray(yeq, float)
+    xeq = np.asarray(xeq, float)
+    yeq = np.asarray(yeq, float)
 
     def y_eq(x):
         return float(np.interp(x, xeq, yeq))
 
-    def x_eq(y):                       # invert (yeq ascending in x)
+    def x_eq(y):  # invert (yeq ascending in x)
         return float(np.interp(y, yeq, xeq))
 
     def y_rect(x):
@@ -134,12 +141,12 @@ def mccabe_thiele_steps(xeq, yeq, xD, xB, zF, R, q, max_steps=200):
     if abs(q - 1.0) < 1e-9:
         xf = zF
     else:
-        m = q / (q - 1.0)              # q-line slope
+        m = q / (q - 1.0)  # q-line slope
         # y_rect(xf) = m*xf - zF/(q-1)  ->  solve for xf
         xf = (xD / (R + 1.0) + zF / (q - 1.0)) / (m - R / (R + 1.0))
     yf = y_rect(xf)
 
-    def y_strip(x):                    # (xB,xB) -> (xf,yf)
+    def y_strip(x):  # (xB,xB) -> (xf,yf)
         return xB + (yf - xB) / (xf - xB) * (x - xB)
 
     def y_op(x):
@@ -150,15 +157,18 @@ def mccabe_thiele_steps(xeq, yeq, xD, xB, zF, R, q, max_steps=200):
     y = xD
     n = 0
     for _ in range(max_steps):
-        xn = x_eq(y)                   # horizontal to equilibrium curve
-        steps.append((xn, y)); n += 1
+        xn = x_eq(y)  # horizontal to equilibrium curve
+        steps.append((xn, y))
+        n += 1
         if xn <= xB:
             break
-        yn = y_op(xn)                  # vertical to the operating line
+        yn = y_op(xn)  # vertical to the operating line
         steps.append((xn, yn))
         y = yn
     return {
-        "xf": xf, "yf": yf, "n_stages": n,
+        "xf": xf,
+        "yf": yf,
+        "n_stages": n,
         "rect": [(xf, yf), (xD, xD)],
         "strip": [(xB, xB), (xf, yf)],
         "qline": [(zF, zF), (xf, yf)],
@@ -191,7 +201,7 @@ def _march_residue(x0, P, antoine, gamma_fn, n_it, h, sign):
         if np.max(np.abs(step)) < 1e-7 or x.max() > 1.0 - 1e-4:
             xs.append(x.copy())
             Ts.append(Ts[-1])
-            break                       # pinned to a node
+            break  # pinned to a node
     return xs, Ts
 
 
@@ -211,8 +221,7 @@ def residue_curve(x0, P, antoine, gamma_fn=None, n_it=100, h=0.1):
     return np.array(xs), np.array(Ts)
 
 
-def residue_curve_map(P, antoine, comps, gamma_fn=None, lines=8,
-                      n_it=100, h=0.1):
+def residue_curve_map(P, antoine, comps, gamma_fn=None, lines=8, n_it=100, h=0.1):
     """Auto-seeded residue curves across the ternary simplex.
 
     Returns a list of (n, 3) composition arrays. Seeds sit on an interior
@@ -232,26 +241,48 @@ def residue_curve_map(P, antoine, comps, gamma_fn=None, lines=8,
     return curves
 
 
+def _arrow_index(x, min_step=1e-3):
+    """Index k whose step x[k-1] -> x[k] is long enough to draw, nearest the
+    middle of the curve.
+
+    The middle is both where the seed sits and where consecutive points are
+    furthest apart. freeRCM's RCMplot put the arrow at a flat 90% along, which
+    is inside the node the curve is converging into: there the Euler steps have
+    collapsed to nothing and the arrow renders as an invisible zero-length
+    annotation on every well-behaved system.
+    """
+    mid = max(1, len(x) // 2)
+    for off in range(len(x)):
+        for k in (mid - off, mid + off):
+            if 1 <= k < len(x) and np.max(np.abs(x[k] - x[k - 1])) >= min_step:
+                return k
+    return mid
+
+
 def plot_residue_curves(ax, curves, linewidth=1.2, color=None, arrows=True):
-    """Draw residue curves in the ternary projection with direction arrows
-    (freeRCM's RCMplot arrow style: placed ~90% along each curve, pointing
-    from heavy toward the direction of increasing xi... i.e. along the march)."""
+    """Draw residue curves in the ternary projection with direction arrows,
+    pointing along the march (light -> heavy, increasing xi)."""
     for x in curves:
         if len(x) < 2:
             continue
-        line, = ax.plot(x[:, 0], x[:, 1], linewidth=linewidth, color=color)
+        (line,) = ax.plot(x[:, 0], x[:, 1], linewidth=linewidth, color=color)
         c = line.get_color()
         if arrows and len(x) > 3:
-            k = max(1, int(len(x) * 0.9) - 1)
-            ax.annotate("", xy=(x[k, 0], x[k, 1]),
-                        xytext=(x[k - 1, 0], x[k - 1, 1]),
-                        arrowprops=dict(facecolor=c, edgecolor=c,
-                                        shrink=0.5, headwidth=3, headlength=3))
+            k = _arrow_index(x)
+            ax.annotate(
+                "",
+                xy=(x[k, 0], x[k, 1]),
+                xytext=(x[k - 1, 0], x[k - 1, 1]),
+                arrowprops=dict(
+                    facecolor=c, edgecolor=c, shrink=0.0, headwidth=5, headlength=5
+                ),
+            )
 
 
 # --------------------------------------------------------------------------
 # Singular points (pure components + azeotropes) and boundaries
 # --------------------------------------------------------------------------
+
 
 def _residue_jacobian(x, P, antoine, gamma_fn, eps=1e-6):
     """Numeric Jacobian of f(x) = x - y(x) in the reduced (C-1) space."""
@@ -260,9 +291,9 @@ def _residue_jacobian(x, P, antoine, gamma_fn, eps=1e-6):
     def f(u):
         v = np.append(u, 1.0 - u.sum())
         y, _ = equilibrium_y(np.clip(v, 1e-12, 1.0), P, antoine, gamma_fn)
-        return (v - y)[:C - 1]
+        return (v - y)[: C - 1]
 
-    u0 = np.asarray(x[:C - 1], float)
+    u0 = np.asarray(x[: C - 1], float)
     J = np.zeros((C - 1, C - 1))
     f0 = f(u0)
     for j in range(C - 1):
@@ -296,7 +327,7 @@ def singular_points(P, antoine, comps, gamma_fn=None, grid=5):
                 return
         found.append(x)
 
-    for i in range(C):                       # pure components are always fixed
+    for i in range(C):  # pure components are always fixed
         e = np.zeros(C)
         e[i] = 1.0
         record(e)
@@ -304,13 +335,13 @@ def singular_points(P, antoine, comps, gamma_fn=None, grid=5):
     def resid(u):
         v = np.append(u, 1.0 - u.sum())
         if v.min() < -0.2 or v.max() > 1.2:
-            return u * 1e3                   # push fsolve back toward the simplex
+            return u * 1e3  # push fsolve back toward the simplex
         y, _ = equilibrium_y(np.clip(v, 1e-12, 1.0), P, antoine, gamma_fn)
-        return (v - y)[:C - 1]
+        return (v - y)[: C - 1]
 
     for seed in _simplex_grid(C, grid):
         try:
-            u, info, ier, _ = fsolve(resid, seed[:C - 1], full_output=True)
+            u, info, ier, _ = fsolve(resid, seed[: C - 1], full_output=True)
         except Exception:
             continue
         if ier == 1:
@@ -321,14 +352,17 @@ def singular_points(P, antoine, comps, gamma_fn=None, grid=5):
         try:
             _, T = equilibrium_y(np.clip(x, 1e-12, 1.0), P, antoine, gamma_fn)
             eig = np.linalg.eigvals(
-                _residue_jacobian(np.clip(x, 1e-9, 1.0), P, antoine, gamma_fn))
+                _residue_jacobian(np.clip(x, 1e-9, 1.0), P, antoine, gamma_fn)
+            )
             re = np.real(eig)
-            kind = ("saddle" if (re.max() > 1e-9 and re.min() < -1e-9)
-                    else "stable node" if re.max() < 0 else "unstable node")
+            kind = (
+                "saddle"
+                if (re.max() > 1e-9 and re.min() < -1e-9)
+                else "stable node" if re.max() < 0 else "unstable node"
+            )
         except Exception:
             T, kind = float("nan"), "unknown"
-        out.append({"x": x, "T": T, "kind": kind,
-                    "pure": bool(np.max(x) > 1.0 - 1e-4)})
+        out.append({"x": x, "T": T, "kind": kind, "pure": bool(np.max(x) > 1.0 - 1e-4)})
     return out
 
 
@@ -351,8 +385,9 @@ def _simplex_grid(C, grid):
     return seeds
 
 
-def distillation_boundaries(P, antoine, comps, gamma_fn=None, points=None,
-                            n_it=200, h=0.05):
+def distillation_boundaries(
+    P, antoine, comps, gamma_fn=None, points=None, n_it=200, h=0.05
+):
     """Separatrices: residue curves launched from interior saddle azeotropes.
 
     Ideal systems have no interior saddles, hence no boundaries — an empty
@@ -363,18 +398,17 @@ def distillation_boundaries(P, antoine, comps, gamma_fn=None, points=None,
     curves = []
     for p in points:
         if p["kind"] != "saddle" or p["pure"]:
-            continue                # edge saddles: the boundary is the edge
+            continue  # edge saddles: the boundary is the edge
         J = _residue_jacobian(np.clip(p["x"], 1e-9, 1.0), P, antoine, gamma_fn)
         vals, vecs = np.linalg.eig(J)
         for k in np.argsort(np.real(vals)):
             v2 = np.real(vecs[:, k])
-            v = np.append(v2, -v2.sum())    # back to full simplex tangent
+            v = np.append(v2, -v2.sum())  # back to full simplex tangent
             v /= max(1e-12, np.linalg.norm(v))
             for sgn in (+1.0, -1.0):
                 x0 = np.clip(p["x"] + 1e-3 * sgn * v, 1e-9, 1.0)
                 x0 /= x0.sum()
-                x, _ = residue_curve(x0, P, antoine, gamma_fn,
-                                     n_it=n_it, h=h)
+                x, _ = residue_curve(x0, P, antoine, gamma_fn, n_it=n_it, h=h)
                 if len(x) > 2:
                     curves.append(x)
     return curves
@@ -384,12 +418,15 @@ def distillation_boundaries(P, antoine, comps, gamma_fn=None, points=None,
 # Self-check (Qt-free math paths): `PYTHONPATH=src/python python -m gui.plotting`
 # --------------------------------------------------------------------------
 
+
 def _demo():
-    antoine = np.array([                     # benzene / toluene / p-xylene, mmHg/degC
-        [6.90565, 1211.033, 220.79],
-        [6.95464, 1344.8,   219.48],
-        [6.99052, 1453.43,  215.31],
-    ])
+    antoine = np.array(
+        [  # benzene / toluene / p-xylene, mmHg/degC
+            [6.90565, 1211.033, 220.79],
+            [6.95464, 1344.8, 219.48],
+            [6.99052, 1453.43, 215.31],
+        ]
+    )
     comps = ["benzene", "toluene", "xylene"]
     P = 760.0
 
@@ -411,9 +448,9 @@ def _demo():
     azeo = [p for p in pts if not p["pure"]]
     assert len(pure) == 3 and not azeo, "ideal BTX has exactly 3 pure nodes"
     kinds = {tuple(np.round(p["x"])): p["kind"] for p in pure}
-    assert kinds[(1.0, 0.0, 0.0)] == "unstable node"   # benzene: light
-    assert kinds[(0.0, 0.0, 1.0)] == "stable node"     # xylene: heavy
-    assert kinds[(0.0, 1.0, 0.0)] == "saddle"          # toluene: middle
+    assert kinds[(1.0, 0.0, 0.0)] == "unstable node"  # benzene: light
+    assert kinds[(0.0, 0.0, 1.0)] == "stable node"  # xylene: heavy
+    assert kinds[(0.0, 1.0, 0.0)] == "saddle"  # toluene: middle
 
     assert distillation_boundaries(P, antoine, comps, points=pts) == []
 
@@ -423,8 +460,8 @@ def _demo():
     ye = a * xe / (1 + (a - 1) * xe)
     mt = mccabe_thiele_steps(xe, ye, xD=0.95, xB=0.05, zF=0.5, R=2.0, q=1.0)
     assert 0.05 < mt["xf"] < 0.95, mt["xf"]
-    assert 4 < mt["n_stages"] < 15, mt["n_stages"]      # sane stage count
-    assert mt["steps"][-1][0] <= 0.05 + 1e-9            # stepped down to xB
+    assert 4 < mt["n_stages"] < 15, mt["n_stages"]  # sane stage count
+    assert mt["steps"][-1][0] <= 0.05 + 1e-9  # stepped down to xB
     # q=1 puts the feed pinch on the vertical x=zF
     assert abs(mt["xf"] - 0.5) < 1e-9
     # more reflux -> fewer stages
@@ -433,13 +470,16 @@ def _demo():
 
     class _Ev:
         xdata, ydata = 0.2, 0.3
+
     x0 = composition_from_click(_Ev())
     assert np.allclose(x0, [0.2, 0.3, 0.5])
-    _Ev.xdata = 0.9                                    # outside the simplex
+    _Ev.xdata = 0.9  # outside the simplex
     assert composition_from_click(_Ev()) is None
 
-    print("plotting self-check OK "
-          f"(curve {len(x)} pts, {len(curves)} map lines, {len(pts)} nodes)")
+    print(
+        "plotting self-check OK "
+        f"(curve {len(x)} pts, {len(curves)} map lines, {len(pts)} nodes)"
+    )
 
 
 if __name__ == "__main__":

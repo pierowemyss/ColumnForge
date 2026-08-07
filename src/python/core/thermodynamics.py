@@ -287,6 +287,45 @@ def degC_to_K(T):
     return T + 273.15
 
 
+# --- optional compiled kernels (src/native/nifco2.f90, loaded by core/nifco.py)
+#
+# Off unless someone built the library *and* asked for it in Preferences. The
+# Fortran and NumPy paths are bit-identical on every model below, so this is a
+# speed switch and nothing else.
+_NATIVE = False
+
+
+def set_native(on):
+    """Route the activity-coefficient models through the compiled nifco library.
+
+    Returns what actually got set: asking for it with no library built leaves it
+    off rather than raising, because "not compiled" is the normal install.
+
+    ponytail: a module global, so a process-pool child (side_features/bvm's
+    `parallel.py`) starts back on the NumPy path — same numbers, and the pool
+    is where that parallel win already comes from. Call `set_native()` from a
+    pool initializer if the per-call kernel ever becomes the bottleneck there.
+    """
+    global _NATIVE
+    from . import nifco
+    _NATIVE = bool(on) and nifco.available()
+    return _NATIVE
+
+
+def native_enabled():
+    return _NATIVE
+
+
+def _native_lib(t_to_K=degC_to_K):
+    """The compiled module when it should be used for a closure carrying
+    `t_to_K`, else None. The Fortran kernels hard-code Tk = Tcel + 273.15, so a
+    closure built with any other temperature convention stays on NumPy."""
+    if not _NATIVE or t_to_K is not degC_to_K:
+        return None
+    from . import nifco
+    return nifco.load()
+
+
 class _NRTLGamma:
     """gamma_fn(x, T) for NRTL. A class, not a closure, so it is picklable."""
     __slots__ = ("tau_a", "tau_b", "alpha", "t_to_K")
@@ -298,6 +337,9 @@ class _NRTLGamma:
         self.t_to_K = t_to_K
 
     def __call__(self, x, T):
+        lib = _native_lib(self.t_to_K)
+        if lib is not None:
+            return lib.nrtl_gamma(x, T, self.tau_a, self.tau_b, self.alpha)
         return nrtl_gamma(x, self.tau_a + self.tau_b / self.t_to_K(T), self.alpha)
 
     def __getstate__(self):
@@ -317,6 +359,9 @@ class _WilsonGamma(_NRTLGamma):
         self.t_to_K = t_to_K
 
     def __call__(self, x, T):
+        lib = _native_lib(self.t_to_K)
+        if lib is not None:
+            return lib.wilson_gamma(x, T, self.a, self.b)
         return wilson_gamma(x, np.exp(self.a + self.b / self.t_to_K(T)))
 
     def __getstate__(self):
@@ -334,6 +379,9 @@ class _UNIQUACGamma(_NRTLGamma):
         self.t_to_K = t_to_K
 
     def __call__(self, x, T):
+        lib = _native_lib(self.t_to_K)
+        if lib is not None:
+            return lib.uniquac_gamma(x, T, self.r, self.q, self.a, self.b)
         return uniquac_gamma(x, self.r, self.q,
                              np.exp(self.a + self.b / self.t_to_K(T)))
 
@@ -349,6 +397,9 @@ class _MargulesGamma:
         self.A = np.asarray(A, float)
 
     def __call__(self, x, T):
+        lib = _native_lib()
+        if lib is not None:
+            return lib.margules_gamma(x, T, self.A)
         return margules_gamma(x, self.A)
 
     def __getstate__(self):
@@ -506,6 +557,9 @@ class _UNIFACGamma:
         self.t_to_K = t_to_K
 
     def __call__(self, x, T):
+        lib = _native_lib(self.t_to_K)
+        if lib is not None:
+            return lib.unifac_gamma(x, T, self.nu, self.R, self.Q, self.a_sub)
         return _unifac_gamma_sub(x, self.nu, self.R, self.Q, self.a_sub,
                                  self.t_to_K(T))
 

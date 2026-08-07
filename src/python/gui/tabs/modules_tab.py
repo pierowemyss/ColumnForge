@@ -1,10 +1,6 @@
-import sys
-import os
-
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QStackedLayout
 )
-from PySide6.QtCore import Qt
 
 
 class ModulesTab(QWidget):
@@ -14,16 +10,14 @@ class ModulesTab(QWidget):
         super().__init__(parent)
         
         self.window_state = None
-        self.rcm_window = None
-        self.rcm_placeholder = None
+        self.rcm_widget = None
         self.bvm_widget = None
         self.rbm_widget = None
         self.fug_widget = None
         self.txy_widget = None
         self.pure_widget = None
         self.phase_eq_widget = None
-        self.modules_loaded = False
-        
+
         self._setup_ui()
         self._connect_signals()
 
@@ -96,10 +90,11 @@ class ModulesTab(QWidget):
         the panel can't tell the state changed on its own).
         """
         self.window_state = window_state
-        for panel in (self.bvm_widget, self.rbm_widget):
+        for panel in (self.bvm_widget, self.rbm_widget, self.rcm_widget):
             if panel is not None:
                 panel._restored = False
-                panel._entrainer_prefilled = False
+                if hasattr(panel, "_entrainer_prefilled"):
+                    panel._entrainer_prefilled = False
         self._on_module_changed(self.module_combo.currentText())
 
     def _on_module_changed(self, module_name: str):
@@ -119,23 +114,6 @@ class ModulesTab(QWidget):
         launch = launchers.get(module_name)
         if launch:
             launch()
-
-    def _setup_paths(self):
-        """Lazy load paths only when needed."""
-        if self.modules_loaded:
-            return
-        
-        _current_dir = os.path.dirname(os.path.abspath(__file__))                  # .../src/python/gui/tabs
-        _src_python = os.path.dirname(os.path.dirname(_current_dir))               # .../src/python
-        _repo_root = os.path.dirname(os.path.dirname(_src_python))                 # repo root
-        _gui_path = os.path.join(_repo_root, 'src', 'side_features', 'freeRCM', 'src', 'python', 'gui')
-
-        if _gui_path not in sys.path:
-            sys.path.insert(0, _gui_path)
-        if _src_python not in sys.path:
-            sys.path.insert(0, _src_python)
-        
-        self.modules_loaded = True
 
     def refresh(self):
         """Refresh the module when tab is selected."""
@@ -209,72 +187,20 @@ class ModulesTab(QWidget):
         self.content_stack.setCurrentWidget(self.rbm_container)
 
     def _launch_rcm(self):
-        """Launch the RCM interface, or a build hint if its library is missing."""
-        self._setup_paths()
-        self.content_stack.setCurrentWidget(self.rcm_container)
+        """Launch the RCM module (built once, then reused).
 
-        if self.rcm_window:
-            self.rcm_window.deleteLater()
-            self.rcm_window = None
-
-        # RCM needs its compiled library (RCM_solver.so), which the repo ships
-        # prebuilt for x86_64 only — on other architectures the load fails. RCM
-        # is the *first* entry in the module combo, so it auto-launches when the
-        # tab is opened: an unguarded failure here takes down the whole app.
-        try:
-            err = self._rcm_library_error()
-            if err:
-                raise OSError(err)
-            import RCM_module_window
-            self.rcm_window = RCM_module_window.NewSimulationWindow(
-                window_state=self.window_state)
-        except Exception:
-            import logging
-            logging.getLogger(__name__).exception(
-                "RCM module unavailable; showing build hint")
-            self._show_rcm_unavailable()
-            return
-
-        if self.rcm_placeholder is not None:
-            self.rcm_placeholder.hide()
-        self.rcm_window.setParent(self.rcm_container)
-        self.rcm_window.setWindowFlags(Qt.WindowType(0))
-        self.rcm_container.layout().addWidget(self.rcm_window)
-        self.rcm_window.show()
-
-    def _rcm_library_error(self):
-        """Reason RCM's native library won't load, or None if it will.
-
-        freeRCM's solver.py only CDLLs when a map is actually computed, so
-        importing the module proves nothing: without this probe a bad library
-        surfaces as a traceback the first time the user hits Run. The repo
-        ships RCM_solver.so built for x86_64 only.
+        A missing RCM_solver.so is no longer a special case for this tab: the
+        panel builds either way and reports the reason in its own status label,
+        the way every other module reports a thermo it cannot assemble.
         """
-        import ctypes
-        _current_dir = os.path.dirname(os.path.abspath(__file__))
-        _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(_current_dir))))
-        lib_dir = os.path.join(_repo_root, 'src', 'side_features',
-                               'freeRCM', 'lib')
-        try:
-            # dependency order matters: minpack first, then the solver
-            ctypes.CDLL(os.path.join(lib_dir, 'libminpack.so'))
-            ctypes.CDLL(os.path.join(lib_dir, 'RCM_solver.so'))
-        except OSError as exc:
-            return str(exc)
-        return None
-
-    def _show_rcm_unavailable(self):
-        """Stand in for the RCM view so the rest of the tab stays usable."""
-        if self.rcm_placeholder is None:
-            self.rcm_placeholder = QLabel(
-                "Compile RCM_solv.c to use this module.\n\n"
-                "cd src/side_features/freeRCM/build && make",
-                self.rcm_container)
-            self.rcm_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.rcm_placeholder.setWordWrap(True)
-            self.rcm_container.layout().addWidget(self.rcm_placeholder)
-        self.rcm_placeholder.show()
+        from ..modules.rcm_module import RCMModuleWidget
+        if self.rcm_widget is None:
+            self.rcm_widget = RCMModuleWidget(window_state=self.window_state)
+            self.rcm_container.layout().addWidget(self.rcm_widget)
+        else:
+            self.rcm_widget.window_state = self.window_state
+            self.rcm_widget.reload_from_state()
+        self.content_stack.setCurrentWidget(self.rcm_container)
 
     def get_selected_module(self) -> str:
         """Get the currently selected module name."""

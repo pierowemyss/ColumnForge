@@ -538,6 +538,12 @@ class WindowState:
         # settings on every File->Save.
         self.rbm_params: dict = {}
 
+        # Same again for the RCM panel: which three components were picked (in
+        # click order — it sets the triangle's corners), the map pressure, and
+        # the solver/plot options. This is what replaced the predecessor
+        # module's pickled .rcm side-files.
+        self.rcm_params: dict = {}
+
         # One equilibrium reaction, edited on Initialization / Reactions:
         # {on, nu: {species: coefficient}, ref, keq_a, keq_b}. Shared state
         # because a reaction is chemistry, not a property of one sizing method --
@@ -594,6 +600,7 @@ class WindowState:
         self.thermodynamics_config = ThermodynamicsConfig()
         self.bvm_params = {}
         self.rbm_params = {}
+        self.rcm_params = {}
         self.reactions = {}
         self.results = {}
         self.flowsheet_result = None
@@ -721,7 +728,7 @@ class WindowState:
     # balance. Old .colx files still carry the stale key; it is ignored on load.
     _PERSIST = ("columns", "connections", "active_column_id", "default_method",
                 "species", "thermodynamics_config",
-                "bvm_params", "rbm_params", "reactions",
+                "bvm_params", "rbm_params", "rcm_params", "reactions",
                 "display_units", "solver_mode")
 
     @property
